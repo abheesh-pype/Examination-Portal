@@ -37,55 +37,18 @@ const navigationOptionIcons: Record<string, string> = {
   Settings: "⚙",
 };
 
-const assessments = [
-  {
-    title: "General Scholarship Examination",
-    subtitle: "Edu Expo 2025",
-    start: "21-Jun-25 11:00 AM",
-    end: "21-Jun-25 12:30 PM",
-    questions: "45",
-    marks: "45",
-    candidates: "0",
-  },
-  {
-    title: "Psychometric Test 2025",
-    subtitle: "Edu Expo 2025",
-    start: "20-Jun-25 02:15 PM",
-    end: "20-Jun-26 02:15 PM",
-    questions: "120",
-    marks: "120",
-    candidates: "0",
-  },
-  {
-    title: "CSR Scholarship Exam - Computer Science",
-    subtitle: "Edu Expo 2025",
-    start: "09-Jun-25 11:00 AM",
-    end: "09-Jun-25 12:00 PM",
-    questions: "50",
-    marks: "50",
-    candidates: "0",
-  },
-  {
-    title: "CSR Scholarship Exam - Humanities",
-    subtitle: "Edu Expo 2025",
-    start: "09-Jun-25 11:00 AM",
-    end: "09-Jun-25 12:00 PM",
-    questions: "50",
-    marks: "50",
-    candidates: "0",
-  },
-  {
-    title: "CSR Scholarship Exam - Commerce",
-    subtitle: "Edu Expo 2025",
-    start: "09-Jun-25 11:00 AM",
-    end: "09-Jun-25 12:00 PM",
-    questions: "50",
-    marks: "50",
-    candidates: "0",
-  },
-];
+type AssessmentCardData = {
+  id?: number;
+  title: string;
+  subtitle: string;
+  start: string;
+  end: string;
+  questions: string;
+  marks: string;
+  candidates: string;
+};
 
-function AssessmentCard({ assessment, currentRole }: { assessment: (typeof assessments)[number]; currentRole?: any }) {
+function AssessmentCard({ assessment, currentRole, onDeleted }: { assessment: AssessmentCardData; currentRole?: any; onDeleted?: (id: number) => void }) {
   const [showOptions, setShowOptions] = useState(false);
   const [openAssignment, setOpenAssignment] = useState<string | null>(null);
   const cardRef = useRef<HTMLElement>(null);
@@ -112,6 +75,19 @@ function AssessmentCard({ assessment, currentRole }: { assessment: (typeof asses
     { label: "Assign Invigilator", key: "invigilator" },
   ];
   const canEdit = hasRolePermission(currentRole, "Assessments", "edit");
+  const canDelete = hasRolePermission(currentRole, "Assessments", "delete");
+
+  const deleteAssessment = async () => {
+    if (!assessment.id || !window.confirm("Delete this assessment?")) return;
+
+    const response = await fetch("/api/assessments", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: assessment.id }),
+    });
+    if (!response.ok) return;
+    onDeleted?.(assessment.id);
+  };
 
   return (
     <article ref={cardRef} className={`assessment-card${showOptions ? " options-open" : ""}`}>
@@ -136,6 +112,7 @@ function AssessmentCard({ assessment, currentRole }: { assessment: (typeof asses
           <div className="assessment-options-menu" role="menu">
             <button type="button" role="menuitem">Preview</button>
             {canEdit && <button className="option-menu-item" type="button" role="menuitem">Edit</button>}
+            {canDelete && assessment.id && <button className="option-menu-item" type="button" role="menuitem" onClick={deleteAssessment}>Delete</button>}
             {assignmentOptions.map((item) => (
               <div className="assignment-option" key={item.key}>
                 <button
@@ -183,8 +160,132 @@ function AssessmentCard({ assessment, currentRole }: { assessment: (typeof asses
   );
 }
 
-function ManualAssessmentForm({ onClose }: { onClose: () => void }) {
+function ManualAssessmentForm({ onClose, onSaved }: { onClose: () => void; onSaved: (assessment: AssessmentCardData) => void }) {
   const [sectionIds, setSectionIds] = useState([0]);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [examinations, setExaminations] = useState<AssessmentType[]>([]);
+  const [loadingExaminations, setLoadingExaminations] = useState(true);
+  const [questionCategories, setQuestionCategories] = useState<QuestionCategory[]>([]);
+  const [loadingQuestionCategories, setLoadingQuestionCategories] = useState(true);
+  const [questionSubCategories, setQuestionSubCategories] = useState<QuestionSubCategory[]>([]);
+  const [loadingQuestionSubCategories, setLoadingQuestionSubCategories] = useState(true);
+  const [questionTopics, setQuestionTopics] = useState<QuestionTopic[]>([]);
+  const [questionLanguages, setQuestionLanguages] = useState<LanguageItem[]>([]);
+  const [difficultyLevels, setDifficultyLevels] = useState<DifficultyLevel[]>([]);
+
+  useEffect(() => {
+    fetch("/api/assessment-types")
+      .then(async (response) => {
+        const data = await response.json() as AssessmentType[] & { error?: string };
+        if (!response.ok) throw new Error(data.error ?? "Unable to load examinations");
+        setExaminations(data.filter((item) => item.status));
+      })
+      .catch(() => setExaminations([]))
+      .finally(() => setLoadingExaminations(false));
+  }, []);
+
+  const saveAssessment = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+
+    const form = event.currentTarget;
+    const formData = new FormData(form);
+    const sectionBlocks = Array.from(form.querySelectorAll<HTMLElement>(".section-block"));
+    const sections = sectionBlocks.map((block) => ({
+      name: block.querySelector<HTMLInputElement>("[data-section-field='name']")?.value ?? "",
+      question_type: block.querySelector<HTMLSelectElement>("[data-section-field='question-type']")?.value ?? "",
+      question_count: block.querySelector<HTMLInputElement>("[data-section-field='question-count']")?.value ?? "",
+      correct_mark: block.querySelector<HTMLInputElement>("[data-section-field='correct-mark']")?.value ?? "",
+      wrong_mark: block.querySelector<HTMLInputElement>("[data-section-field='wrong-mark']")?.value ?? "",
+      difficulty_percentages: Array.from(block.querySelectorAll<HTMLInputElement>("[data-difficulty-field]"))
+        .map((input) => ({ level: input.dataset.difficultyField ?? "", percentage: input.value })),
+    }));
+
+    try {
+      const response = await fetch("/api/assessments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          examination: formData.get("examination"),
+          name: formData.get("name"),
+          start_date: formData.get("start_date"),
+          end_date: formData.get("end_date"),
+          total_time: formData.get("total_time"),
+          last_login: formData.get("last_login"),
+          question_category: formData.get("question_category"),
+          sub_category: formData.get("sub_category"),
+          topic: formData.get("topic"),
+          question_language: formData.get("question_language"),
+          sections,
+        }),
+      });
+      const data = await response.json() as { id?: number; error?: string; examination?: string; name?: string; start_date?: string; end_date?: string };
+      if (!response.ok) throw new Error(data.error ?? "Unable to save assessment");
+
+      onSaved({
+        id: data.id,
+        title: data.name ?? "New assessment",
+        subtitle: data.examination ?? "",
+        start: data.start_date ? new Date(data.start_date).toLocaleString() : "Not scheduled",
+        end: data.end_date ? new Date(data.end_date).toLocaleString() : "Not scheduled",
+        questions: String(sections.reduce((total, section) => total + (Number(section.question_count) || 0), 0)),
+        marks: "0",
+        candidates: "0",
+      });
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Unable to save assessment");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  useEffect(() => {
+    Promise.all([
+      fetch("/api/question-topics"),
+      fetch("/api/languages"),
+      fetch("/api/difficulty-levels"),
+    ])
+      .then(async ([topicsResponse, languagesResponse, difficultyResponse]) => {
+        const topics = await topicsResponse.json() as QuestionTopic[] & { error?: string };
+        const languages = await languagesResponse.json() as LanguageItem[] & { error?: string };
+        const difficulties = await difficultyResponse.json() as DifficultyLevel[] & { error?: string };
+        if (!topicsResponse.ok) throw new Error(topics.error ?? "Unable to load topics");
+        if (!languagesResponse.ok) throw new Error(languages.error ?? "Unable to load languages");
+        if (!difficultyResponse.ok) throw new Error(difficulties.error ?? "Unable to load difficulty levels");
+        setQuestionTopics(topics.filter((item) => item.status));
+        setQuestionLanguages(languages.filter((item) => item.status));
+        setDifficultyLevels(difficulties.filter((item) => item.status));
+      })
+      .catch(() => {
+        setQuestionTopics([]);
+        setQuestionLanguages([]);
+        setDifficultyLevels([]);
+      });
+  }, []);
+
+  useEffect(() => {
+    fetch("/api/question-sub-categories")
+      .then(async (response) => {
+        const data = await response.json() as QuestionSubCategory[] & { error?: string };
+        if (!response.ok) throw new Error(data.error ?? "Unable to load question sub-categories");
+        setQuestionSubCategories(data.filter((item) => item.status));
+      })
+      .catch(() => setQuestionSubCategories([]))
+      .finally(() => setLoadingQuestionSubCategories(false));
+  }, []);
+
+  useEffect(() => {
+    fetch("/api/question-categories")
+      .then(async (response) => {
+        const data = await response.json() as QuestionCategory[] & { error?: string };
+        if (!response.ok) throw new Error(data.error ?? "Unable to load question categories");
+        setQuestionCategories(data.filter((item) => item.status));
+      })
+      .catch(() => setQuestionCategories([]))
+      .finally(() => setLoadingQuestionCategories(false));
+  }, []);
 
   return (
     <div className="form-overlay" role="presentation">
@@ -197,37 +298,38 @@ function ManualAssessmentForm({ onClose }: { onClose: () => void }) {
           <button className="form-close-icon" type="button" onClick={onClose} aria-label="Close form">×</button>
         </div>
 
-        <form onSubmit={(event) => { event.preventDefault(); onClose(); }}>
+        <form onSubmit={saveAssessment}>
           <div className="form-field full-width">
             <label htmlFor="examination">Examination</label>
-            <select id="examination" defaultValue="">
-              <option value="" disabled>Choose</option>
-              <option>General Scholarship Examination</option>
-              <option>Psychometric Test 2025</option>
+            <select id="examination" name="examination" defaultValue="" disabled={loadingExaminations} required>
+              <option value="" disabled>{loadingExaminations ? "Loading examinations..." : "Choose"}</option>
+              {examinations.map((examination) => (
+                <option key={examination.id} value={examination.assessment_name}>{examination.assessment_name}</option>
+              ))}
             </select>
           </div>
 
           <div className="form-field full-width">
             <label htmlFor="assessment-name">Name</label>
-            <input id="assessment-name" placeholder="Name" />
+            <input id="assessment-name" name="name" placeholder="Name" required />
           </div>
 
           <div className="form-row date-row">
             <div className="form-field date-field">
               <label htmlFor="start-date">Assessment Date</label>
               <div className="date-range-inputs">
-                <input id="start-date" type="datetime-local" aria-label="Assessment start date" />
+                <input id="start-date" name="start_date" type="datetime-local" aria-label="Assessment start date" />
                 <span aria-hidden="true">to</span>
-                <input id="end-date" type="datetime-local" aria-label="Assessment end date" />
+                <input id="end-date" name="end_date" type="datetime-local" aria-label="Assessment end date" />
               </div>
             </div>
             <div className="form-field">
               <label htmlFor="total-time">Total Time (in Mins)</label>
-              <input id="total-time" type="number" min="1" placeholder="Total Time (in Mins)" />
+              <input id="total-time" name="total_time" type="number" min="1" placeholder="Total Time (in Mins)" />
             </div>
             <div className="form-field">
               <label htmlFor="last-login">Last Login Time (in Mins)</label>
-              <input id="last-login" type="number" min="1" placeholder="Last Login Time (in Mins)" />
+              <input id="last-login" name="last_login" type="number" min="1" placeholder="Last Login Time (in Mins)" />
               <small>Leave blank to allow anytime login.</small>
             </div>
           </div>
@@ -241,11 +343,22 @@ function ManualAssessmentForm({ onClose }: { onClose: () => void }) {
             ].map(([label, id]) => (
               <div className="form-field" key={id}>
                 <label htmlFor={id}>{label}</label>
-                <select id={id} defaultValue="">
-                  <option value="" disabled>Choose</option>
-                  <option>General</option>
-                  <option>Science</option>
-                  <option>English</option>
+                <select id={id} name={id === "question-category" ? "question_category" : id === "sub-category" ? "sub_category" : id === "question-language" ? "question_language" : id} defaultValue="" disabled={(id === "question-category" && loadingQuestionCategories) || (id === "sub-category" && loadingQuestionSubCategories)} required={id === "question-category" || id === "sub-category"}>
+                  <option value="" disabled>{id === "question-category" && loadingQuestionCategories ? "Loading categories..." : id === "sub-category" && loadingQuestionSubCategories ? "Loading sub-categories..." : "Choose"}</option>
+                  {id === "question-category" ? questionCategories.map((category) => (
+                    <option key={category.id} value={category.q_category}>{category.q_category}</option>
+                  )) : id === "sub-category" ? questionSubCategories.map((subCategory) => (
+                    <option key={subCategory.id} value={subCategory.q_s_category}>{subCategory.q_s_category}</option>
+                  )) : id === "topic" ? questionTopics.map((topic) => (
+                    <option key={topic.id} value={topic.topic}>{topic.topic}</option>
+                  )) : id === "question-language" ? questionLanguages.map((language) => (
+                    <option key={language.id} value={language.q_language}>{language.q_language}</option>
+                  )) : (
+                    <>
+                      <option>Multiple Choice</option>
+                      <option>True / False</option>
+                    </>
+                  )}
                 </select>
               </div>
             ))}
@@ -273,21 +386,29 @@ function ManualAssessmentForm({ onClose }: { onClose: () => void }) {
                   )}
                 </div>
                 <div className="section-fields">
-                  <input aria-label={`Section ${index + 1} name`} placeholder="Name" />
-                  <select aria-label={`Section ${index + 1} question type`} defaultValue="">
+                  <input data-section-field="name" aria-label={`Section ${index + 1} name`} placeholder="Name" />
+                  <select data-section-field="question-type" aria-label={`Section ${index + 1} question type`} defaultValue="">
                     <option value="" disabled>Question Type</option>
-                    <option>Multiple Choice</option>
-                    <option>True / False</option>
+                    <option>Objective</option>
+                    <option>Subjective</option>
                   </select>
-                  <input type="number" min="1" aria-label={`Section ${index + 1} question count`} placeholder="Question Count" />
-                  <input type="number" min="0" aria-label={`Section ${index + 1} correct mark`} placeholder="Correct Mark" />
-                  <input type="number" min="0" aria-label={`Section ${index + 1} wrong mark`} placeholder="Wrong Mark" />
+                  <input data-section-field="question-count" type="number" min="1" aria-label={`Section ${index + 1} question count`} placeholder="Question Count" />
+                  <input data-section-field="correct-mark" type="number" min="0" aria-label={`Section ${index + 1} correct mark`} placeholder="Correct Mark" />
+                  <input data-section-field="wrong-mark" type="number" min="0" aria-label={`Section ${index + 1} wrong mark`} placeholder="Wrong Mark" />
                 </div>
                 <p className="difficulty-label">% of Questions from Difficulty Levels <span>(total should be 100)</span></p>
                 <div className="difficulty-fields">
-                  <input type="number" min="0" max="100" placeholder="Level: 1" aria-label={`Section ${index + 1}, level 1 percentage`} />
-                  <input type="number" min="0" max="100" placeholder="Level: 2" aria-label={`Section ${index + 1}, level 2 percentage`} />
-                  <input type="number" min="0" max="100" placeholder="Level: 3" aria-label={`Section ${index + 1}, level 3 percentage`} />
+                  {difficultyLevels.map((level) => (
+                    <input
+                      key={level.id}
+                      type="number"
+                      min="0"
+                      max="100"
+                      data-difficulty-field={level.Difficulty_level}
+                      placeholder={`Level: ${level.Difficulty_level}`}
+                      aria-label={`Section ${index + 1}, level ${level.Difficulty_level} percentage`}
+                    />
+                  ))}
                 </div>
               </div>
             ))}
@@ -295,8 +416,9 @@ function ManualAssessmentForm({ onClose }: { onClose: () => void }) {
 
           <div className="form-actions">
             <button className="form-cancel-button" type="button" onClick={onClose}>Close</button>
-            <button className="form-save-button" type="submit">Save</button>
+            <button className="form-save-button" type="submit" disabled={saving}>{saving ? "Saving..." : "Save"}</button>
           </div>
+          {error && <p className="form-error" role="alert">{error}</p>}
         </form>
       </section>
     </div>
@@ -2794,6 +2916,7 @@ export default function Home() {
   const [showBulkUpload, setShowBulkUpload] = useState(false);
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [currentRole, setCurrentRole] = useState<any>(null);
+  const [savedAssessments, setSavedAssessments] = useState<AssessmentCardData[]>([]);
 
   useEffect(() => {
     const savedUser = window.localStorage.getItem(AUTH_STORAGE_KEY);
@@ -2841,6 +2964,37 @@ export default function Home() {
       .catch(() => setCurrentRole(null));
   }, [sessionUser]);
 
+  useEffect(() => {
+    if (!sessionUser) {
+      setSavedAssessments([]);
+      return;
+    }
+
+    fetch("/api/assessments")
+      .then(async (response) => {
+        const data = await response.json() as Array<{
+          id: number;
+          examination: string;
+          name: string;
+          start_date: string | null;
+          end_date: string | null;
+          sections: Array<{ question_count?: string }>;
+        }> & { error?: string };
+        if (!response.ok) throw new Error(data.error ?? "Unable to load assessments");
+        setSavedAssessments(data.map((assessment) => ({
+          id: assessment.id,
+          title: assessment.name,
+          subtitle: assessment.examination,
+          start: assessment.start_date ? new Date(assessment.start_date).toLocaleString() : "Not scheduled",
+          end: assessment.end_date ? new Date(assessment.end_date).toLocaleString() : "Not scheduled",
+          questions: String((assessment.sections ?? []).reduce((total, section) => total + (Number(section.question_count) || 0), 0)),
+          marks: "0",
+          candidates: "0",
+        })));
+      })
+      .catch(() => setSavedAssessments([]));
+  }, [sessionUser]);
+
   const activeSectionPermissionKey: Record<string, string> = {
     "Question Categories": "Settings:Questions:Categories",
     "Question Sub Categories": "Settings:Questions:Sub-Categories",
@@ -2885,6 +3039,7 @@ export default function Home() {
       return hasAccess(item.label) ? item : null;
     })
     .filter(Boolean) as typeof navigationItems;
+  const assessmentCards = savedAssessments;
 
   useEffect(() => {
     if (!openNavigation) {
@@ -3035,7 +3190,7 @@ export default function Home() {
           <div>
             <p className="section-kicker">Examination workspace</p>
             <h1>Assessments</h1>
-            <p className="assessment-count">Showing {assessments.length} of {assessments.length} assessments</p>
+            <p className="assessment-count">Showing {assessmentCards.length} of {assessmentCards.length} assessments</p>
           </div>
           <div className="toolbar-actions">
             <button
@@ -3080,13 +3235,18 @@ export default function Home() {
               <span>Add Assessment, if it does not exist</span>
             </span>
           </div>}
-          {assessments.map((assessment) => (
-            <AssessmentCard assessment={assessment} currentRole={currentRole} key={assessment.title} />
+          {assessmentCards.map((assessment) => (
+            <AssessmentCard
+              assessment={assessment}
+              currentRole={currentRole}
+              key={assessment.id ?? assessment.title}
+              onDeleted={(id) => setSavedAssessments((current) => current.filter((item) => item.id !== id))}
+            />
           ))}
         </div>
         </section> : activeSection === "Users" ? <UsersPanel currentRole={currentRole} /> : <SectionPlaceholder title={activeSection} />}
       </div>
-      {showManualForm && <ManualAssessmentForm onClose={() => setShowManualForm(false)} />}
+      {showManualForm && <ManualAssessmentForm onClose={() => setShowManualForm(false)} onSaved={(assessment) => { setSavedAssessments((current) => [assessment, ...current]); setShowManualForm(false); }} />}
       {showBulkUpload && <BulkUploadForm onClose={() => setShowBulkUpload(false)} />}
     </main>
   );

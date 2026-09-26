@@ -3485,6 +3485,8 @@ export default function Home() {
   const [isReady, setIsReady] = useState(false);
   const [view, setView] = useState<"grid" | "list">("grid");
   const [activeSection, setActiveSection] = useState("Dashboard");
+  const [sidebarExpanded, setSidebarExpanded] = useState(false);
+  const [sidebarHovered, setSidebarHovered] = useState(false);
   const [openNavigation, setOpenNavigation] = useState<string | null>(null);
   const navigationRef = useRef<HTMLElement>(null);
   const [showCreateOptions, setShowCreateOptions] = useState(false);
@@ -3620,19 +3622,29 @@ export default function Home() {
   const assessmentCards = savedAssessments;
 
   useEffect(() => {
-    if (!openNavigation) {
+    if (!sidebarExpanded && !openNavigation) {
       return;
     }
 
     const closeNavigationOutside = (event: PointerEvent) => {
       if (navigationRef.current && !navigationRef.current.contains(event.target as Node)) {
         setOpenNavigation(null);
+        setSidebarExpanded(false);
       }
     };
 
     document.addEventListener("pointerdown", closeNavigationOutside);
     return () => document.removeEventListener("pointerdown", closeNavigationOutside);
-  }, [openNavigation]);
+  }, [openNavigation, sidebarExpanded]);
+
+  useEffect(() => {
+    if (!sidebarExpanded || sidebarHovered) return;
+    const timeout = window.setTimeout(() => {
+      setSidebarExpanded(false);
+      setOpenNavigation(null);
+    }, 3000);
+    return () => window.clearTimeout(timeout);
+  }, [sidebarExpanded, sidebarHovered]);
 
   if (!isReady) {
     return <main className="login-shell"><div className="login-card"><p>Loading...</p></div></main>;
@@ -3643,7 +3655,7 @@ export default function Home() {
   }
 
   return (
-    <main className="dashboard-shell">
+    <main className={`dashboard-shell${sidebarExpanded ? " sidebar-expanded" : ""}`}>
       <header className="site-header">
         <div className="header-top-row">
           <a className="brand" href="#assessments" aria-label="Examination dashboard home">
@@ -3666,24 +3678,56 @@ export default function Home() {
           </button>
         </div>
 
-        <nav ref={navigationRef} className="header-navigation" aria-label="Main navigation">
+      </header>
+
+      <aside
+        ref={navigationRef}
+        className={`app-sidebar${sidebarExpanded ? " is-expanded" : ""}`}
+        aria-label="Application sidebar"
+        onMouseEnter={() => { setSidebarHovered(true); setSidebarExpanded(true); }}
+        onMouseLeave={() => setSidebarHovered(false)}
+        onClick={(event) => {
+          const target = event.target as HTMLElement;
+          if (!target.closest("button") && !sidebarExpanded) setSidebarExpanded(true);
+        }}
+      >
+        <button
+          className="sidebar-toggle"
+          type="button"
+          aria-label={sidebarExpanded ? "Collapse navigation" : "Expand navigation"}
+          title={sidebarExpanded ? "Collapse navigation" : "Expand navigation"}
+          aria-expanded={sidebarExpanded}
+          onClick={() => {
+            setSidebarExpanded((expanded) => !expanded);
+            setOpenNavigation(null);
+          }}
+        >
+          <span aria-hidden="true">☰</span>
+          <span className="sidebar-toggle-label">Navigation</span>
+        </button>
+        <nav className="header-navigation" aria-label="Main navigation">
           {filteredNavigation.map((item) => (
             <div className="navigation-group" key={item.label}>
               <button
                 aria-current={activeSection === item.label ? "page" : undefined}
-                aria-expanded={openNavigation === item.label}
+                aria-expanded={openNavigation === item.label || Boolean(item.options && openNavigation?.startsWith(`${item.label}:`))}
                 aria-haspopup={item.options ? "menu" : undefined}
                 className={`navigation-item${activeSection === item.label ? " is-active" : ""}`}
                 type="button"
+                title={!sidebarExpanded ? item.label : undefined}
                 onClick={() => {
-                  if (item.label !== "Settings") {
+                  if (item.options) {
+                    setSidebarExpanded(true);
+                    setOpenNavigation(openNavigation === item.label ? null : item.label);
+                  } else {
                     setActiveSection(item.label);
+                    setOpenNavigation(null);
+                    setSidebarExpanded(false);
                   }
-                  setOpenNavigation(openNavigation === item.label ? null : item.options ? item.label : null);
                 }}
               >
                 <span className="navigation-icon" aria-hidden="true">{item.icon}</span>
-                <span>{item.label}</span>
+                <span className="navigation-label">{item.label}</span>
                 {item.options && <span className="navigation-chevron" aria-hidden="true">⌄</span>}
               </button>
               {item.options && (
@@ -3693,7 +3737,7 @@ export default function Home() {
                     const nestedKey = `${item.label}:${optionLabel}`;
 
                     return typeof option === "string" ? (
-                      <button key={option} type="button" role="menuitem" onClick={() => setOpenNavigation(null)}>
+                      <button key={option} type="button" role="menuitem" onClick={() => { setActiveSection(option); setOpenNavigation(null); setSidebarExpanded(false); }}>
                         <span className="dropdown-option-icon" aria-hidden="true">{navigationOptionIcons[option]}</span>
                         {option}
                       </button>
@@ -3744,6 +3788,7 @@ export default function Home() {
                                   setActiveSection("Candidate Settings");
                                 }
                                 setOpenNavigation(null);
+                                setSidebarExpanded(false);
                               }}
                             >
                                 <span className="dropdown-option-icon" aria-hidden="true">{navigationOptionIcons[nestedOption]}</span>
@@ -3759,7 +3804,7 @@ export default function Home() {
             </div>
           ))}
         </nav>
-      </header>
+      </aside>
 
       <div className="page-body">
         {!hasAccess(activeSection) ? <SectionPlaceholder title="Access restricted" /> : activeSection === "Dashboard" ? <DashboardPanel name={currentUser?.name || "Administrator"} shortcuts={visibleDashboardPages} onNavigate={setActiveSection} /> :

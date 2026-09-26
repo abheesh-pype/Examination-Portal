@@ -1,6 +1,8 @@
 "use client";
 
 import React, { useEffect, useRef, useState, type FormEvent } from "react";
+import Papa from "papaparse";
+import readXlsxFile from "read-excel-file/browser";
 
 const navigationItems = [
   { label: "Dashboard", icon: "⌂" },
@@ -58,6 +60,16 @@ type AssessmentCardData = {
   id?: number;
   title: string;
   subtitle: string;
+  examination?: string;
+  start_date?: string | null;
+  end_date?: string | null;
+  total_time?: number | null;
+  last_login?: number | null;
+  question_category?: string | null;
+  sub_category?: string | null;
+  topic?: string | null;
+  question_language?: string | null;
+  sections?: AssessmentSection[];
   start: string;
   end: string;
   questions: string;
@@ -65,7 +77,16 @@ type AssessmentCardData = {
   candidates: string;
 };
 
-function AssessmentCard({ assessment, currentRole, onDeleted }: { assessment: AssessmentCardData; currentRole?: any; onDeleted?: (id: number) => void }) {
+type AssessmentSection = {
+  name: string;
+  question_type: string;
+  question_count: string;
+  correct_mark: string;
+  wrong_mark: string;
+  difficulty_percentages: Array<{ level: string; percentage: string }>;
+};
+
+function AssessmentCard({ assessment, currentRole, onDeleted, onEdit }: { assessment: AssessmentCardData; currentRole?: any; onDeleted?: (id: number) => void; onEdit?: (assessment: AssessmentCardData) => void }) {
   const [showOptions, setShowOptions] = useState(false);
   const [openAssignment, setOpenAssignment] = useState<string | null>(null);
   const cardRef = useRef<HTMLElement>(null);
@@ -128,7 +149,7 @@ function AssessmentCard({ assessment, currentRole, onDeleted }: { assessment: As
         {showOptions && (
           <div className="assessment-options-menu" role="menu">
             <button type="button" role="menuitem">Preview</button>
-            {canEdit && <button className="option-menu-item" type="button" role="menuitem">Edit</button>}
+            {canEdit && <button className="option-menu-item" type="button" role="menuitem" onClick={() => { onEdit?.(assessment); setShowOptions(false); }}>Edit</button>}
             {canDelete && assessment.id && <button className="option-menu-item" type="button" role="menuitem" onClick={deleteAssessment}>Delete</button>}
             {assignmentOptions.map((item) => (
               <div className="assignment-option" key={item.key}>
@@ -177,8 +198,8 @@ function AssessmentCard({ assessment, currentRole, onDeleted }: { assessment: As
   );
 }
 
-function ManualAssessmentForm({ onClose, onSaved }: { onClose: () => void; onSaved: (assessment: AssessmentCardData) => void }) {
-  const [sectionIds, setSectionIds] = useState([0]);
+function ManualAssessmentForm({ onClose, onSaved, initialAssessment }: { onClose: () => void; onSaved: (assessment: AssessmentCardData) => void; initialAssessment?: AssessmentCardData }) {
+  const [sectionIds, setSectionIds] = useState(() => initialAssessment?.sections?.length ? initialAssessment.sections.map((_, index) => index) : [0]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [examinations, setExaminations] = useState<AssessmentType[]>([]);
@@ -190,6 +211,18 @@ function ManualAssessmentForm({ onClose, onSaved }: { onClose: () => void; onSav
   const [questionTopics, setQuestionTopics] = useState<QuestionTopic[]>([]);
   const [questionLanguages, setQuestionLanguages] = useState<LanguageItem[]>([]);
   const [difficultyLevels, setDifficultyLevels] = useState<DifficultyLevel[]>([]);
+  const [selectedExamination, setSelectedExamination] = useState(initialAssessment?.examination ?? "");
+  const [selectedQuestionCategory, setSelectedQuestionCategory] = useState(initialAssessment?.question_category ?? "");
+  const [selectedSubCategory, setSelectedSubCategory] = useState(initialAssessment?.sub_category ?? "");
+  const [selectedTopic, setSelectedTopic] = useState(initialAssessment?.topic ?? "");
+  const [selectedQuestionLanguage, setSelectedQuestionLanguage] = useState(initialAssessment?.question_language ?? "");
+
+  const dateTimeLocalValue = (value?: string | null) => {
+    if (!value) return "";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+  };
 
   useEffect(() => {
     fetch("/api/assessment-types")
@@ -222,9 +255,10 @@ function ManualAssessmentForm({ onClose, onSaved }: { onClose: () => void; onSav
 
     try {
       const response = await fetch("/api/assessments", {
-        method: "POST",
+        method: initialAssessment?.id ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          ...(initialAssessment?.id ? { id: initialAssessment.id } : {}),
           examination: formData.get("examination"),
           name: formData.get("name"),
           start_date: formData.get("start_date"),
@@ -238,16 +272,40 @@ function ManualAssessmentForm({ onClose, onSaved }: { onClose: () => void; onSav
           sections,
         }),
       });
-      const data = await response.json() as { id?: number; error?: string; examination?: string; name?: string; start_date?: string; end_date?: string };
+      const data = await response.json() as {
+        id?: number;
+        error?: string;
+        examination?: string;
+        name?: string;
+        start_date?: string | null;
+        end_date?: string | null;
+        total_time?: number | null;
+        last_login?: number | null;
+        question_category?: string | null;
+        sub_category?: string | null;
+        topic?: string | null;
+        question_language?: string | null;
+        sections?: AssessmentSection[];
+      };
       if (!response.ok) throw new Error(data.error ?? "Unable to save assessment");
 
       onSaved({
         id: data.id,
         title: data.name ?? "New assessment",
         subtitle: data.examination ?? "",
+        examination: data.examination ?? "",
+        start_date: data.start_date ?? null,
+        end_date: data.end_date ?? null,
+        total_time: data.total_time ?? null,
+        last_login: data.last_login ?? null,
+        question_category: data.question_category ?? null,
+        sub_category: data.sub_category ?? null,
+        topic: data.topic ?? null,
+        question_language: data.question_language ?? null,
+        sections: data.sections ?? sections,
         start: data.start_date ? new Date(data.start_date).toLocaleString() : "Not scheduled",
         end: data.end_date ? new Date(data.end_date).toLocaleString() : "Not scheduled",
-        questions: String(sections.reduce((total, section) => total + (Number(section.question_count) || 0), 0)),
+        questions: String((data.sections ?? sections).reduce((total, section) => total + (Number(section.question_count) || 0), 0)),
         marks: "0",
         candidates: "0",
       });
@@ -310,7 +368,7 @@ function ManualAssessmentForm({ onClose, onSaved }: { onClose: () => void; onSav
         <div className="manual-form-header">
           <div>
             <p className="section-kicker">Create assessment</p>
-            <h1 id="manual-form-title">Add manually</h1>
+            <h1 id="manual-form-title">{initialAssessment ? "Edit assessment" : "Add manually"}</h1>
           </div>
           <button className="form-close-icon" type="button" onClick={onClose} aria-label="Close form">×</button>
         </div>
@@ -318,7 +376,7 @@ function ManualAssessmentForm({ onClose, onSaved }: { onClose: () => void; onSav
         <form onSubmit={saveAssessment}>
           <div className="form-field full-width">
             <label htmlFor="examination">Examination</label>
-            <select id="examination" name="examination" defaultValue="" disabled={loadingExaminations} required>
+            <select id="examination" name="examination" value={selectedExamination} onChange={(event) => setSelectedExamination(event.target.value)} disabled={loadingExaminations} required>
               <option value="" disabled>{loadingExaminations ? "Loading examinations..." : "Choose"}</option>
               {examinations.map((examination) => (
                 <option key={examination.id} value={examination.assessment_name}>{examination.assessment_name}</option>
@@ -328,25 +386,25 @@ function ManualAssessmentForm({ onClose, onSaved }: { onClose: () => void; onSav
 
           <div className="form-field full-width">
             <label htmlFor="assessment-name">Name</label>
-            <input id="assessment-name" name="name" placeholder="Name" required />
+            <input id="assessment-name" name="name" placeholder="Name" defaultValue={initialAssessment?.title ?? ""} required />
           </div>
 
           <div className="form-row date-row">
             <div className="form-field date-field">
               <label htmlFor="start-date">Assessment Date</label>
               <div className="date-range-inputs">
-                <input id="start-date" name="start_date" type="datetime-local" aria-label="Assessment start date" />
+                <input id="start-date" name="start_date" type="datetime-local" aria-label="Assessment start date" defaultValue={dateTimeLocalValue(initialAssessment?.start_date)} />
                 <span aria-hidden="true">to</span>
-                <input id="end-date" name="end_date" type="datetime-local" aria-label="Assessment end date" />
+                <input id="end-date" name="end_date" type="datetime-local" aria-label="Assessment end date" defaultValue={dateTimeLocalValue(initialAssessment?.end_date)} />
               </div>
             </div>
             <div className="form-field">
               <label htmlFor="total-time">Total Time (in Mins)</label>
-              <input id="total-time" name="total_time" type="number" min="1" placeholder="Total Time (in Mins)" />
+              <input id="total-time" name="total_time" type="number" min="1" placeholder="Total Time (in Mins)" defaultValue={initialAssessment?.total_time ?? ""} />
             </div>
             <div className="form-field">
               <label htmlFor="last-login">Last Login Time (in Mins)</label>
-              <input id="last-login" name="last_login" type="number" min="1" placeholder="Last Login Time (in Mins)" />
+              <input id="last-login" name="last_login" type="number" min="1" placeholder="Last Login Time (in Mins)" defaultValue={initialAssessment?.last_login ?? ""} />
               <small>Leave blank to allow anytime login.</small>
             </div>
           </div>
@@ -360,7 +418,19 @@ function ManualAssessmentForm({ onClose, onSaved }: { onClose: () => void; onSav
             ].map(([label, id]) => (
               <div className="form-field" key={id}>
                 <label htmlFor={id}>{label}</label>
-                <select id={id} name={id === "question-category" ? "question_category" : id === "sub-category" ? "sub_category" : id === "question-language" ? "question_language" : id} defaultValue="" disabled={(id === "question-category" && loadingQuestionCategories) || (id === "sub-category" && loadingQuestionSubCategories)} required={id === "question-category" || id === "sub-category"}>
+                <select
+                  id={id}
+                  name={id === "question-category" ? "question_category" : id === "sub-category" ? "sub_category" : id === "question-language" ? "question_language" : id}
+                  value={id === "question-category" ? selectedQuestionCategory : id === "sub-category" ? selectedSubCategory : id === "topic" ? selectedTopic : selectedQuestionLanguage}
+                  onChange={(event) => {
+                    if (id === "question-category") setSelectedQuestionCategory(event.target.value);
+                    if (id === "sub-category") setSelectedSubCategory(event.target.value);
+                    if (id === "topic") setSelectedTopic(event.target.value);
+                    if (id === "question-language") setSelectedQuestionLanguage(event.target.value);
+                  }}
+                  disabled={(id === "question-category" && loadingQuestionCategories) || (id === "sub-category" && loadingQuestionSubCategories)}
+                  required={id === "question-category" || id === "sub-category"}
+                >
                   <option value="" disabled>{id === "question-category" && loadingQuestionCategories ? "Loading categories..." : id === "sub-category" && loadingQuestionSubCategories ? "Loading sub-categories..." : "Choose"}</option>
                   {id === "question-category" ? questionCategories.map((category) => (
                     <option key={category.id} value={category.q_category}>{category.q_category}</option>
@@ -403,15 +473,15 @@ function ManualAssessmentForm({ onClose, onSaved }: { onClose: () => void; onSav
                   )}
                 </div>
                 <div className="section-fields">
-                  <input data-section-field="name" aria-label={`Section ${index + 1} name`} placeholder="Name" />
-                  <select data-section-field="question-type" aria-label={`Section ${index + 1} question type`} defaultValue="">
+                  <input data-section-field="name" aria-label={`Section ${index + 1} name`} placeholder="Name" defaultValue={initialAssessment?.sections?.[index]?.name ?? ""} />
+                  <select data-section-field="question-type" aria-label={`Section ${index + 1} question type`} defaultValue={initialAssessment?.sections?.[index]?.question_type ?? ""}>
                     <option value="" disabled>Question Type</option>
                     <option>Objective</option>
                     <option>Subjective</option>
                   </select>
-                  <input data-section-field="question-count" type="number" min="1" aria-label={`Section ${index + 1} question count`} placeholder="Question Count" />
-                  <input data-section-field="correct-mark" type="number" min="0" aria-label={`Section ${index + 1} correct mark`} placeholder="Correct Mark" />
-                  <input data-section-field="wrong-mark" type="number" min="0" aria-label={`Section ${index + 1} wrong mark`} placeholder="Wrong Mark" />
+                  <input data-section-field="question-count" type="number" min="1" aria-label={`Section ${index + 1} question count`} placeholder="Question Count" defaultValue={initialAssessment?.sections?.[index]?.question_count ?? ""} />
+                  <input data-section-field="correct-mark" type="number" min="0" aria-label={`Section ${index + 1} correct mark`} placeholder="Correct Mark" defaultValue={initialAssessment?.sections?.[index]?.correct_mark ?? ""} />
+                  <input data-section-field="wrong-mark" type="number" min="0" aria-label={`Section ${index + 1} wrong mark`} placeholder="Wrong Mark" defaultValue={initialAssessment?.sections?.[index]?.wrong_mark ?? ""} />
                 </div>
                 <p className="difficulty-label">% of Questions from Difficulty Levels <span>(total should be 100)</span></p>
                 <div className="difficulty-fields">
@@ -424,6 +494,7 @@ function ManualAssessmentForm({ onClose, onSaved }: { onClose: () => void; onSav
                       data-difficulty-field={level.Difficulty_level}
                       placeholder={`Level: ${level.Difficulty_level}`}
                       aria-label={`Section ${index + 1}, level ${level.Difficulty_level} percentage`}
+                      defaultValue={initialAssessment?.sections?.[index]?.difficulty_percentages.find((item) => item.level === level.Difficulty_level)?.percentage ?? ""}
                     />
                   ))}
                 </div>
@@ -442,8 +513,120 @@ function ManualAssessmentForm({ onClose, onSaved }: { onClose: () => void; onSav
   );
 }
 
-function BulkUploadForm({ onClose }: { onClose: () => void }) {
+type AssessmentUploadRecord = {
+  id: number;
+  examination: string;
+  name: string;
+  start_date: string | null;
+  end_date: string | null;
+  sections: Array<{ question_count?: string }>;
+};
+
+function BulkUploadForm({ onClose, onUploaded }: { onClose: () => void; onUploaded: (assessments: AssessmentUploadRecord[]) => void }) {
   const [fileName, setFileName] = useState("");
+  const [rows, setRows] = useState<Record<string, unknown>[]>([]);
+  const [parsing, setParsing] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+
+  const downloadTemplate = () => {
+    const headers = ["Examination", "Name", "Start Date", "End Date", "Total Time", "Last Login Time", "Question Category", "Sub-Category", "Topic", "Question Language", "Sections JSON"];
+    const exampleSections = JSON.stringify([{ name: "Section 1", question_type: "Objective", question_count: "10", correct_mark: "1", wrong_mark: "0", difficulty_percentages: [] }]);
+    const csv = Papa.unparse([headers, ["", "", "", "", "", "", "", "", "", "", exampleSections]]);
+    const blob = new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "assessment-upload-template.csv";
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const readFile = async (file: File) => {
+    setFileName(file.name);
+    setRows([]);
+    setError("");
+    setSuccess("");
+    setParsing(true);
+    try {
+      let headers: string[];
+      let parsedRows: Record<string, unknown>[];
+      if (file.name.toLowerCase().endsWith(".csv")) {
+        const parsed = Papa.parse<Record<string, string>>(await file.text(), {
+          header: true,
+          skipEmptyLines: "greedy",
+          transformHeader: (header) => header.replace(/^\uFEFF/, "").trim(),
+        });
+        if (parsed.errors.length > 0) throw new Error(parsed.errors[0].message);
+        headers = parsed.meta.fields ?? [];
+        parsedRows = parsed.data.filter((row) => Object.values(row).some((value) => String(value ?? "").trim()));
+      } else if (file.name.toLowerCase().endsWith(".xlsx")) {
+        const workbookSheets = await readXlsxFile(file);
+        const sheetRows = workbookSheets[0]?.data;
+        if (!sheetRows) throw new Error("The selected file has no worksheet.");
+        const [headerRow = [], ...dataRows] = sheetRows;
+        const toCellString = (value: unknown) => value instanceof Date ? value.toISOString().slice(0, 10) : String(value ?? "").trim();
+        headers = headerRow.map(toCellString).filter(Boolean);
+        parsedRows = dataRows
+          .filter((row) => row.some((value) => String(value ?? "").trim()))
+          .map((row) => Object.fromEntries(headers.map((header, index) => [header, toCellString(row[index])])));
+      } else {
+        throw new Error("Choose a CSV or XLSX file. Legacy XLS files are not supported.");
+      }
+
+      const expectedHeaders = ["Examination", "Name", "Start Date", "End Date", "Total Time", "Last Login Time", "Question Category", "Sub-Category", "Topic", "Question Language", "Sections JSON"];
+      const missingHeaders = expectedHeaders.filter((header) => !headers.includes(header));
+      if (missingHeaders.length > 0) throw new Error(`Missing columns: ${missingHeaders.join(", ")}. Download the template and keep its column names.`);
+      if (parsedRows.length === 0) throw new Error("The selected file contains no assessment rows.");
+      if (parsedRows.length > 500) throw new Error("Upload a maximum of 500 assessments at a time.");
+      setRows(parsedRows);
+    } catch (parseError) {
+      setError(parseError instanceof Error ? parseError.message : "Unable to read this file.");
+    } finally {
+      setParsing(false);
+    }
+  };
+
+  const uploadAssessments = async () => {
+    if (rows.length === 0) return;
+    setUploading(true);
+    setError("");
+    setSuccess("");
+    try {
+      const response = await fetch("/api/assessments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          rows: rows.map((row) => ({
+            examination: String(row.Examination ?? "").trim(),
+            name: String(row.Name ?? "").trim(),
+            start_date: String(row["Start Date"] ?? "").trim(),
+            end_date: String(row["End Date"] ?? "").trim(),
+            total_time: String(row["Total Time"] ?? "").trim(),
+            last_login: String(row["Last Login Time"] ?? "").trim(),
+            question_category: String(row["Question Category"] ?? "").trim(),
+            sub_category: String(row["Sub-Category"] ?? "").trim(),
+            topic: String(row.Topic ?? "").trim(),
+            question_language: String(row["Question Language"] ?? "").trim(),
+            sections: String(row["Sections JSON"] ?? "").trim(),
+          })),
+        }),
+      });
+      const result = await response.json() as { imported?: number; assessments?: AssessmentUploadRecord[]; error?: string; row_errors?: string[] };
+      if (!response.ok) {
+        const rowErrors = result.row_errors?.slice(0, 5).join(" ");
+        const remainingErrors = result.row_errors && result.row_errors.length > 5 ? `${result.row_errors.length - 5} more row errors.` : "";
+        throw new Error([result.error ?? "Unable to import assessments", rowErrors, remainingErrors].filter(Boolean).join(" "));
+      }
+      setSuccess(`${result.imported ?? rows.length} assessments uploaded successfully.`);
+      onUploaded(result.assessments ?? []);
+    } catch (uploadError) {
+      setError(uploadError instanceof Error ? uploadError.message : "Unable to upload assessments.");
+    } finally {
+      setUploading(false);
+    }
+  };
 
   return (
     <div className="form-overlay" role="presentation">
@@ -454,7 +637,7 @@ function BulkUploadForm({ onClose }: { onClose: () => void }) {
         </div>
 
         <div className="bulk-upload-content">
-          <a className="download-sample-link" href="#download-sample">Download Sample</a>
+          <button className="download-sample-link" type="button" onClick={downloadTemplate}>Download Template</button>
           <div className="bulk-file-field">
             <label htmlFor="assessment-file">File</label>
             <div className="file-picker">
@@ -463,24 +646,126 @@ function BulkUploadForm({ onClose }: { onClose: () => void }) {
               <input
                 id="assessment-file"
                 type="file"
-                accept=".csv,.xlsx,.xls"
-                onChange={(event) => setFileName(event.target.files?.[0]?.name ?? "")}
+                accept=".csv,.xlsx"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) void readFile(file);
+                }}
               />
             </div>
           </div>
+          {parsing && <p role="status">Reading spreadsheet...</p>}
+          {rows.length > 0 && !parsing && <p role="status">{rows.length} assessment rows ready to upload.</p>}
+          {error && <p className="form-error" role="alert">{error}</p>}
+          {success && <p className="login-settings-success" role="status">{success}</p>}
         </div>
 
         <div className="bulk-upload-actions">
           <button className="form-cancel-button" type="button" onClick={onClose}>Close</button>
-          <button className="form-save-button" type="button" onClick={onClose} disabled={!fileName}>Upload</button>
+          <button className="form-save-button" type="button" onClick={uploadAssessments} disabled={!fileName || rows.length === 0 || parsing || uploading}>{uploading ? "Uploading..." : "Upload"}</button>
         </div>
       </section>
     </div>
   );
 }
 
-function CandidateUploadForm({ onClose }: { onClose: () => void }) {
+function CandidateUploadForm({ onClose, onUploaded, candidateInfo }: { onClose: () => void; onUploaded: () => void; candidateInfo: CandidateInfoItem[] }) {
   const [fileName, setFileName] = useState("");
+  const [rows, setRows] = useState<Record<string, unknown>[]>([]);
+  const [parsing, setParsing] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+
+  const downloadTemplate = () => {
+    const headers = ["Category", "Sub-Category", ...candidateInfo.map((item) => item.name)];
+    const csv = Papa.unparse([headers, headers.map(() => "")]);
+    const blob = new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "candidate-information-template.csv";
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const readFile = async (file: File) => {
+    setFileName(file.name);
+    setRows([]);
+    setError("");
+    setSuccess("");
+    setParsing(true);
+    try {
+      let headers: string[];
+      let parsedRows: Record<string, unknown>[];
+      if (file.name.toLowerCase().endsWith(".csv")) {
+        const parsed = Papa.parse<Record<string, string>>(await file.text(), {
+          header: true,
+          skipEmptyLines: "greedy",
+            transformHeader: (header) => header.replace(/^\uFEFF/, "").trim(),
+        });
+        if (parsed.errors.length > 0) throw new Error(parsed.errors[0].message);
+        headers = parsed.meta.fields ?? [];
+        parsedRows = parsed.data.filter((row) => Object.values(row).some((value) => String(value ?? "").trim()));
+      } else if (file.name.toLowerCase().endsWith(".xlsx")) {
+        const workbookSheets = await readXlsxFile(file);
+        const sheetRows = workbookSheets[0]?.data;
+        if (!sheetRows) throw new Error("The selected file has no worksheet.");
+        const [headerRow = [], ...dataRows] = sheetRows;
+        const toCellString = (value: unknown) => value instanceof Date ? value.toISOString().slice(0, 10) : String(value ?? "").trim();
+        headers = headerRow.map(toCellString).filter(Boolean);
+        parsedRows = dataRows
+          .filter((row) => row.some((value) => String(value ?? "").trim()))
+          .map((row) => Object.fromEntries(headers.map((header, index) => [header, toCellString(row[index])])));
+      } else {
+        throw new Error("Choose a CSV or XLSX file. Legacy XLS files are not supported.");
+      }
+
+      const expectedHeaders = ["Category", "Sub-Category", ...candidateInfo.map((item) => item.name)];
+      const missingHeaders = expectedHeaders.filter((header) => !headers.includes(header));
+      if (missingHeaders.length > 0) {
+        throw new Error(`Missing columns: ${missingHeaders.join(", ")}. Download the template and keep its column names.`);
+      }
+      if (parsedRows.length === 0) throw new Error("The selected file contains no candidate rows.");
+      if (parsedRows.length > 1000) throw new Error("Upload a maximum of 1000 candidates at a time.");
+      setRows(parsedRows);
+    } catch (parseError) {
+      setError(parseError instanceof Error ? parseError.message : "Unable to read this file.");
+    } finally {
+      setParsing(false);
+    }
+  };
+
+  const uploadCandidates = async () => {
+    if (rows.length === 0) return;
+    setUploading(true);
+    setError("");
+    setSuccess("");
+    try {
+      const response = await fetch("/api/candidates", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          rows: rows.map((row) => ({
+            category: String(row.Category ?? "").trim(),
+            sub_category: String(row["Sub-Category"] ?? "").trim(),
+            fields: Object.fromEntries(candidateInfo.map((item) => [item.name, String(row[item.name] ?? "").trim()])),
+          })),
+        }),
+      });
+      const result = await response.json() as { imported?: number; error?: string; row_errors?: string[] };
+      if (!response.ok) {
+        const rowErrors = result.row_errors?.slice(0, 5).join(" ");
+        throw new Error([result.error ?? "Unable to import candidates", rowErrors, result.row_errors && result.row_errors.length > 5 ? `${result.row_errors.length - 5} more row errors.` : ""].filter(Boolean).join(" "));
+      }
+      setSuccess(`${result.imported ?? rows.length} candidates uploaded successfully.`);
+      onUploaded();
+    } catch (uploadError) {
+      setError(uploadError instanceof Error ? uploadError.message : "Unable to upload candidates.");
+    } finally {
+      setUploading(false);
+    }
+  };
 
   return (
     <div className="form-overlay" role="presentation">
@@ -490,7 +775,7 @@ function CandidateUploadForm({ onClose }: { onClose: () => void }) {
           <button className="form-close-icon" type="button" onClick={onClose} aria-label="Close candidate upload form">×</button>
         </div>
         <div className="bulk-upload-content">
-          <a className="download-sample-link" href="#download-candidate-sample">Download Sample</a>
+          <button className="download-sample-link" type="button" onClick={downloadTemplate}>Download Template</button>
           <div className="bulk-file-field">
             <label htmlFor="candidate-file">File</label>
             <div className="file-picker">
@@ -499,15 +784,22 @@ function CandidateUploadForm({ onClose }: { onClose: () => void }) {
               <input
                 id="candidate-file"
                 type="file"
-                accept=".csv,.xlsx,.xls"
-                onChange={(event) => setFileName(event.target.files?.[0]?.name ?? "")}
+                accept=".csv,.xlsx"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) void readFile(file);
+                }}
               />
             </div>
           </div>
+          {parsing && <p role="status">Reading spreadsheet...</p>}
+          {rows.length > 0 && !parsing && <p role="status">{rows.length} candidate rows ready to upload.</p>}
+          {error && <p className="form-error" role="alert">{error}</p>}
+          {success && <p className="login-settings-success" role="status">{success}</p>}
         </div>
         <div className="bulk-upload-actions">
           <button className="form-cancel-button" type="button" onClick={onClose}>Close</button>
-          <button className="form-save-button" type="button" onClick={onClose} disabled={!fileName}>Upload</button>
+          <button className="form-save-button" type="button" onClick={uploadCandidates} disabled={!fileName || rows.length === 0 || parsing || uploading}>{uploading ? "Uploading..." : "Upload"}</button>
         </div>
       </section>
     </div>
@@ -710,7 +1002,7 @@ function CandidatesPanel({ currentRole }: { currentRole?: any }) {
       </div>
       <div className="candidates-panel">
         <div className="candidates-actions">
-          {canCreate && <button className="candidate-action-button" type="button" onClick={() => setShowCandidateUpload(true)}>
+          {canCreate && <button className="candidate-action-button" type="button" onClick={() => setShowCandidateUpload(true)} disabled={loading}>
             <span aria-hidden="true">↥</span> Upload
           </button>}
           {canCreate && <button className="candidate-action-button" type="button" onClick={() => setShowAddCandidate(true)}>
@@ -781,7 +1073,11 @@ function CandidatesPanel({ currentRole }: { currentRole?: any }) {
           </div>
         </div>
       </div>
-      {showCandidateUpload && <CandidateUploadForm onClose={() => setShowCandidateUpload(false)} />}
+      {showCandidateUpload && <CandidateUploadForm
+        candidateInfo={candidateInfo.filter((item) => item.status)}
+        onClose={() => setShowCandidateUpload(false)}
+        onUploaded={fetchData}
+      />}
       {showAddCandidate && (
         <AddCandidateForm
           currentRole={currentRole}
@@ -3217,10 +3513,158 @@ function AddQuestionForm({ onClose, onSaved, initialQuestion }: { onClose: () =>
   );
 }
 
+function QuestionUploadForm({ onClose, onUploaded }: { onClose: () => void; onUploaded: (questions: QuestionRecord[]) => void }) {
+  const [fileName, setFileName] = useState("");
+  const [rows, setRows] = useState<Record<string, unknown>[]>([]);
+  const [parsing, setParsing] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+  const headers = ["Question Type", "Question", "Category", "Sub-Category", "Topic", "Difficulty Level", "Language", "Details JSON"];
+
+  const downloadTemplate = () => {
+    const exampleDetails = JSON.stringify({ answer: "A", options: ["Option A", "Option B", "", "", ""], randomize_options: "Yes" });
+    const csv = Papa.unparse([headers, ["Single Choice", "Example question?", "", "", "", "", "", exampleDetails]]);
+    const blob = new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "question-upload-template.csv";
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const readFile = async (file: File) => {
+    setFileName(file.name);
+    setRows([]);
+    setError("");
+    setSuccess("");
+    setParsing(true);
+    try {
+      let fileHeaders: string[];
+      let parsedRows: Record<string, unknown>[];
+      if (file.name.toLowerCase().endsWith(".csv")) {
+        const parsed = Papa.parse<Record<string, string>>(await file.text(), {
+          header: true,
+          skipEmptyLines: "greedy",
+          transformHeader: (header) => header.replace(/^\uFEFF/, "").trim(),
+        });
+        if (parsed.errors.length > 0) throw new Error(parsed.errors[0].message);
+        fileHeaders = parsed.meta.fields ?? [];
+        parsedRows = parsed.data.filter((row) => Object.values(row).some((value) => String(value ?? "").trim()));
+      } else if (file.name.toLowerCase().endsWith(".xlsx")) {
+        const workbookSheets = await readXlsxFile(file);
+        const sheetRows = workbookSheets[0]?.data;
+        if (!sheetRows) throw new Error("The selected file has no worksheet.");
+        const [headerRow = [], ...dataRows] = sheetRows;
+        const toCellString = (value: unknown) => value instanceof Date ? value.toISOString().slice(0, 10) : String(value ?? "").trim();
+        fileHeaders = headerRow.map(toCellString).filter(Boolean);
+        parsedRows = dataRows
+          .filter((row) => row.some((value) => String(value ?? "").trim()))
+          .map((row) => Object.fromEntries(fileHeaders.map((header, index) => [header, toCellString(row[index])])));
+      } else {
+        throw new Error("Choose a CSV or XLSX file. Legacy XLS files are not supported.");
+      }
+
+      const missingHeaders = headers.filter((header) => !fileHeaders.includes(header));
+      if (missingHeaders.length > 0) throw new Error(`Missing columns: ${missingHeaders.join(", ")}. Download the template and keep its column names.`);
+      if (parsedRows.length === 0) throw new Error("The selected file contains no question rows.");
+      if (parsedRows.length > 1000) throw new Error("Upload a maximum of 1000 questions at a time.");
+      for (const [index, row] of parsedRows.entries()) {
+        const detailsText = String(row["Details JSON"] ?? "").trim();
+        if (detailsText) {
+          try {
+            const details: unknown = JSON.parse(detailsText);
+            if (!details || typeof details !== "object" || Array.isArray(details)) throw new Error();
+          } catch {
+            throw new Error(`Row ${index + 2}: Details JSON must be a valid JSON object.`);
+          }
+        }
+      }
+      setRows(parsedRows);
+    } catch (parseError) {
+      setError(parseError instanceof Error ? parseError.message : "Unable to read this file.");
+    } finally {
+      setParsing(false);
+    }
+  };
+
+  const uploadQuestions = async () => {
+    if (rows.length === 0) return;
+    setUploading(true);
+    setError("");
+    setSuccess("");
+    try {
+      const response = await fetch("/api/questions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          rows: rows.map((row) => ({
+            question_type: String(row["Question Type"] ?? "").trim(),
+            question: String(row.Question ?? "").trim(),
+            category: String(row.Category ?? "").trim(),
+            sub_category: String(row["Sub-Category"] ?? "").trim(),
+            topic: String(row.Topic ?? "").trim(),
+            difficulty_level: String(row["Difficulty Level"] ?? "").trim(),
+            language: String(row.Language ?? "").trim(),
+            details: String(row["Details JSON"] ?? "").trim() || "{}",
+          })),
+        }),
+      });
+      const result = await response.json() as { imported?: number; questions?: QuestionRecord[]; error?: string; row_errors?: string[] };
+      if (!response.ok) {
+        const rowErrors = result.row_errors?.slice(0, 5).join(" ");
+        const remainingErrors = result.row_errors && result.row_errors.length > 5 ? `${result.row_errors.length - 5} more row errors.` : "";
+        throw new Error([result.error ?? "Unable to import questions", rowErrors, remainingErrors].filter(Boolean).join(" "));
+      }
+      setSuccess(`${result.imported ?? rows.length} questions uploaded successfully.`);
+      onUploaded(result.questions ?? []);
+    } catch (uploadError) {
+      setError(uploadError instanceof Error ? uploadError.message : "Unable to upload questions.");
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  return (
+    <div className="form-overlay" role="presentation">
+      <section className="bulk-upload-form" role="dialog" aria-modal="true" aria-labelledby="question-upload-title">
+        <div className="bulk-upload-header">
+          <h1 id="question-upload-title">Upload Questions</h1>
+          <button className="form-close-icon" type="button" onClick={onClose} aria-label="Close question upload form">×</button>
+        </div>
+        <div className="bulk-upload-content">
+          <button className="download-sample-link" type="button" onClick={downloadTemplate}>Download Template</button>
+          <div className="bulk-file-field">
+            <label htmlFor="question-upload-file">File</label>
+            <div className="file-picker">
+              <label className="choose-file-button" htmlFor="question-upload-file">Choose File</label>
+              <span>{fileName || "No file chosen"}</span>
+              <input id="question-upload-file" type="file" accept=".csv,.xlsx" onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (file) void readFile(file);
+              }} />
+            </div>
+          </div>
+          {parsing && <p role="status">Reading spreadsheet...</p>}
+          {rows.length > 0 && !parsing && <p role="status">{rows.length} question rows ready to upload.</p>}
+          {error && <p className="form-error" role="alert">{error}</p>}
+          {success && <p className="login-settings-success" role="status">{success}</p>}
+        </div>
+        <div className="bulk-upload-actions">
+          <button className="form-cancel-button" type="button" onClick={onClose}>Close</button>
+          <button className="form-save-button" type="button" onClick={uploadQuestions} disabled={!fileName || rows.length === 0 || parsing || uploading}>{uploading ? "Uploading..." : "Upload"}</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function QuestionsPanel({ currentRole }: { currentRole?: any }) {
   const canCreate = hasRolePermission(currentRole, "Questions", "create");
   const canEdit = hasRolePermission(currentRole, "Questions", "edit");
   const canDelete = hasRolePermission(currentRole, "Questions", "delete");
+  const [showQuestionUpload, setShowQuestionUpload] = useState(false);
   const [showAddQuestion, setShowAddQuestion] = useState(false);
   const [editingQuestion, setEditingQuestion] = useState<QuestionRecord | null>(null);
   const [questions, setQuestions] = useState<QuestionRecord[]>([]);
@@ -3287,7 +3731,7 @@ function QuestionsPanel({ currentRole }: { currentRole?: any }) {
       <h1>Questions</h1>
       <div className="candidates-panel">
         <div className="candidates-actions">
-          {canCreate && <button className="candidate-action-button" type="button">
+          {canCreate && <button className="candidate-action-button" type="button" onClick={() => setShowQuestionUpload(true)}>
             <span aria-hidden="true">↥</span> Upload
           </button>}
           {canCreate && (
@@ -3362,6 +3806,15 @@ function QuestionsPanel({ currentRole }: { currentRole?: any }) {
           </div>
         </div>
       </div>
+      {showQuestionUpload && <QuestionUploadForm
+        onClose={() => setShowQuestionUpload(false)}
+        onUploaded={(uploadedQuestions) => {
+          setQuestions((current) => [...uploadedQuestions, ...current]);
+          setSearch("");
+          setCurrentPage(1);
+          setShowQuestionUpload(false);
+        }}
+      />}
       {showAddQuestion && <AddQuestionForm
         initialQuestion={editingQuestion ?? undefined}
         onClose={() => { setShowAddQuestion(false); setEditingQuestion(null); }}
@@ -3491,6 +3944,7 @@ export default function Home() {
   const navigationRef = useRef<HTMLElement>(null);
   const [showCreateOptions, setShowCreateOptions] = useState(false);
   const [showManualForm, setShowManualForm] = useState(false);
+  const [editingAssessment, setEditingAssessment] = useState<AssessmentCardData | null>(null);
   const [showBulkUpload, setShowBulkUpload] = useState(false);
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [currentRole, setCurrentRole] = useState<any>(null);
@@ -3556,13 +4010,29 @@ export default function Home() {
           name: string;
           start_date: string | null;
           end_date: string | null;
-          sections: Array<{ question_count?: string }>;
+          total_time: number | null;
+          last_login: number | null;
+          question_category: string | null;
+          sub_category: string | null;
+          topic: string | null;
+          question_language: string | null;
+          sections: AssessmentSection[];
         }> & { error?: string };
         if (!response.ok) throw new Error(data.error ?? "Unable to load assessments");
         setSavedAssessments(data.map((assessment) => ({
           id: assessment.id,
           title: assessment.name,
           subtitle: assessment.examination,
+          examination: assessment.examination,
+          start_date: assessment.start_date,
+          end_date: assessment.end_date,
+          total_time: assessment.total_time,
+          last_login: assessment.last_login,
+          question_category: assessment.question_category,
+          sub_category: assessment.sub_category,
+          topic: assessment.topic,
+          question_language: assessment.question_language,
+          sections: assessment.sections ?? [],
           start: assessment.start_date ? new Date(assessment.start_date).toLocaleString() : "Not scheduled",
           end: assessment.end_date ? new Date(assessment.end_date).toLocaleString() : "Not scheduled",
           questions: String((assessment.sections ?? []).reduce((total, section) => total + (Number(section.question_count) || 0), 0)),
@@ -3662,20 +4132,6 @@ export default function Home() {
             <span className="brand-mark">U</span>
             <span className="brand-name">ums<span>.</span>exam</span>
           </a>
-
-          <button
-            className="profile-button"
-            type="button"
-            aria-label="Logout"
-            onClick={() => setSessionUser(null)}
-          >
-            <span className="profile-icon">♙</span>
-            <span className="profile-copy">
-              <strong>{currentUser?.name || "Administrator"}</strong>
-              <small>{currentUser?.role || "Admin account"}</small>
-            </span>
-            <span className="profile-chevron" aria-hidden="true">⌄</span>
-          </button>
         </div>
 
       </header>
@@ -3804,6 +4260,19 @@ export default function Home() {
             </div>
           ))}
         </nav>
+        <div className="sidebar-footer">
+          <div className="sidebar-profile" title={!sidebarExpanded ? `${currentUser?.name || "Administrator"} · ${currentUser?.role || "Admin account"}` : undefined}>
+            <span className="profile-icon" aria-hidden="true">♙</span>
+            <span className="sidebar-profile-copy">
+              <strong>{currentUser?.name || "Administrator"}</strong>
+              <small>{currentUser?.role || "Admin account"}</small>
+            </span>
+          </div>
+          <button className="sidebar-logout" type="button" title={!sidebarExpanded ? "Logout" : undefined} onClick={() => setSessionUser(null)}>
+            <span className="sidebar-logout-icon" aria-hidden="true">↪</span>
+            <span className="sidebar-logout-label">Logout</span>
+          </button>
+        </div>
       </aside>
 
       <div className="page-body">
@@ -3846,7 +4315,7 @@ export default function Home() {
               </button>
               {showCreateOptions && (
                 <div className="create-options-menu" role="menu" aria-label="Create assessment options">
-                  <button type="button" role="menuitem" onClick={() => { setShowManualForm(true); setShowCreateOptions(false); }}>
+                  <button type="button" role="menuitem" onClick={() => { setEditingAssessment(null); setShowManualForm(true); setShowCreateOptions(false); }}>
                     <span aria-hidden="true">✎</span>
                     Add manually
                   </button>
@@ -3864,13 +4333,42 @@ export default function Home() {
               currentRole={currentRole}
               key={assessment.id ?? assessment.title}
               onDeleted={(id) => setSavedAssessments((current) => current.filter((item) => item.id !== id))}
+              onEdit={(selectedAssessment) => { setEditingAssessment(selectedAssessment); setShowManualForm(true); }}
             />
           ))}
         </div>
         </section> : activeSection === "Users" ? <UsersPanel currentRole={currentRole} /> : <SectionPlaceholder title={activeSection} />}
       </div>
-      {showManualForm && <ManualAssessmentForm onClose={() => setShowManualForm(false)} onSaved={(assessment) => { setSavedAssessments((current) => [assessment, ...current]); setShowManualForm(false); }} />}
-      {showBulkUpload && <BulkUploadForm onClose={() => setShowBulkUpload(false)} />}
+      {showManualForm && <ManualAssessmentForm
+        initialAssessment={editingAssessment ?? undefined}
+        onClose={() => { setShowManualForm(false); setEditingAssessment(null); }}
+        onSaved={(assessment) => {
+          setSavedAssessments((current) => current.some((item) => item.id === assessment.id)
+            ? current.map((item) => item.id === assessment.id ? assessment : item)
+            : [assessment, ...current]);
+          setShowManualForm(false);
+          setEditingAssessment(null);
+        }}
+      />}
+      {showBulkUpload && <BulkUploadForm
+        onClose={() => setShowBulkUpload(false)}
+        onUploaded={(assessments) => {
+          setSavedAssessments((current) => [
+            ...assessments.map((assessment) => ({
+              id: assessment.id,
+              title: assessment.name,
+              subtitle: assessment.examination,
+              start: assessment.start_date ? new Date(assessment.start_date).toLocaleString() : "Not scheduled",
+              end: assessment.end_date ? new Date(assessment.end_date).toLocaleString() : "Not scheduled",
+              questions: String((assessment.sections ?? []).reduce((total, section) => total + (Number(section.question_count) || 0), 0)),
+              marks: "0",
+              candidates: "0",
+            })),
+            ...current,
+          ]);
+          setShowBulkUpload(false);
+        }}
+      />}
     </main>
   );
 }

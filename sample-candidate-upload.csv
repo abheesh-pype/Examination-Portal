@@ -1,0 +1,3 @@
+Category,Sub-Category,dedfs,ds,ddadafe,test,Candidate Name (Mandatory),Candidate ID (Unique & Mandatory),Candidate Email (Mandatory),bbb
+can cat 1,sub 1,42,2026-09-26,Test entry 001,2026-09-26,Dummy Candidate One,DUMMY-CAND-001,dummy001@example.com,Sample note one
+can cat 1,sub 1,84,2026-09-27,Test entry 002,2026-09-27,Dummy Candidate Two,DUMMY-CAND-002,dummy002@example.com,Sample note two

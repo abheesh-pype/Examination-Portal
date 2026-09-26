@@ -5,6 +5,7 @@ export const runtime = "nodejs";
 
 type QuestionPayload = {
   id?: unknown;
+  rows?: unknown;
   question_type?: unknown;
   question?: unknown;
   category?: unknown;
@@ -54,6 +55,111 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     const body = await request.json() as QuestionPayload;
+    if (Array.isArray(body.rows)) {
+      if (body.rows.length === 0 || body.rows.length > 1000) {
+        return NextResponse.json({ error: "Upload between 1 and 1000 questions at a time" }, { status: 400 });
+      }
+
+      const validQuestionTypes = new Set([
+        "Single Choice", "Multiple Choice", "Fill in the Blank", "True/False", "Yes/No",
+        "Agree/Disagree", "Good/Bad", "Manual Evaluation", "Passage Type",
+      ]);
+      const rowErrors: string[] = [];
+      const preparedRows: Array<{
+        questionType: string;
+        question: string;
+        category: string | null;
+        subCategory: string | null;
+        topic: string | null;
+        difficultyLevel: string | null;
+        language: string | null;
+        details: Record<string, unknown>;
+      }> = [];
+
+      for (const [index, rawRow] of body.rows.entries()) {
+        const rowNumber = index + 2;
+        if (!rawRow || typeof rawRow !== "object" || Array.isArray(rawRow)) {
+          rowErrors.push(`Row ${rowNumber}: invalid row data.`);
+          continue;
+        }
+        const row = rawRow as QuestionPayload;
+        const questionType = optionalText(row.question_type);
+        const question = optionalText(row.question);
+        let details: Record<string, unknown> = {};
+
+        if (!questionType || !validQuestionTypes.has(questionType)) {
+          rowErrors.push(`Row ${rowNumber}: choose a valid Question Type.`);
+        }
+        if (!question) rowErrors.push(`Row ${rowNumber}: Question is required.`);
+        if (typeof row.details === "string" && row.details.trim()) {
+          try {
+            const parsedDetails: unknown = JSON.parse(row.details);
+            if (!parsedDetails || typeof parsedDetails !== "object" || Array.isArray(parsedDetails)) {
+              throw new Error("Details JSON must be an object.");
+            }
+            details = parsedDetails as Record<string, unknown>;
+          } catch {
+            rowErrors.push(`Row ${rowNumber}: Details JSON must be a valid JSON object.`);
+          }
+        } else if (row.details && typeof row.details === "object" && !Array.isArray(row.details)) {
+          details = row.details as Record<string, unknown>;
+        }
+
+        preparedRows.push({
+          questionType: questionType ?? "",
+          question: question ?? "",
+          category: optionalText(row.category),
+          subCategory: optionalText(row.sub_category),
+          topic: optionalText(row.topic),
+          difficultyLevel: optionalText(row.difficulty_level),
+          language: optionalText(row.language),
+          details,
+        });
+      }
+
+      if (rowErrors.length > 0) {
+        return NextResponse.json({ error: "Some rows need correction. No questions were imported.", row_errors: rowErrors }, { status: 400 });
+      }
+
+      await ensureQuestionsTable();
+      const client = await databasePool.connect();
+      let transactionStarted = false;
+      try {
+        await client.query("BEGIN");
+        transactionStarted = true;
+        const insertedRows = [];
+        for (const row of preparedRows) {
+          const result = await client.query(`
+            INSERT INTO questions (
+              question_type, question, category, sub_category, topic,
+              difficulty_level, language, details
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+            RETURNING id, question_type, question, category, sub_category, topic,
+                      difficulty_level, language, details, status, created_at
+          `, [
+            row.questionType,
+            row.question,
+            row.category,
+            row.subCategory,
+            row.topic,
+            row.difficultyLevel,
+            row.language,
+            JSON.stringify(row.details),
+          ]);
+          insertedRows.push(result.rows[0]);
+        }
+        await client.query("COMMIT");
+        transactionStarted = false;
+        return NextResponse.json({ imported: insertedRows.length, questions: insertedRows }, { status: 201 });
+      } catch (error) {
+        if (transactionStarted) await client.query("ROLLBACK").catch(() => undefined);
+        throw error;
+      } finally {
+        client.release();
+      }
+    }
+
     const questionType = optionalText(body.question_type);
     const question = optionalText(body.question);
     if (!questionType || !question) {

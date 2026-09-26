@@ -268,9 +268,17 @@ a {
 .header-navigation {
 	display: grid;
 	width: 100%;
+	min-height: 0;
+	flex: 1 1 auto;
 	gap: 5px;
 	padding: 12px 8px;
-	overflow: visible;
+	overflow-x: hidden;
+	overflow-y: auto;
+	scrollbar-width: none;
+}
+
+.header-navigation::-webkit-scrollbar {
+	display: none;
 }
 
 .app-sidebar {
@@ -285,14 +293,8 @@ a {
 	background: var(--sidebar);
 	border-right: 1px solid #27272a;
 	box-shadow: 8px 0 24px rgba(24, 24, 27, 0.08);
-	overflow-x: hidden;
-	overflow-y: auto;
-	scrollbar-width: none;
+	overflow: hidden;
 	transition: width 220ms ease;
-}
-
-.app-sidebar::-webkit-scrollbar {
-	display: none;
 }
 
 .app-sidebar.is-expanded {
@@ -342,6 +344,109 @@ a {
 
 .app-sidebar.is-expanded .sidebar-toggle-label {
 	display: inline;
+}
+
+.sidebar-footer {
+	position: sticky;
+	bottom: 0;
+	display: grid;
+	flex: 0 0 auto;
+	gap: 7px;
+	margin-top: auto;
+	padding: 12px 8px 16px;
+	background: var(--sidebar);
+	border-top: 1px solid #3f3f46;
+}
+
+.sidebar-profile {
+	display: flex;
+	min-width: 0;
+	min-height: 48px;
+	align-items: center;
+	gap: 10px;
+	padding: 5px 7px;
+	color: #f4f4f5;
+}
+
+.sidebar-profile-copy {
+	display: none;
+	min-width: 0;
+	gap: 3px;
+}
+
+.app-sidebar.is-expanded .sidebar-profile-copy {
+	display: grid;
+}
+
+.sidebar-profile-copy strong,
+.sidebar-profile-copy small {
+	overflow: hidden;
+	font-family: Arial, sans-serif;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.sidebar-profile-copy strong {
+	font-size: 12px;
+}
+
+.sidebar-profile-copy small {
+	color: #a1a1aa;
+	font-size: 11px;
+}
+
+.sidebar-logout {
+	display: flex;
+	width: 100%;
+	min-height: 44px;
+	align-items: center;
+	gap: 12px;
+	padding: 0 14px;
+	color: #d4d4d8;
+	background: transparent;
+	border: 0;
+	border-radius: 7px;
+	cursor: pointer;
+	font-family: Arial, sans-serif;
+	font-size: 13px;
+	font-weight: 700;
+	text-align: left;
+	white-space: nowrap;
+}
+
+.sidebar-logout:hover,
+.sidebar-logout:focus-visible {
+	color: var(--white);
+	background: #3f3f46;
+	outline: none;
+}
+
+.sidebar-logout-icon {
+	display: inline-grid;
+	width: 21px;
+	flex: 0 0 21px;
+	place-items: center;
+	font-size: 18px;
+}
+
+.sidebar-logout-label {
+	display: none;
+}
+
+.app-sidebar.is-expanded .sidebar-logout-label {
+	display: inline;
+}
+
+.app-sidebar:not(.is-expanded) .sidebar-profile {
+	justify-content: center;
+	padding-right: 0;
+	padding-left: 0;
+}
+
+.app-sidebar:not(.is-expanded) .sidebar-logout {
+	justify-content: center;
+	padding-right: 0;
+	padding-left: 0;
 }
 
 .navigation-group {

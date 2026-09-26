@@ -3,6 +3,7 @@
 import React, { useEffect, useRef, useState, type FormEvent } from "react";
 
 const navigationItems = [
+  { label: "Dashboard", icon: "⌂" },
   { label: "Questions", icon: "?" },
   { label: "Assessments", icon: "▣" },
   { label: "Candidates", icon: "♙" },
@@ -36,6 +37,22 @@ const navigationOptionIcons: Record<string, string> = {
   Candidates: "♙",
   Settings: "⚙",
 };
+
+const dashboardPages = [
+  { label: "Questions", icon: "?", description: "Question bank" },
+  { label: "Assessments", icon: "▣", description: "Assessment management" },
+  { label: "Candidates", icon: "♙", description: "Candidate management" },
+  { label: "Users", icon: "♟", description: "Users and roles" },
+  { label: "Question Categories", icon: "▦", description: "Question categories" },
+  { label: "Question Sub Categories", icon: "☷", description: "Question sub-categories" },
+  { label: "Question Topics", icon: "◈", description: "Question topics" },
+  { label: "Difficulty Levels", icon: "▥", description: "Difficulty levels" },
+  { label: "Languages", icon: "文", description: "Question languages" },
+  { label: "Examinations", icon: "▤", description: "Examination types" },
+  { label: "Candidate Categories", icon: "▦", description: "Candidate categories" },
+  { label: "Candidate Sub Categories", icon: "☷", description: "Candidate sub-categories" },
+  { label: "Candidate Settings", icon: "⚙", description: "Candidate settings" },
+];
 
 type AssessmentCardData = {
   id?: number;
@@ -797,6 +814,20 @@ type QuestionTopic = {
   id: number;
   topic: string;
   q_s_category: string;
+  status: boolean;
+  created_at: string;
+};
+
+type QuestionRecord = {
+  id: number;
+  question_type: string;
+  question: string;
+  category: string | null;
+  sub_category: string | null;
+  topic: string | null;
+  difficulty_level: string | null;
+  language: string | null;
+  details: Record<string, unknown>;
   status: boolean;
   created_at: string;
 };
@@ -2739,6 +2770,30 @@ function UsersPanel({ currentRole }: { currentRole?: any }) {
   );
 }
 
+function DashboardPanel({ name, shortcuts, onNavigate }: { name: string; shortcuts: typeof dashboardPages; onNavigate: (section: string) => void }) {
+  return (
+    <section className="dashboard-content">
+      <div className="dashboard-heading">
+        <p className="section-kicker">Examination workspace</p>
+        <h1>Dashboard</h1>
+        <p>Welcome back, {name}.</p>
+      </div>
+      <div className="dashboard-shortcuts">
+        {shortcuts.map((shortcut) => (
+          <button className="dashboard-shortcut" type="button" key={shortcut.label} onClick={() => onNavigate(shortcut.label)}>
+            <span className="dashboard-shortcut-icon" aria-hidden="true">{shortcut.icon}</span>
+            <span className="dashboard-shortcut-copy">
+              <strong>{shortcut.label}</strong>
+              <small>{shortcut.description}</small>
+            </span>
+            <span className="dashboard-shortcut-arrow" aria-hidden="true">›</span>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function SectionPlaceholder({ title }: { title: string }) {
   return (
     <section className="section-placeholder" aria-labelledby={`${title.toLowerCase()}-title`}>
@@ -2749,8 +2804,483 @@ function SectionPlaceholder({ title }: { title: string }) {
   );
 }
 
+function AddQuestionForm({ onClose, onSaved, initialQuestion }: { onClose: () => void; onSaved: (question: QuestionRecord) => void; initialQuestion?: QuestionRecord }) {
+  const initialDetails = initialQuestion?.details ?? {};
+  const initialOptions = Array.isArray(initialDetails.options)
+    ? initialDetails.options.filter((option): option is string => typeof option === "string")
+    : [];
+  const [categories, setCategories] = useState<QuestionCategory[]>([]);
+  const [subCategories, setSubCategories] = useState<QuestionSubCategory[]>([]);
+  const [topics, setTopics] = useState<QuestionTopic[]>([]);
+  const [languages, setLanguages] = useState<LanguageItem[]>([]);
+  const [difficultyLevels, setDifficultyLevels] = useState<DifficultyLevel[]>([]);
+  const [loadingOptions, setLoadingOptions] = useState(true);
+  const [selectedCategory, setSelectedCategory] = useState(initialQuestion?.category ?? "");
+  const [selectedSubCategory, setSelectedSubCategory] = useState(initialQuestion?.sub_category ?? "");
+  const [selectedTopic, setSelectedTopic] = useState(initialQuestion?.topic ?? "");
+  const [selectedQuestionType, setSelectedQuestionType] = useState(initialQuestion?.question_type ?? "");
+  const [singleAnswer, setSingleAnswer] = useState(typeof initialDetails.answer === "string" ? initialDetails.answer : "");
+  const [multipleAnswers, setMultipleAnswers] = useState<string[]>(Array.isArray(initialDetails.answer)
+    ? initialDetails.answer.filter((answer): answer is string => typeof answer === "string")
+    : []);
+  const [selectedOptionAnswer, setSelectedOptionAnswer] = useState(typeof initialDetails.answer === "string" ? initialDetails.answer : "");
+  const [longAnswer, setLongAnswer] = useState(typeof initialDetails.answer === "string" && ["Manual Evaluation", "Passage Type"].includes(initialQuestion?.question_type ?? "") ? initialDetails.answer : "");
+  const [minWords, setMinWords] = useState(typeof initialDetails.min_words === "number" ? String(initialDetails.min_words) : "0");
+  const [maxWords, setMaxWords] = useState(typeof initialDetails.max_words === "number"
+    ? String(initialDetails.max_words)
+    : initialQuestion?.question_type === "Passage Type" ? "200" : "2000");
+  const [answerLimitError, setAnswerLimitError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
+
+  const filteredSubCategories = subCategories.filter((item) => item.category === selectedCategory);
+  const filteredTopics = topics.filter((item) => item.q_s_category === selectedSubCategory);
+  const choiceOptions = ["A", "B", "C", "D", "E"];
+  const isChoiceQuestion = selectedQuestionType === "Single Choice" || selectedQuestionType === "Multiple Choice";
+  const isSingleLineQuestion = selectedQuestionType === "Fill in the Blank" || selectedQuestionType === "True/False" || selectedQuestionType === "Yes/No" || selectedQuestionType === "Agree/Disagree" || selectedQuestionType === "Good/Bad";
+  const fixedAnswerOptions: Record<string, string[]> = {
+    "Yes/No": ["Yes", "No"],
+    "Agree/Disagree": ["Agree", "Disagree"],
+    "Good/Bad": ["Good", "Bad"],
+    "True/False": ["True", "False"],
+  };
+  const usesAnswerButtons = ["True/False", "Agree/Disagree", "Good/Bad"].includes(selectedQuestionType);
+  const hasWordLimits = selectedQuestionType === "Manual Evaluation" || selectedQuestionType === "Passage Type";
+  const answerWordCount = longAnswer.trim() ? longAnswer.trim().split(/\s+/).length : 0;
+
+  useEffect(() => {
+    Promise.all([
+      fetch("/api/question-categories"),
+      fetch("/api/question-sub-categories"),
+      fetch("/api/question-topics"),
+      fetch("/api/languages"),
+      fetch("/api/difficulty-levels"),
+    ])
+      .then(async ([categoryResponse, subCategoryResponse, topicResponse, languageResponse, difficultyResponse]) => {
+        const categoryData = await categoryResponse.json() as QuestionCategory[];
+        const subCategoryData = await subCategoryResponse.json() as QuestionSubCategory[];
+        const topicData = await topicResponse.json() as QuestionTopic[];
+        const languageData = await languageResponse.json() as LanguageItem[];
+        const difficultyData = await difficultyResponse.json() as DifficultyLevel[];
+        setCategories(categoryData.filter((item) => item.status));
+        setSubCategories(subCategoryData.filter((item) => item.status));
+        setTopics(topicData.filter((item) => item.status));
+        setLanguages(languageData.filter((item) => item.status));
+        setDifficultyLevels(difficultyData.filter((item) => item.status));
+      })
+      .catch(() => {
+        setCategories([]);
+        setSubCategories([]);
+        setTopics([]);
+        setLanguages([]);
+        setDifficultyLevels([]);
+      })
+      .finally(() => setLoadingOptions(false));
+  }, []);
+
+  return (
+    <div className="form-overlay" role="presentation">
+      <section className="manual-form question-form" role="dialog" aria-modal="true" aria-labelledby="add-question-title">
+        <div className="manual-form-header">
+          <h1 id="add-question-title">{initialQuestion ? "Update Question" : "Add Question"}</h1>
+          <button className="form-close-icon" type="button" onClick={onClose} aria-label="Close question form">×</button>
+        </div>
+        <form onSubmit={async (event) => {
+          event.preventDefault();
+          if (hasWordLimits) {
+            const minLimit = Number(minWords);
+            const maxLimit = Number(maxWords);
+            if (!minWords || !maxWords || !Number.isInteger(minLimit) || !Number.isInteger(maxLimit) || minLimit < 0 || maxLimit < minLimit) {
+              setAnswerLimitError("Enter valid word limits, with Max Words greater than or equal to Min Words.");
+              return;
+            }
+            if (answerWordCount < minLimit) {
+              setAnswerLimitError(`Answer must contain at least ${minLimit} words.`);
+              return;
+            }
+            if (answerWordCount > maxLimit) {
+              setAnswerLimitError(`Answer cannot exceed ${maxLimit} words.`);
+              return;
+            }
+          }
+          const formData = new FormData(event.currentTarget);
+          const questionText = String(formData.get("question") ?? "").trim();
+          if (!selectedQuestionType || !questionText) {
+            setSaveError("Select a question type and enter the question text.");
+            return;
+          }
+
+          const options = isChoiceQuestion
+            ? choiceOptions.map((option) => String(formData.get(`option_${option}`) ?? "").trim())
+            : fixedAnswerOptions[selectedQuestionType] ?? [];
+          const answer = selectedQuestionType === "Multiple Choice"
+            ? multipleAnswers
+            : selectedQuestionType === "Single Choice"
+              ? singleAnswer
+              : usesAnswerButtons
+                ? selectedOptionAnswer
+                : hasWordLimits
+                  ? longAnswer
+                  : String(formData.get("answer") ?? "");
+
+          setSaving(true);
+          setSaveError("");
+          try {
+            const response = await fetch("/api/questions", {
+              method: initialQuestion ? "PATCH" : "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                ...(initialQuestion ? { id: initialQuestion.id } : {}),
+                question_type: selectedQuestionType,
+                question: questionText,
+                category: selectedCategory,
+                sub_category: selectedSubCategory,
+                topic: selectedTopic,
+                difficulty_level: formData.get("difficulty_level"),
+                language: formData.get("language"),
+                details: {
+                  passage: formData.get("passage"),
+                  answer,
+                  options,
+                  randomize_options: formData.get("randomize_options"),
+                  min_words: hasWordLimits ? Number(minWords) : null,
+                  max_words: hasWordLimits ? Number(maxWords) : null,
+                  enable_file_upload: formData.get("enable_file_upload"),
+                  ignore_case: formData.get("ignore_case"),
+                  is_numeric: formData.get("is_numeric"),
+                  reference: formData.get("reference"),
+                },
+              }),
+            });
+            const data = await response.json() as QuestionRecord & { error?: string };
+            if (!response.ok) throw new Error(data.error ?? "Unable to save question");
+            onSaved(data);
+          } catch (submitError) {
+            setSaveError(submitError instanceof Error ? submitError.message : "Unable to save question");
+          } finally {
+            setSaving(false);
+          }
+        }}>
+          <div className="form-field full-width">
+            <label htmlFor="question-type">Question Type</label>
+            <select id="question-type" name="question_type" value={selectedQuestionType} required onChange={(event) => {
+              const nextType = event.target.value;
+              setSelectedQuestionType(nextType);
+              setSingleAnswer("");
+              setMultipleAnswers([]);
+              setSelectedOptionAnswer("");
+              setLongAnswer("");
+              setMinWords("0");
+              setMaxWords(nextType === "Passage Type" ? "200" : "2000");
+              setAnswerLimitError("");
+            }}>
+              <option value="" disabled>Choose</option>
+              <optgroup label="Objective">
+                <option>Single Choice</option>
+                <option>Multiple Choice</option>
+                <option>Fill in the Blank</option>
+                <option>True/False</option>
+                <option>Yes/No</option>
+                <option>Agree/Disagree</option>
+                <option>Good/Bad</option>
+              </optgroup>
+              <optgroup label="Subjective">
+                <option>Manual Evaluation</option>
+                <option>Passage Type</option>
+              </optgroup>
+            </select>
+          </div>
+
+          {selectedQuestionType === "Passage Type" ? (
+            <>
+              <div className="form-field full-width">
+                <label htmlFor="question-passage">Passage</label>
+                <textarea id="question-passage" name="passage" className="question-textarea" placeholder="Passage" defaultValue={String(initialDetails.passage ?? "")} />
+              </div>
+              <div className="form-field full-width">
+                <label htmlFor="question-text">Question</label>
+                <textarea id="question-text" name="question" className="question-textarea" placeholder="Question" defaultValue={initialQuestion?.question ?? ""} required />
+              </div>
+            </>
+          ) : isSingleLineQuestion ? (
+            <div className="form-field full-width">
+              <label htmlFor="question-text">Question</label>
+              <input id="question-text" name="question" placeholder="Question" defaultValue={initialQuestion?.question ?? ""} required />
+            </div>
+          ) : (
+            <div className="form-field full-width">
+              <label htmlFor="question-text">Question</label>
+              <textarea id="question-text" name="question" className="question-textarea" placeholder="Question" defaultValue={initialQuestion?.question ?? ""} required />
+            </div>
+          )}
+
+          {(selectedQuestionType === "Manual Evaluation" || selectedQuestionType === "Passage Type") && (
+            <>
+              <div className="form-field full-width">
+                <label htmlFor="question-long-answer">Answer <em>(optional)</em></label>
+                <textarea
+                  id="question-long-answer"
+                  name="answer"
+                  className="question-textarea"
+                  placeholder="Answer (optional)"
+                  value={longAnswer}
+                  aria-describedby="question-long-answer-count"
+                  onChange={(event) => {
+                    const nextAnswer = event.target.value;
+                    const nextWordCount = nextAnswer.trim() ? nextAnswer.trim().split(/\s+/).length : 0;
+                    if (maxWords && nextWordCount > Number(maxWords)) {
+                      setAnswerLimitError(`Answer cannot exceed ${maxWords} words.`);
+                      return;
+                    }
+                    setLongAnswer(nextAnswer);
+                    setAnswerLimitError("");
+                  }}
+                />
+                <p id="question-long-answer-count" className="word-limit-feedback" aria-live="polite">
+                  {answerWordCount} words (minimum {minWords || 0}, maximum {maxWords || 0})
+                </p>
+              </div>
+              <div className="manual-evaluation-settings">
+                <div className="form-field">
+                  <label htmlFor="question-min-words">Min Words</label>
+                  <input id="question-min-words" name="min_words" type="number" min="0" step="1" value={minWords} onChange={(event) => { setMinWords(event.target.value); setAnswerLimitError(""); }} />
+                </div>
+                <div className="form-field">
+                  <label htmlFor="question-max-words">Max Words</label>
+                  <input
+                    id="question-max-words"
+                    name="max_words"
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={maxWords}
+                    onChange={(event) => {
+                      const nextMaxWords = event.target.value;
+                      if (nextMaxWords && Number(nextMaxWords) < answerWordCount) {
+                        setAnswerLimitError(`Maximum words cannot be less than the current answer length of ${answerWordCount}.`);
+                        return;
+                      }
+                      setMaxWords(nextMaxWords);
+                      setAnswerLimitError("");
+                    }}
+                  />
+                </div>
+                <div className="form-field">
+                  <label htmlFor="question-enable-file-upload">Enable File Upload</label>
+                  <select id="question-enable-file-upload" name="enable_file_upload" defaultValue={String(initialDetails.enable_file_upload ?? "Yes")}>
+                    <option>Yes</option>
+                    <option>No</option>
+                  </select>
+                </div>
+              </div>
+            </>
+          )}
+
+          {answerLimitError && hasWordLimits && <p className="word-limit-error" role="alert">{answerLimitError}</p>}
+
+          {isChoiceQuestion && (
+            <>
+              <div className="question-options-heading"><h2>Options</h2></div>
+              <div className="form-field full-width">
+                <label htmlFor="randomize-options">Randomize Options</label>
+                <select id="randomize-options" name="randomize_options" defaultValue={String(initialDetails.randomize_options ?? "Yes")}>
+                  <option>Yes</option>
+                  <option>No</option>
+                </select>
+              </div>
+              <div className="question-option-grid">
+                {choiceOptions.map((option, index) => (
+                  <input key={option} name={`option_${option}`} placeholder={`${option}${index > 2 ? " (optional)" : ""}`} aria-label={`Option ${option}`} defaultValue={initialOptions[index] ?? ""} />
+                ))}
+              </div>
+            </>
+          )}
+
+          {selectedQuestionType === "Single Choice" && (
+            <div className="form-field answer-field">
+              <label htmlFor="question-answer">Answer</label>
+              <select id="question-answer" name="answer" value={singleAnswer} onChange={(event) => setSingleAnswer(event.target.value)}>
+                <option value="" disabled>Choose</option>
+                {choiceOptions.map((option) => <option key={option} value={option}>{option}</option>)}
+              </select>
+            </div>
+          )}
+
+          {selectedQuestionType === "Multiple Choice" && (
+            <div className="form-field full-width multiple-answer-field">
+              <label htmlFor="question-multiple-answers">Answers</label>
+              <select
+                id="question-multiple-answers"
+                value=""
+                onChange={(event) => {
+                  const answer = event.target.value;
+                  if (answer) setMultipleAnswers((current) => [...current, answer]);
+                }}
+              >
+                <option value="">Select an answer</option>
+                {choiceOptions.filter((option) => !multipleAnswers.includes(option)).map((option) => (
+                  <option key={option} value={option}>{option}</option>
+                ))}
+              </select>
+              {multipleAnswers.length > 0 && (
+                <div className="selected-answer-list" aria-label="Selected answers">
+                  {multipleAnswers.map((answer) => (
+                    <span className="selected-answer" key={answer}>
+                      {answer}
+                      <button type="button" onClick={() => setMultipleAnswers((current) => current.filter((item) => item !== answer))} aria-label={`Remove answer ${answer}`}>×</button>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {usesAnswerButtons && (
+            <>
+              <div className="question-options-heading true-false-heading"><h2>Options</h2></div>
+              <div className="question-option-grid true-false-option-grid">
+                {fixedAnswerOptions[selectedQuestionType].map((option) => (
+                  <button
+                    className="true-false-option-button"
+                    type="button"
+                    key={option}
+                    aria-pressed={selectedOptionAnswer === option}
+                    onClick={() => setSelectedOptionAnswer(option)}
+                  >
+                    {option}
+                  </button>
+                ))}
+              </div>
+              <div className="question-options-heading true-false-heading"><h2>Answer</h2></div>
+              <div className="form-field answer-field true-false-answer">
+                <label htmlFor="question-paired-choice-answer">Answer</label>
+                <select id="question-paired-choice-answer" name="answer" value={selectedOptionAnswer} onChange={(event) => setSelectedOptionAnswer(event.target.value)}>
+                  <option value="" disabled>Choose</option>
+                  {fixedAnswerOptions[selectedQuestionType].map((answer) => <option key={answer}>{answer}</option>)}
+                </select>
+              </div>
+            </>
+          )}
+
+          {selectedQuestionType === "Fill in the Blank" && (
+            <>
+              <div className="form-field full-width">
+                <label htmlFor="question-text-answer">Answer</label>
+                <input id="question-text-answer" name="answer" defaultValue={typeof initialDetails.answer === "string" ? initialDetails.answer : ""} />
+              </div>
+              <div className="fill-blank-flags">
+                <div className="form-field">
+                  <label htmlFor="question-ignore-case">Ignore Case</label>
+                  <select id="question-ignore-case" name="ignore_case" defaultValue={String(initialDetails.ignore_case ?? "Yes")}>
+                    <option>Yes</option>
+                    <option>No</option>
+                  </select>
+                </div>
+                <div className="form-field">
+                  <label htmlFor="question-is-numeric">Is Numeric</label>
+                  <select id="question-is-numeric" name="is_numeric" defaultValue={String(initialDetails.is_numeric ?? "No")}>
+                    <option>Yes</option>
+                    <option>No</option>
+                  </select>
+                </div>
+              </div>
+            </>
+          )}
+
+          {fixedAnswerOptions[selectedQuestionType] && !usesAnswerButtons && (
+            <div className="form-field answer-field">
+                <label htmlFor="question-fixed-answer">Answer</label>
+                <select id="question-fixed-answer" name="answer" defaultValue={typeof initialDetails.answer === "string" ? initialDetails.answer : ""}>
+                  <option value="" disabled>Choose</option>
+                  {fixedAnswerOptions[selectedQuestionType].map((answer) => <option key={answer}>{answer}</option>)}
+                </select>
+            </div>
+          )}
+
+          <div className="question-metadata-grid">
+            <div className="form-field"><label htmlFor="question-category">Category</label><select id="question-category" value={selectedCategory} onChange={(event) => { setSelectedCategory(event.target.value); setSelectedSubCategory(""); setSelectedTopic(""); }} disabled={loadingOptions}><option value="" disabled>Choose</option>{categories.map((item) => <option key={item.id} value={item.q_category}>{item.q_category}</option>)}</select></div>
+            <div className="form-field"><label htmlFor="question-sub-category">Sub-Category</label><select id="question-sub-category" value={selectedSubCategory} onChange={(event) => { setSelectedSubCategory(event.target.value); setSelectedTopic(""); }} disabled={loadingOptions || !selectedCategory}><option value="" disabled>Choose</option>{filteredSubCategories.map((item) => <option key={item.id} value={item.q_s_category}>{item.q_s_category}</option>)}</select></div>
+            <div className="form-field"><label htmlFor="question-topic">Topic</label><select id="question-topic" value={selectedTopic} onChange={(event) => setSelectedTopic(event.target.value)} disabled={loadingOptions || !selectedSubCategory}><option value="" disabled>Choose</option>{filteredTopics.map((item) => <option key={item.id} value={item.topic}>{item.topic}</option>)}</select></div>
+            <div className="form-field"><label htmlFor="question-difficulty">Difficulty Level</label><select id="question-difficulty" name="difficulty_level" defaultValue={initialQuestion?.difficulty_level ?? ""} disabled={loadingOptions}><option value="" disabled>Choose</option>{difficultyLevels.map((item) => <option key={item.id}>{item.Difficulty_level}</option>)}</select></div>
+            <div className="form-field"><label htmlFor="question-language">Language</label><select id="question-language" name="language" defaultValue={initialQuestion?.language ?? ""} disabled={loadingOptions}><option value="" disabled>Choose</option>{languages.map((item) => <option key={item.id}>{item.q_language}</option>)}</select></div>
+            <div className="form-field"><label htmlFor="question-reference">Reference (optional)</label><input id="question-reference" name="reference" defaultValue={String(initialDetails.reference ?? "")} /></div>
+          </div>
+
+          {saveError && <p className="word-limit-error" role="alert">{saveError}</p>}
+          <div className="form-actions">
+            <button className="form-cancel-button" type="button" onClick={onClose}>Close</button>
+            <button className="form-save-button" type="submit" disabled={saving}>{saving ? "Saving..." : initialQuestion ? "Update" : "Save"}</button>
+          </div>
+        </form>
+      </section>
+    </div>
+  );
+}
+
 function QuestionsPanel({ currentRole }: { currentRole?: any }) {
   const canCreate = hasRolePermission(currentRole, "Questions", "create");
+  const canEdit = hasRolePermission(currentRole, "Questions", "edit");
+  const canDelete = hasRolePermission(currentRole, "Questions", "delete");
+  const [showAddQuestion, setShowAddQuestion] = useState(false);
+  const [editingQuestion, setEditingQuestion] = useState<QuestionRecord | null>(null);
+  const [questions, setQuestions] = useState<QuestionRecord[]>([]);
+  const [loadingQuestions, setLoadingQuestions] = useState(true);
+  const [questionLoadError, setQuestionLoadError] = useState("");
+  const [search, setSearch] = useState("");
+  const [pageSize, setPageSize] = useState(25);
+  const [currentPage, setCurrentPage] = useState(1);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/questions")
+      .then(async (response) => {
+        const data = await response.json() as QuestionRecord[] & { error?: string };
+        if (!response.ok) throw new Error(data.error ?? "Unable to load questions");
+        if (!cancelled) setQuestions(data);
+      })
+      .catch((error) => {
+        if (!cancelled) setQuestionLoadError(error instanceof Error ? error.message : "Unable to load questions");
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingQuestions(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  const normalizedSearch = search.trim().toLowerCase();
+  const filteredQuestions = questions.filter((question) => [
+    question.question_type,
+    question.category,
+    question.sub_category,
+    question.topic,
+    question.difficulty_level,
+    question.language,
+    question.question,
+    question.status ? "active" : "inactive",
+    new Date(question.created_at).toLocaleString(),
+  ].some((value) => String(value ?? "").toLowerCase().includes(normalizedSearch)));
+  const totalPages = Math.max(1, Math.ceil(filteredQuestions.length / pageSize));
+  const visibleQuestions = filteredQuestions.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const firstVisibleEntry = filteredQuestions.length === 0 ? 0 : (currentPage - 1) * pageSize + 1;
+  const lastVisibleEntry = Math.min(currentPage * pageSize, filteredQuestions.length);
+
+  const deleteQuestion = async (question: QuestionRecord) => {
+    if (!window.confirm("Delete this question?")) return;
+    try {
+      const response = await fetch("/api/questions", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: question.id }),
+      });
+      const data = await response.json().catch(() => ({})) as { error?: string };
+      if (!response.ok) throw new Error(data.error ?? "Unable to delete question");
+      setQuestions((current) => current.filter((item) => item.id !== question.id));
+      setQuestionLoadError("");
+      setCurrentPage((page) => Math.min(page, Math.max(1, Math.ceil((questions.length - 1) / pageSize))));
+    } catch (deleteError) {
+      setQuestionLoadError(deleteError instanceof Error ? deleteError.message : "Unable to delete question");
+    }
+  };
 
   return (
     <section className="candidates-section questions-section" id="questions">
@@ -2761,44 +3291,90 @@ function QuestionsPanel({ currentRole }: { currentRole?: any }) {
             <span aria-hidden="true">↥</span> Upload
           </button>}
           {canCreate && (
-            <button className="candidate-action-button" type="button">
+            <button className="candidate-action-button" type="button" onClick={() => { setEditingQuestion(null); setShowAddQuestion(true); }}>
               <span aria-hidden="true">+</span> Add new
             </button>
           )}
         </div>
         <div className="candidate-table-toolbar">
-          <span>Showing 0 to 0 of 0 entries</span>
+          <label className="entries-control" htmlFor="questions-page-size">
+            Show
+            <select id="questions-page-size" value={pageSize} onChange={(event) => { setPageSize(Number(event.target.value)); setCurrentPage(1); }}>
+              {[10, 25, 50, 100].map((size) => <option key={size} value={size}>{size}</option>)}
+            </select>
+            entries
+          </label>
           <label className="search-control" htmlFor="questions-search">
             Search:
-            <input id="questions-search" />
+            <input id="questions-search" value={search} onChange={(event) => { setSearch(event.target.value); setCurrentPage(1); }} />
           </label>
         </div>
         <div className="candidate-table-wrapper">
           <table className="candidate-table">
             <thead>
               <tr>
-                <th>Candidate ID</th>
-                <th>Name</th>
-                <th>Email</th>
+                <th>Type</th>
                 <th>Category</th>
+                <th>Sub-Category</th>
+                <th>Topic</th>
+                <th>Difficulty Level</th>
+                <th>Language</th>
+                <th>Question</th>
                 <th>Status</th>
+                <th>Created On</th>
+                <th>Action</th>
               </tr>
             </thead>
             <tbody>
-              <tr>
-                <td colSpan={5}>No data available in table</td>
-              </tr>
+              {loadingQuestions ? (
+                <tr><td colSpan={10}>Loading questions...</td></tr>
+              ) : questionLoadError ? (
+                <tr><td colSpan={10}>{questionLoadError}</td></tr>
+              ) : visibleQuestions.length > 0 ? visibleQuestions.map((question) => (
+                <tr key={question.id}>
+                  <td>{question.question_type}</td>
+                  <td>{question.category ?? "-"}</td>
+                  <td>{question.sub_category ?? "-"}</td>
+                  <td>{question.topic ?? "-"}</td>
+                  <td>{question.difficulty_level ?? "-"}</td>
+                  <td>{question.language ?? "-"}</td>
+                  <td>{question.question}</td>
+                  <td>{question.status ? "Active" : "Inactive"}</td>
+                  <td>{new Date(question.created_at).toLocaleString()}</td>
+                  <td>
+                    <div className="category-actions">
+                      {canEdit && <button className="category-edit-button" type="button" onClick={() => { setEditingQuestion(question); setShowAddQuestion(true); }}>Update</button>}
+                      {canDelete && <button className="category-delete-button" type="button" onClick={() => deleteQuestion(question).catch(() => undefined)}>Delete</button>}
+                    </div>
+                  </td>
+                </tr>
+              )) : (
+                <tr><td colSpan={10}>{normalizedSearch ? "No questions match your search." : "No questions available."}</td></tr>
+              )}
             </tbody>
           </table>
         </div>
         <div className="candidate-table-footer">
-          <span>Showing 0 to 0 of 0 entries</span>
+          <span>Showing {firstVisibleEntry} to {lastVisibleEntry} of {filteredQuestions.length} entries</span>
           <div>
-            <button type="button" disabled>Previous</button>
-            <button type="button" disabled>Next</button>
+            <button type="button" disabled={currentPage <= 1} onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}>Previous</button>
+            <button type="button" disabled={currentPage >= totalPages} onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}>Next</button>
           </div>
         </div>
       </div>
+      {showAddQuestion && <AddQuestionForm
+        initialQuestion={editingQuestion ?? undefined}
+        onClose={() => { setShowAddQuestion(false); setEditingQuestion(null); }}
+        onSaved={(question) => {
+          setQuestions((current) => current.some((item) => item.id === question.id)
+            ? current.map((item) => item.id === question.id ? question : item)
+            : [question, ...current]);
+          setSearch("");
+          setCurrentPage(1);
+          setShowAddQuestion(false);
+          setEditingQuestion(null);
+        }}
+      />}
     </section>
   );
 }
@@ -2908,7 +3484,7 @@ export default function Home() {
   const [sessionUser, setSessionUser] = useState<any>(null);
   const [isReady, setIsReady] = useState(false);
   const [view, setView] = useState<"grid" | "list">("grid");
-  const [activeSection, setActiveSection] = useState("Assessments");
+  const [activeSection, setActiveSection] = useState("Dashboard");
   const [openNavigation, setOpenNavigation] = useState<string | null>(null);
   const navigationRef = useRef<HTMLElement>(null);
   const [showCreateOptions, setShowCreateOptions] = useState(false);
@@ -3008,6 +3584,7 @@ export default function Home() {
   };
 
   const hasAccess = (sectionId: string) => {
+    if (sectionId === "Dashboard") return true;
     if (!currentRole) return false;
     if (currentRole.administrator_access) return true;
     if (sectionId === "Users") {
@@ -3039,6 +3616,7 @@ export default function Home() {
       return hasAccess(item.label) ? item : null;
     })
     .filter(Boolean) as typeof navigationItems;
+  const visibleDashboardPages = dashboardPages.filter((page) => hasAccess(page.label));
   const assessmentCards = savedAssessments;
 
   useEffect(() => {
@@ -3184,7 +3762,7 @@ export default function Home() {
       </header>
 
       <div className="page-body">
-        {!hasAccess(activeSection) ? <SectionPlaceholder title="Access restricted" /> :
+        {!hasAccess(activeSection) ? <SectionPlaceholder title="Access restricted" /> : activeSection === "Dashboard" ? <DashboardPanel name={currentUser?.name || "Administrator"} shortcuts={visibleDashboardPages} onNavigate={setActiveSection} /> :
         activeSection === "Questions" ? <QuestionsPanel currentRole={currentRole} /> : activeSection === "Question Categories" ? <QuestionCategoriesPanel currentRole={currentRole} /> : activeSection === "Question Sub Categories" ? <QuestionSubCategoriesPanel currentRole={currentRole} /> : activeSection === "Question Topics" ? <QuestionTopicsPanel currentRole={currentRole} /> : activeSection === "Difficulty Levels" ? <DifficultyLevelsPanel currentRole={currentRole} /> : activeSection === "Languages" ? <LanguagesPanel currentRole={currentRole} /> : activeSection === "Examinations" ? <AssessmentTypesPanel currentRole={currentRole} /> : activeSection === "Candidate Categories" ? <CandidateCategoriesPanel currentRole={currentRole} /> : activeSection === "Candidate Sub Categories" ? <CandidateSubCategoriesPanel currentRole={currentRole} /> : activeSection === "Candidate Settings" ? <CandidateSettingsPanel currentRole={currentRole} /> : activeSection === "Candidates" ? <CandidatesPanel currentRole={currentRole} /> : activeSection === "Assessments" ? <section className="assessments-section" id="assessments">
         <div className="assessments-toolbar">
           <div>

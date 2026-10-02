@@ -14,6 +14,7 @@ type QuestionPayload = {
   difficulty_level?: unknown;
   language?: unknown;
   details?: unknown;
+  status?: unknown;
 };
 
 async function ensureQuestionsTable() {
@@ -201,6 +202,27 @@ export async function PATCH(request: Request) {
   try {
     const body = await request.json() as QuestionPayload;
     const id = Number(body.id);
+
+    if (typeof body.status === "boolean") {
+      if (!Number.isInteger(id) || id <= 0) {
+        return NextResponse.json({ error: "A valid question id is required" }, { status: 400 });
+      }
+
+      await ensureQuestionsTable();
+      const statusResult = await databasePool.query(`
+        UPDATE questions
+        SET status = $1
+        WHERE id = $2
+        RETURNING id, question_type, question, category, sub_category, topic,
+                  difficulty_level, language, details, status, created_at
+      `, [body.status, id]);
+
+      if (statusResult.rowCount === 0) {
+        return NextResponse.json({ error: "Question not found" }, { status: 404 });
+      }
+      return NextResponse.json(statusResult.rows[0]);
+    }
+
     const questionType = optionalText(body.question_type);
     const question = optionalText(body.question);
     if (!Number.isInteger(id) || id <= 0 || !questionType || !question) {

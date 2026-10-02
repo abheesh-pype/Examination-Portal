@@ -56,6 +56,8 @@ const dashboardPages = [
   { label: "Candidate Settings", icon: "⚙", description: "Candidate settings" },
 ];
 
+const dashboardShortcutTones = [0, 1, 2, 3, 4, 5, 1, 2, 3, 0, 1, 4, 5];
+
 type AssessmentCardData = {
   id?: number;
   title: string;
@@ -86,7 +88,7 @@ type AssessmentSection = {
   difficulty_percentages: Array<{ level: string; percentage: string }>;
 };
 
-function AssessmentCard({ assessment, currentRole, onDeleted, onEdit }: { assessment: AssessmentCardData; currentRole?: any; onDeleted?: (id: number) => void; onEdit?: (assessment: AssessmentCardData) => void }) {
+function AssessmentCard({ assessment, currentRole, onDeleted, onEdit, onPreview, onAssignCandidates, onAssignEvaluator, onAssignInvigilator, onInvigilate }: { assessment: AssessmentCardData; currentRole?: any; onDeleted?: (id: number) => void; onEdit?: (assessment: AssessmentCardData) => void; onPreview?: (assessment: AssessmentCardData) => void; onAssignCandidates?: (assessment: AssessmentCardData) => void; onAssignEvaluator?: (assessment: AssessmentCardData) => void; onAssignInvigilator?: (assessment: AssessmentCardData) => void; onInvigilate?: (assessment: AssessmentCardData) => void }) {
   const [showOptions, setShowOptions] = useState(false);
   const [openAssignment, setOpenAssignment] = useState<string | null>(null);
   const cardRef = useRef<HTMLElement>(null);
@@ -148,7 +150,7 @@ function AssessmentCard({ assessment, currentRole, onDeleted, onEdit }: { assess
         </button>
         {showOptions && (
           <div className="assessment-options-menu" role="menu">
-            <button type="button" role="menuitem">Preview</button>
+            <button type="button" role="menuitem" onClick={() => { onPreview?.(assessment); setShowOptions(false); }}>Preview</button>
             {canEdit && <button className="option-menu-item" type="button" role="menuitem" onClick={() => { onEdit?.(assessment); setShowOptions(false); }}>Edit</button>}
             {canDelete && assessment.id && <button className="option-menu-item" type="button" role="menuitem" onClick={deleteAssessment}>Delete</button>}
             {assignmentOptions.map((item) => (
@@ -164,14 +166,20 @@ function AssessmentCard({ assessment, currentRole, onDeleted, onEdit }: { assess
                 </button>
                 {openAssignment === item.key && (
                   <div className="assignment-submenu" role="menu">
-                    <button type="button" role="menuitem">Manual</button>
+                    <button type="button" role="menuitem" onClick={() => {
+                      if (item.key === "candidates") onAssignCandidates?.(assessment);
+                      if (item.key === "evaluator") onAssignEvaluator?.(assessment);
+                      if (item.key === "invigilator") onAssignInvigilator?.(assessment);
+                      setShowOptions(false);
+                      setOpenAssignment(null);
+                    }}>Manual</button>
                     <button type="button" role="menuitem">Upload</button>
                   </div>
                 )}
               </div>
             ))}
             <button className="option-menu-item" type="button" role="menuitem">Settings</button>
-            <button className="option-menu-item" type="button" role="menuitem">Invigilate</button>
+            <button className="option-menu-item" type="button" role="menuitem" onClick={() => { onInvigilate?.(assessment); setShowOptions(false); }}>Invigilate</button>
             <button className="option-menu-item" type="button" role="menuitem">Evaluate</button>
             <button className="option-menu-item" type="button" role="menuitem">Reports</button>
           </div>
@@ -195,6 +203,910 @@ function AssessmentCard({ assessment, currentRole, onDeleted, onEdit }: { assess
         </div>
       </div>
     </article>
+  );
+}
+
+function AssessmentPreview({ assessment, onClose }: { assessment: AssessmentCardData; onClose: () => void }) {
+  const [questions, setQuestions] = useState<QuestionRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [retryCount, setRetryCount] = useState(0);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    setError("");
+
+    fetch("/api/questions", { signal: controller.signal })
+      .then(async (response) => {
+        const data = await response.json() as QuestionRecord[] & { error?: string };
+        if (!response.ok) throw new Error(data.error ?? "Unable to load questions");
+        if (!Array.isArray(data)) throw new Error("The question list could not be read.");
+        setQuestions(data);
+      })
+      .catch((loadError) => {
+        if (loadError instanceof Error && loadError.name === "AbortError") return;
+        setError(loadError instanceof Error ? loadError.message : "Unable to load questions");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+
+    return () => controller.abort();
+  }, [assessment.id, retryCount]);
+
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
+
+  const matchesSelection = (questionValue: string | null, selectedValue: string | null | undefined) =>
+    !selectedValue?.trim() || questionValue?.trim().toLocaleLowerCase() === selectedValue.trim().toLocaleLowerCase();
+  const matchingQuestions = questions.filter((question) =>
+    matchesSelection(question.category, assessment.question_category)
+    && matchesSelection(question.sub_category, assessment.sub_category)
+    && matchesSelection(question.topic, assessment.topic)
+    && (!assessment.question_language?.trim() || question.language?.trim().toLocaleLowerCase() === assessment.question_language.trim().toLocaleLowerCase())
+  );
+
+  const sections = assessment.sections?.length ? assessment.sections : [{ name: "Section A", question_type: "", question_count: "", correct_mark: "", wrong_mark: "", difficulty_percentages: [] }];
+  const assignedQuestionIds = new Set<number>();
+  const sectionQuestions = sections.map((section, index) => {
+    const sectionQuestions = matchingQuestions.filter((question) =>
+      !assignedQuestionIds.has(question.id)
+      && (!section.question_type || question.question_type.toLocaleLowerCase() === section.question_type.toLocaleLowerCase())
+    );
+    sectionQuestions.forEach((question) => assignedQuestionIds.add(question.id));
+    return {
+      name: section.name.trim() || `Section ${String.fromCharCode(65 + index)}`,
+      questions: sectionQuestions,
+    };
+  });
+  const unassignedQuestions = matchingQuestions.filter((question) => !assignedQuestionIds.has(question.id));
+  if (unassignedQuestions.length > 0) {
+    sectionQuestions.push({ name: sections.length ? "Other Questions" : "Section A", questions: unassignedQuestions });
+  }
+
+  return (
+    <div className="assessment-preview-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section className="assessment-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="assessment-preview-title">
+        <header className="assessment-preview-header">
+          <div>
+            <h1 id="assessment-preview-title">Preview</h1>
+            <p>{assessment.title}{assessment.subtitle ? ` · ${assessment.subtitle}` : ""}</p>
+            {(assessment.question_category || assessment.sub_category || assessment.topic) && (
+              <p className="assessment-preview-path">
+                {[assessment.question_category, assessment.sub_category, assessment.topic].filter(Boolean).join("  ›  ")}
+              </p>
+            )}
+          </div>
+          <button className="assessment-preview-close" type="button" onClick={onClose} aria-label="Close preview">×</button>
+        </header>
+
+        <div className="assessment-preview-content" aria-live="polite">
+          {loading ? (
+            <p className="assessment-preview-message">Loading assessment questions…</p>
+          ) : error ? (
+            <div className="assessment-preview-message assessment-preview-error" role="alert">
+              <p>{error}</p>
+              <button type="button" onClick={() => setRetryCount((count) => count + 1)}>Try again</button>
+            </div>
+          ) : matchingQuestions.length === 0 ? (
+            <p className="assessment-preview-message">No questions match this assessment’s selected category, subcategory, topic, and language.</p>
+          ) : (
+            sectionQuestions.filter((section) => section.questions.length > 0).map((section) => (
+              <section className="assessment-preview-section" key={section.name}>
+                <div className="assessment-preview-section-heading">
+                  <h2>{section.name}</h2>
+                  <span>{section.questions.length} {section.questions.length === 1 ? "question" : "questions"}</span>
+                </div>
+                <div className="assessment-preview-question-list">
+                  {section.questions.map((question) => {
+                    const options = Array.isArray(question.details.options)
+                      ? question.details.options.filter((option): option is string => typeof option === "string")
+                      : [];
+                    return (
+                      <article className="assessment-preview-question" key={question.id}>
+                        <div className="assessment-preview-question-heading">
+                          <h3>{question.question}</h3>
+                          {!question.status && <span className="assessment-preview-inactive">Inactive</span>}
+                        </div>
+                        {options.length > 0 && (
+                          <ul className={`assessment-preview-options${question.question_type === "Multiple Choice" ? " is-multiple-choice" : ""}`}>
+                            {options.map((option, index) => (
+                              <li key={`${question.id}-${index}`}>
+                                <span className="assessment-preview-option-marker" aria-hidden="true" />
+                                <span>{option}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </article>
+                    );
+                  })}
+                </div>
+              </section>
+            ))
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function CandidateAssignment({ assessment, onClose }: { assessment: AssessmentCardData; onClose: () => void }) {
+  const [categories, setCategories] = useState<CandidateCategory[]>([]);
+  const [subCategories, setSubCategories] = useState<CandidateSubCategory[]>([]);
+  const [candidates, setCandidates] = useState<Array<{ candidate_data?: { category?: string; sub_category?: string }; status?: boolean }>>([]);
+  const [selectedCategory, setSelectedCategory] = useState("");
+  const [assignedIds, setAssignedIds] = useState<number[]>([]);
+  const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  const [selectedRemovalIds, setSelectedRemovalIds] = useState<number[]>([]);
+  const [activeTab, setActiveTab] = useState<"available" | "assigned">("available");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [retryCount, setRetryCount] = useState(0);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    setError("");
+    Promise.all([
+      fetch("/api/candidate-categories", { signal: controller.signal }),
+      fetch("/api/candidate-sub-categories", { signal: controller.signal }),
+      fetch("/api/candidates", { signal: controller.signal }),
+      fetch(`/api/assessment-candidate-assignments?assessmentId=${assessment.id}`, { signal: controller.signal }),
+    ])
+      .then(async ([categoryResponse, subCategoryResponse, candidateResponse, assignmentResponse]) => {
+        const [categoryData, subCategoryData, candidateData, assignmentData] = await Promise.all([
+          categoryResponse.json() as Promise<CandidateCategory[] & { error?: string }>,
+          subCategoryResponse.json() as Promise<CandidateSubCategory[] & { error?: string }>,
+          candidateResponse.json() as Promise<Array<{ candidate_data?: { category?: string; sub_category?: string }; status?: boolean }> & { error?: string }>,
+          assignmentResponse.json() as Promise<number[] & { error?: string }>,
+        ]);
+        if (!categoryResponse.ok) throw new Error(categoryData.error ?? "Unable to load candidate categories");
+        if (!subCategoryResponse.ok) throw new Error(subCategoryData.error ?? "Unable to load candidate sub-categories");
+        if (!candidateResponse.ok) throw new Error(candidateData.error ?? "Unable to load candidates");
+        if (!assignmentResponse.ok) throw new Error(assignmentData.error ?? "Unable to load existing assignments");
+        setCategories(categoryData);
+        setSubCategories(subCategoryData);
+        setCandidates(candidateData);
+        setAssignedIds(assignmentData);
+        setSelectedIds([]);
+        setSelectedRemovalIds([]);
+        setSelectedCategory("");
+      })
+      .catch((loadError) => {
+        if (loadError instanceof Error && loadError.name === "AbortError") return;
+        setError(loadError instanceof Error ? loadError.message : "Unable to load candidate assignment data");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+
+    return () => controller.abort();
+  }, [assessment.id, retryCount]);
+
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
+
+  const assignedSubCategories = subCategories.filter((item) => assignedIds.includes(item.id));
+  const availableSubCategories = subCategories.filter((item) => item.status && !assignedIds.includes(item.id));
+  const availableCategories = categories.filter((item) =>
+    item.status || assignedSubCategories.some((subCategory) => subCategory.category === item.candidate_category)
+  );
+  const categorySubCategories = subCategories.filter((item) =>
+    activeTab === "assigned"
+      ? assignedIds.includes(item.id)
+      : item.category === selectedCategory && item.status && !assignedIds.includes(item.id)
+  );
+  const countCandidates = (subCategory: CandidateSubCategory) => candidates.filter((candidate) =>
+    candidate.status !== false
+    && candidate.candidate_data?.category === subCategory.category
+    && candidate.candidate_data?.sub_category === subCategory.candidate_sub_category
+  ).length;
+
+  const saveAssignments = async () => {
+    if (!assessment.id) {
+      setError("Save this assessment before assigning candidates.");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      const nextAssignedIds = activeTab === "assigned"
+        ? assignedIds.filter((id) => !selectedRemovalIds.includes(id))
+        : [...new Set([...assignedIds, ...selectedIds])];
+      const response = await fetch("/api/assessment-candidate-assignments", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ assessment_id: assessment.id, candidate_sub_category_ids: nextAssignedIds }),
+      });
+      const data = await response.json() as { candidate_sub_category_ids?: number[]; error?: string };
+      if (!response.ok) throw new Error(data.error ?? "Unable to save candidate assignments");
+      const savedIds = data.candidate_sub_category_ids ?? [];
+      setAssignedIds(savedIds);
+      setSelectedIds([]);
+      setSelectedRemovalIds([]);
+      setActiveTab(activeTab === "assigned" ? "available" : "assigned");
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Unable to save candidate assignments");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const toggleSubCategory = (id: number) => {
+    setSelectedIds((current) => current.includes(id) ? current.filter((value) => value !== id) : [...current, id]);
+  };
+  const toggleSubCategoryRemoval = (id: number) => {
+    setSelectedRemovalIds((current) => current.includes(id) ? current.filter((value) => value !== id) : [...current, id]);
+  };
+  const visibleSelectionIds = activeTab === "assigned" ? selectedRemovalIds : selectedIds;
+  const allVisibleSelected = categorySubCategories.length > 0 && categorySubCategories.every((item) => visibleSelectionIds.includes(item.id));
+
+  return (
+    <div className="candidate-assignment-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section className="candidate-assignment-dialog" role="dialog" aria-modal="true" aria-labelledby="candidate-assignment-title">
+        <header className="candidate-assignment-header">
+          <h1 id="candidate-assignment-title">Assign Candidate</h1>
+          <button className="candidate-assignment-close" type="button" onClick={onClose} aria-label="Close candidate assignment">×</button>
+        </header>
+        <div className="candidate-assignment-exam">
+          <span>{assessment.subtitle}</span>
+          <strong>{assessment.title}</strong>
+        </div>
+        <div className="candidate-assignment-tabs" role="tablist" aria-label="Candidate sub-categories">
+          <button className={activeTab === "available" ? "is-active" : ""} type="button" role="tab" aria-selected={activeTab === "available"} onClick={() => setActiveTab("available")}>
+            <span aria-hidden="true">♟</span> Candidate&apos;s Sub-Categories <b>{availableSubCategories.filter((item) => item.category === selectedCategory).length}</b>
+          </button>
+          <button className={activeTab === "assigned" ? "is-active" : ""} type="button" role="tab" aria-selected={activeTab === "assigned"} onClick={() => setActiveTab("assigned")}>
+            <span aria-hidden="true">♟</span> Assigned Candidate&apos;s Sub-Categories <b>{assignedIds.length}</b>
+          </button>
+        </div>
+        <div className="candidate-assignment-panel">
+          {loading ? (
+            <p className="candidate-assignment-message">Loading candidate categories and sub-categories…</p>
+          ) : error && categories.length === 0 ? (
+            <div className="candidate-assignment-message candidate-assignment-error" role="alert">
+              <p>{error}</p>
+              <button type="button" onClick={() => setRetryCount((count) => count + 1)}>Try again</button>
+            </div>
+          ) : (
+            <>
+              {activeTab === "available" && (
+                <label className="candidate-assignment-category" htmlFor="assignment-candidate-category">
+                  <span>Category</span>
+                  <select id="assignment-candidate-category" value={selectedCategory} onChange={(event) => setSelectedCategory(event.target.value)}>
+                    <option value="">Select a category</option>
+                    {availableCategories.map((category) => <option key={category.id} value={category.candidate_category}>{category.candidate_category}</option>)}
+                  </select>
+                </label>
+              )}
+              {error && <p className="candidate-assignment-inline-error" role="alert">{error}</p>}
+              <div className="candidate-assignment-table-wrap">
+                <table className="candidate-assignment-table">
+                  <thead>
+                    <tr>
+                      <th>
+                        <input
+                          type="checkbox"
+                          aria-label="Select all visible sub-categories"
+                          checked={allVisibleSelected}
+                          onChange={() => (activeTab === "assigned" ? setSelectedRemovalIds : setSelectedIds)((current) => {
+                            const visibleIds = categorySubCategories.map((item) => item.id);
+                            return allVisibleSelected
+                              ? current.filter((id) => !visibleIds.includes(id))
+                              : [...new Set([...current, ...visibleIds])];
+                          })}
+                        />
+                      </th>
+                      <th>Sub-Categories</th>
+                      <th>Candidate(s)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {categorySubCategories.map((subCategory) => (
+                      <tr key={subCategory.id}>
+                        <td><input type="checkbox" aria-label={`${activeTab === "assigned" ? "Remove" : "Assign"} ${subCategory.candidate_sub_category}`} checked={visibleSelectionIds.includes(subCategory.id)} onChange={() => activeTab === "assigned" ? toggleSubCategoryRemoval(subCategory.id) : toggleSubCategory(subCategory.id)} /></td>
+                        <td>{subCategory.candidate_sub_category}{!subCategory.status && <small className="candidate-assignment-inactive">Inactive</small>}</td>
+                        <td>{countCandidates(subCategory)}</td>
+                      </tr>
+                    ))}
+                    {categorySubCategories.length === 0 && (
+                      <tr><td colSpan={3}>{activeTab === "assigned" ? "No sub-categories are assigned to this assessment." : selectedCategory ? "No sub-categories in this view." : "Select a candidate category to view its sub-categories."}</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+              {activeTab === "assigned" && assignedIds.length > 0 && (
+                <button className="candidate-assignment-update-button" type="button" onClick={saveAssignments} disabled={saving || selectedRemovalIds.length === 0}>
+                  {saving ? "Saving…" : "REMOVE CANDIDATE"}
+                </button>
+              )}
+              {activeTab === "available" && (
+                <button className="candidate-assignment-update-button" type="button" onClick={saveAssignments} disabled={saving || selectedIds.length === 0}>
+                  {saving ? "Saving…" : "ASSIGN CANDIDATES"}
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+type EvaluatorCandidate = {
+  id: number;
+  name: string;
+  candidate_data?: { category?: string; sub_category?: string; fields?: Record<string, unknown> };
+  status?: boolean;
+};
+
+function getCandidateFieldValue(candidateData: EvaluatorCandidate["candidate_data"], fieldLabel: string) {
+  const fields = candidateData?.fields;
+  if (!fields) return "";
+  const targetLabel = fieldLabel.toLocaleLowerCase();
+  const matchingEntry = Object.entries(fields).find(([label, value]) =>
+    label.trim().toLocaleLowerCase() === targetLabel && value != null && String(value).trim()
+  ) ?? Object.entries(fields).find(([label, value]) =>
+    label.trim().toLocaleLowerCase().startsWith(targetLabel) && value != null && String(value).trim()
+  );
+  return matchingEntry ? String(matchingEntry[1]).trim() : "";
+}
+
+type AssessmentStaffAssignmentRecord = {
+  candidate_id: number;
+  staff_user_id: number;
+  candidate_name: string;
+  candidate_data?: EvaluatorCandidate["candidate_data"];
+  staff_name: string;
+  staff_email: string;
+};
+
+function AssessmentStaffAssignment({ assessment, role, onClose }: { assessment: AssessmentCardData; role: "evaluator" | "invigilator"; onClose: () => void }) {
+  const [categories, setCategories] = useState<CandidateCategory[]>([]);
+  const [subCategories, setSubCategories] = useState<CandidateSubCategory[]>([]);
+  const [candidates, setCandidates] = useState<EvaluatorCandidate[]>([]);
+  const [staffUsers, setStaffUsers] = useState<Array<{ id: number; name: string; email: string; role: string; status: boolean }>>([]);
+  const [assignments, setAssignments] = useState<AssessmentStaffAssignmentRecord[]>([]);
+  const [category, setCategory] = useState("");
+  const [subCategory, setSubCategory] = useState("");
+  const [selectedStaffId, setSelectedStaffId] = useState("");
+  const [visibleCandidateIds, setVisibleCandidateIds] = useState<number[] | null>(null);
+  const [selectedCandidateIds, setSelectedCandidateIds] = useState<number[]>([]);
+  const [selectedAssignedCandidateIds, setSelectedAssignedCandidateIds] = useState<number[]>([]);
+  const [activeTab, setActiveTab] = useState<"candidates" | "assigned">("candidates");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [retryCount, setRetryCount] = useState(0);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    setError("");
+    Promise.all([
+      fetch("/api/candidate-categories", { signal: controller.signal }),
+      fetch("/api/candidate-sub-categories", { signal: controller.signal }),
+      fetch("/api/candidates", { signal: controller.signal }),
+      fetch("/api/users", { signal: controller.signal }),
+      fetch(`/api/assessment-${role}-assignments?assessmentId=${assessment.id}`, { signal: controller.signal }),
+    ])
+      .then(async ([categoryResponse, subCategoryResponse, candidateResponse, usersResponse, assignmentResponse]) => {
+        const [categoryData, subCategoryData, candidateData, usersData, assignmentData] = await Promise.all([
+          categoryResponse.json() as Promise<CandidateCategory[] & { error?: string }>,
+          subCategoryResponse.json() as Promise<CandidateSubCategory[] & { error?: string }>,
+          candidateResponse.json() as Promise<EvaluatorCandidate[] & { error?: string }>,
+          usersResponse.json() as Promise<Array<{ id: number; name: string; email: string; role: string; status: boolean }> & { error?: string }>,
+          assignmentResponse.json() as Promise<Array<Record<string, unknown>> & { error?: string }>,
+        ]);
+        if (!categoryResponse.ok) throw new Error(categoryData.error ?? "Unable to load candidate categories");
+        if (!subCategoryResponse.ok) throw new Error(subCategoryData.error ?? "Unable to load candidate sub-categories");
+        if (!candidateResponse.ok) throw new Error(candidateData.error ?? "Unable to load candidates");
+        if (!usersResponse.ok) throw new Error(usersData.error ?? `Unable to load ${role} accounts`);
+        if (!assignmentResponse.ok) throw new Error(assignmentData.error ?? `Unable to load ${role} assignments`);
+        setCategories(categoryData.filter((item) => item.status));
+        setSubCategories(subCategoryData.filter((item) => item.status));
+        setCandidates(candidateData.filter((item) => item.status !== false));
+        setStaffUsers(usersData.filter((user) => user.role.trim().toLocaleLowerCase() === role));
+        setAssignments(assignmentData.map((assignment) => ({
+          candidate_id: Number(assignment.candidate_id),
+          staff_user_id: Number(assignment[`${role}_user_id`]),
+          candidate_name: String(assignment.candidate_name ?? ""),
+          candidate_data: assignment.candidate_data as EvaluatorCandidate["candidate_data"],
+          staff_name: String(assignment[`${role}_name`] ?? ""),
+          staff_email: String(assignment[`${role}_email`] ?? ""),
+        })));
+        setSelectedCandidateIds([]);
+        setSelectedAssignedCandidateIds([]);
+      })
+      .catch((loadError) => {
+        if (loadError instanceof Error && loadError.name === "AbortError") return;
+        setError(loadError instanceof Error ? loadError.message : `Unable to load ${role} assignment data`);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+
+    return () => controller.abort();
+  }, [assessment.id, retryCount, role]);
+
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
+
+  const availableCategories = [...new Set([
+    ...categories.map((item) => item.candidate_category),
+    ...candidates.map((candidate) => candidate.candidate_data?.category?.trim() ?? ""),
+  ].filter(Boolean))];
+  const availableSubCategories = [...new Set([
+    ...subCategories.filter((item) => item.category === category).map((item) => item.candidate_sub_category),
+    ...candidates
+      .filter((candidate) => candidate.candidate_data?.category === category)
+      .map((candidate) => candidate.candidate_data?.sub_category?.trim() ?? ""),
+  ].filter(Boolean))];
+  const candidatesForSearch = candidates.filter((candidate) => {
+    return candidate.candidate_data?.category === category
+      && candidate.candidate_data?.sub_category === subCategory;
+  });
+  const visibleCandidates = visibleCandidateIds === null
+    ? []
+    : candidatesForSearch.filter((candidate) =>
+      visibleCandidateIds.includes(candidate.id)
+      && !assignments.some((assignment) => assignment.candidate_id === candidate.id)
+    );
+  const toggleCandidate = (id: number) => {
+    setSelectedCandidateIds((current) => current.includes(id) ? current.filter((value) => value !== id) : [...current, id]);
+  };
+  const saveAssignments = async (nextAssignments: AssessmentStaffAssignmentRecord[]) => {
+    if (!assessment.id) {
+      setError(`Save this assessment before assigning ${role}s.`);
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      const response = await fetch(`/api/assessment-${role}-assignments`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          assessment_id: assessment.id,
+          assignments: nextAssignments.map((assignment) => ({
+            candidate_id: assignment.candidate_id,
+            [`${role}_user_id`]: assignment.staff_user_id,
+          })),
+        }),
+      });
+      const data = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(data.error ?? `Unable to save ${role} assignments`);
+      setAssignments(nextAssignments);
+      setSelectedCandidateIds([]);
+      setSelectedAssignedCandidateIds([]);
+      setActiveTab(activeTab === "candidates" ? "assigned" : "candidates");
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : `Unable to save ${role} assignments`);
+    } finally {
+      setSaving(false);
+    }
+  };
+  const assignCandidates = () => {
+    const selectedStaff = staffUsers.find((staff) => String(staff.id) === selectedStaffId);
+    if (!selectedStaff) {
+      setError(`Choose an ${role} before assigning candidates.`);
+      return;
+    }
+    if (selectedCandidateIds.length === 0) {
+      setError("Select at least one candidate to assign.");
+      return;
+    }
+    const newAssignments = selectedCandidateIds.flatMap((candidateId) => {
+      const candidate = candidates.find((item) => item.id === candidateId);
+      return candidate ? [{
+        candidate_id: candidate.id,
+        staff_user_id: selectedStaff.id,
+        candidate_name: getCandidateFieldValue(candidate.candidate_data, "Candidate Name") || candidate.name,
+        candidate_data: candidate.candidate_data,
+        staff_name: selectedStaff.name,
+        staff_email: selectedStaff.email,
+      }] : [];
+    });
+    void saveAssignments([...assignments, ...newAssignments]);
+  };
+  const removeAssignedCandidates = () => {
+    if (selectedAssignedCandidateIds.length === 0) return;
+    void saveAssignments(assignments.filter((assignment) => !selectedAssignedCandidateIds.includes(assignment.candidate_id)));
+  };
+
+  return (
+    <div className="candidate-assignment-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section className="candidate-assignment-dialog evaluator-assignment-dialog" role="dialog" aria-modal="true" aria-labelledby="staff-assignment-title">
+        <header className="candidate-assignment-header">
+          <h1 id="staff-assignment-title">Assign {role === "evaluator" ? "Evaluator" : "Invigilator"}</h1>
+          <button className="candidate-assignment-close" type="button" onClick={onClose} aria-label={`Close ${role} assignment`}>×</button>
+        </header>
+        <div className="candidate-assignment-exam">
+          <span>{assessment.subtitle}</span>
+          <strong>{assessment.title}</strong>
+        </div>
+        <div className="evaluator-assignment-tabs" role="tablist" aria-label="Candidates">
+          <button className={activeTab === "candidates" ? "is-active" : ""} type="button" role="tab" aria-selected={activeTab === "candidates"} onClick={() => setActiveTab("candidates")}>
+            <span aria-hidden="true">♟</span> Candidates <b>{candidates.length - assignments.length}</b>
+          </button>
+          <button className={activeTab === "assigned" ? "is-active" : ""} type="button" role="tab" aria-selected={activeTab === "assigned"} onClick={() => setActiveTab("assigned")}>
+            <span aria-hidden="true">♟</span> Assigned Candidates <b>{assignments.length}</b>
+          </button>
+        </div>
+        <div className="evaluator-assignment-panel">
+          {loading ? (
+            <p className="candidate-assignment-message">Loading candidates and {role}s…</p>
+          ) : error && categories.length === 0 && staffUsers.length === 0 ? (
+            <div className="candidate-assignment-message candidate-assignment-error" role="alert">
+              <p>{error}</p>
+              <button type="button" onClick={() => setRetryCount((count) => count + 1)}>Try again</button>
+            </div>
+          ) : (
+            <>
+              {error && <p className="candidate-assignment-inline-error" role="alert">{error}</p>}
+              <div className="evaluator-assignment-columns">
+                <section className="evaluator-candidate-browser" aria-label="Candidate filters">
+                  {activeTab === "candidates" ? (
+                    <>
+                      <div className="evaluator-candidate-filter-grid">
+                        <label className="evaluator-filter-field">
+                          <span>Category</span>
+                          <select value={category} onChange={(event) => { setCategory(event.target.value); setSubCategory(""); setVisibleCandidateIds(null); setSelectedCandidateIds([]); }}>
+                            <option value="">Choose</option>
+                            {availableCategories.map((item) => <option key={item} value={item}>{item}</option>)}
+                          </select>
+                        </label>
+                        <label className="evaluator-filter-field">
+                          <span>Sub-Category</span>
+                          <select value={subCategory} onChange={(event) => { setSubCategory(event.target.value); setVisibleCandidateIds(null); setSelectedCandidateIds([]); }} disabled={!category}>
+                            <option value="">Choose</option>
+                            {availableSubCategories.map((item) => <option key={item} value={item}>{item}</option>)}
+                          </select>
+                        </label>
+                      </div>
+                      <div className="evaluator-filter-actions">
+                        <button type="button" onClick={() => {
+                          setCategory("");
+                          setSubCategory("");
+                          setSelectedCandidateIds([]);
+                          setVisibleCandidateIds(null);
+                        }}>Reset</button>
+                        <button type="button" onClick={() => {
+                          setVisibleCandidateIds(candidatesForSearch.map((candidate) => candidate.id));
+                          setSelectedCandidateIds([]);
+                        }} disabled={!category || !subCategory}>Get Candidate(s)</button>
+                      </div>
+                    </>
+                  ) : (
+                    <p className="evaluator-filter-help">Assigned candidates are listed on the right with their {role}s.</p>
+                  )}
+                </section>
+                <section className="evaluator-assignment-controls" aria-label={activeTab === "candidates" ? `Candidate results and ${role}` : "Assigned candidates"}>
+                  {activeTab === "candidates" ? (
+                    <>
+                      <label className="evaluator-filter-field evaluator-picker">
+                        <span>{role === "evaluator" ? "Evaluator" : "Invigilator"}</span>
+                        <select value={selectedStaffId} onChange={(event) => setSelectedStaffId(event.target.value)}>
+                          <option value="">Choose</option>
+                          {staffUsers.map((staff) => (
+                            <option key={staff.id} value={staff.id} disabled={!staff.status}>
+                              {staff.name} ({staff.email}){staff.status ? "" : " — Inactive"}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      {staffUsers.length === 0 && <p className="evaluator-empty-state">No user accounts currently have the {role} role. Add a user with the {role} role to assign candidates.</p>}
+                      {visibleCandidateIds !== null ? (
+                        <div className="evaluator-candidate-results evaluator-candidate-table-wrap">
+                          <div className="evaluator-results-heading">
+                            <strong>{visibleCandidates.length} candidate(s)</strong>
+                            <button type="button" onClick={() => setSelectedCandidateIds((current) => {
+                              const visibleIds = visibleCandidates.map((candidate) => candidate.id);
+                              return visibleIds.length > 0 && visibleIds.every((id) => current.includes(id))
+                                ? current.filter((id) => !visibleIds.includes(id))
+                                : [...new Set([...current, ...visibleIds])];
+                            })} disabled={visibleCandidates.length === 0}>
+                              {visibleCandidates.length > 0 && visibleCandidates.every((candidate) => selectedCandidateIds.includes(candidate.id)) ? "Deselect All" : "Select All"}
+                            </button>
+                          </div>
+                          <table className="evaluator-candidate-table">
+                            <thead><tr><th aria-label="Select candidate" /><th>Candidate ID</th><th>Candidate Name</th><th>Category</th><th>Sub-Category</th></tr></thead>
+                            <tbody>
+                              {visibleCandidates.map((candidate) => (
+                                <tr key={candidate.id}>
+                                  <td><input type="checkbox" aria-label={`Select ${candidate.name}`} checked={selectedCandidateIds.includes(candidate.id)} onChange={() => toggleCandidate(candidate.id)} /></td>
+                                  <td>{getCandidateFieldValue(candidate.candidate_data, "Candidate ID") || `ID ${candidate.id}`}</td>
+                                  <td>{getCandidateFieldValue(candidate.candidate_data, "Candidate Name") || candidate.name}</td>
+                                  <td>{candidate.candidate_data?.category ?? "—"}</td>
+                                  <td>{candidate.candidate_data?.sub_category ?? "—"}</td>
+                                </tr>
+                              ))}
+                              {visibleCandidates.length === 0 && <tr><td colSpan={5}>No unassigned candidates match these filters.</td></tr>}
+                            </tbody>
+                          </table>
+                        </div>
+                      ) : (
+                        <p className="evaluator-empty-state">Set category and sub-category filters, then select Get Candidate(s).</p>
+                      )}
+                    </>
+                  ) : (
+                    <div className="evaluator-assigned-candidates evaluator-candidate-table-wrap">
+                      <div className="evaluator-results-heading"><strong>Assigned Candidates ({assignments.length})</strong></div>
+                      <table className="evaluator-candidate-table">
+                        <thead><tr><th aria-label="Select assigned candidate" /><th>Candidate ID</th><th>Candidate Name</th><th>Category</th><th>Sub-Category</th><th>{role === "evaluator" ? "Evaluator" : "Invigilator"}</th></tr></thead>
+                        <tbody>
+                          {assignments.map((assignment) => (
+                            <tr key={assignment.candidate_id}>
+                              <td><input type="checkbox" aria-label={`Select ${assignment.candidate_name} to remove`} checked={selectedAssignedCandidateIds.includes(assignment.candidate_id)} onChange={() => setSelectedAssignedCandidateIds((current) => current.includes(assignment.candidate_id) ? current.filter((id) => id !== assignment.candidate_id) : [...current, assignment.candidate_id])} /></td>
+                              <td>{getCandidateFieldValue(assignment.candidate_data, "Candidate ID") || `ID ${assignment.candidate_id}`}</td>
+                              <td>{getCandidateFieldValue(assignment.candidate_data, "Candidate Name") || assignment.candidate_name}</td>
+                              <td>{assignment.candidate_data?.category ?? "—"}</td>
+                              <td>{assignment.candidate_data?.sub_category ?? "—"}</td>
+                              <td><span className="evaluator-table-name">{assignment.staff_name}</span><small className="evaluator-table-email">{assignment.staff_email}</small></td>
+                            </tr>
+                          ))}
+                          {assignments.length === 0 && <tr><td colSpan={6}>No candidates are assigned to an {role} for this assessment.</td></tr>}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </section>
+              </div>
+              <div className="evaluator-assignment-footer">
+                {activeTab === "candidates" ? (
+                  <button type="button" onClick={assignCandidates} disabled={saving || selectedCandidateIds.length === 0}>
+                    {saving ? "Assigning…" : "Assign Candidate"}
+                  </button>
+                ) : (
+                  <button type="button" onClick={removeAssignedCandidates} disabled={saving || selectedAssignedCandidateIds.length === 0}>
+                    {saving ? "Removing…" : "Remove Candidate"}
+                  </button>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+type InvigilationCandidate = {
+  candidate_id: number;
+  candidate_name: string;
+  candidate_data?: EvaluatorCandidate["candidate_data"];
+  category: string;
+  sub_category: string;
+  candidate_status: boolean;
+  invigilator_name: string;
+};
+
+const liveActivityItems = [
+  { label: "No Face Detected", icon: "◉", tone: "alert" },
+  { label: "OK", icon: "☻", tone: "success" },
+  { label: "Multiple Face Detected", icon: "♟", tone: "alert" },
+  { label: "Camera and Mic blocked!", icon: "▧", tone: "alert" },
+  { label: "Tab change detected!", icon: "▣", tone: "alert" },
+  { label: "Full-Screen Mode disabled!", icon: "▣", tone: "alert" },
+] as const;
+
+function AssessmentInvigilation({ assessment, onClose }: { assessment: AssessmentCardData; onClose: () => void }) {
+  const [activeTab, setActiveTab] = useState<"activity" | "candidates">("activity");
+  const [candidates, setCandidates] = useState<InvigilationCandidate[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [search, setSearch] = useState("");
+  const [candidateAction, setCandidateAction] = useState<{ candidate: InvigilationCandidate; action: "timeline" | "feed" | "restart" } | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    setError("");
+    fetch(`/api/assessment-invigilate-candidates?assessmentId=${assessment.id}`, { signal: controller.signal })
+      .then(async (response) => {
+        const data = await response.json() as InvigilationCandidate[] & { error?: string };
+        if (!response.ok) throw new Error(data.error ?? "Unable to load assessment candidates");
+        if (!Array.isArray(data)) throw new Error("The assessment candidate list could not be read.");
+        setCandidates(data);
+      })
+      .catch((loadError) => {
+        if (loadError instanceof Error && loadError.name === "AbortError") return;
+        setError(loadError instanceof Error ? loadError.message : "Unable to load assessment candidates");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, [assessment.id]);
+
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        if (candidateAction) {
+          setCandidateAction(null);
+        } else {
+          onClose();
+        }
+      }
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [candidateAction, onClose]);
+
+  const normalizedSearch = search.trim().toLocaleLowerCase();
+  const visibleCandidates = candidates.filter((candidate) => [
+    getCandidateFieldValue(candidate.candidate_data, "Candidate ID"),
+    getCandidateFieldValue(candidate.candidate_data, "Candidate Name") || candidate.candidate_name,
+    candidate.category,
+    candidate.sub_category,
+  ].some((value) => value.toLocaleLowerCase().includes(normalizedSearch)));
+  const attendingCount = 0;
+  const assessmentDetails = [
+    { label: "Examination", value: assessment.subtitle },
+    { label: "Start Date", value: assessment.start_date ? new Date(assessment.start_date).toLocaleString() : "" },
+    { label: "End Date", value: assessment.end_date ? new Date(assessment.end_date).toLocaleString() : "" },
+    { label: "Duration", value: assessment.total_time ? `${assessment.total_time} minutes` : "" },
+    { label: "Question Category", value: assessment.question_category ?? "" },
+    { label: "Question Sub-Category", value: assessment.sub_category ?? "" },
+    { label: "Topic", value: assessment.topic ?? "" },
+    { label: "Question Language", value: assessment.question_language ?? "" },
+  ].filter((detail) => detail.value);
+  const actionDetails = candidateAction ? {
+    timeline: {
+      title: `Timeline — ${getCandidateFieldValue(candidateAction.candidate.candidate_data, "Candidate Name") || candidateAction.candidate.candidate_name}`,
+      message: "No exam timeline is available because candidate exam attempts are not implemented yet.",
+    },
+    feed: {
+      title: `Live Feed — ${getCandidateFieldValue(candidateAction.candidate.candidate_data, "Candidate Name") || candidateAction.candidate.candidate_name}`,
+      message: "No live feed is available because exam monitoring is not implemented yet.",
+    },
+    restart: {
+      title: "Restart Exam",
+      message: "Exam restart is not available because candidate exam attempts are not implemented yet. No changes have been made.",
+    },
+  }[candidateAction.action] : null;
+
+  return (
+    <div className="invigilation-overlay">
+      <main className="invigilation-page" aria-label={`Invigilation for ${assessment.title}`}>
+        <header className="invigilation-heading">
+          <button className="invigilation-close" type="button" onClick={onClose} aria-label="Close invigilation view">×</button>
+          <small>{assessment.subtitle}</small>
+          <h1>{assessment.title}</h1>
+        </header>
+        <nav className="invigilation-tabs" aria-label="Invigilation views">
+          <button
+            className={activeTab === "activity" ? "is-active" : ""}
+            type="button"
+            aria-current={activeTab === "activity" ? "page" : undefined}
+            onClick={() => setActiveTab("activity")}
+          >
+            <span aria-hidden="true">⌁</span> Live Activity
+          </button>
+          <button
+            className={activeTab === "candidates" ? "is-active" : ""}
+            type="button"
+            aria-current={activeTab === "candidates" ? "page" : undefined}
+            onClick={() => setActiveTab("candidates")}
+          >
+            <span aria-hidden="true">♟</span> Candidates <b>{attendingCount} / {candidates.length}</b>
+          </button>
+        </nav>
+
+        {assessmentDetails.length > 0 && (
+          <section className="invigilation-assessment-details" aria-label="Assessment details">
+            {assessmentDetails.map((detail) => (
+              <div className="invigilation-assessment-detail" key={detail.label}>
+                <span>{detail.label}</span>
+                <strong>{detail.value}</strong>
+              </div>
+            ))}
+          </section>
+        )}
+
+        {activeTab === "activity" ? (
+          <section className="invigilation-panel" aria-label="Live activity">
+            <p className="invigilation-placeholder">Live activity will be available when exam monitoring is implemented.</p>
+            <div className="invigilation-activity-list">
+              {liveActivityItems.map((item) => (
+                <details className="invigilation-activity-item" key={item.label}>
+                  <summary>
+                    <span className="invigilation-activity-label">
+                      <span className="invigilation-activity-icon" aria-hidden="true">{item.icon}</span>
+                      {item.label}
+                      <b className={`invigilation-count ${item.tone}`}>0</b>
+                    </span>
+                    <span className="invigilation-chevron" aria-hidden="true" />
+                  </summary>
+                  <div className="invigilation-activity-details" aria-live="polite" />
+                </details>
+              ))}
+            </div>
+          </section>
+        ) : (
+          <section className="invigilation-panel invigilation-candidates-panel" aria-label="Assessment candidates">
+            <div className="invigilation-candidates-toolbar">
+              <p><strong>{attendingCount} / {candidates.length}</strong> candidates attending · Attendance tracking is not available yet.</p>
+              <label>
+                Search:
+                <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} />
+              </label>
+            </div>
+            {error && <p className="invigilation-error" role="alert">{error}</p>}
+            <div className="invigilation-table-wrap">
+              <table className="invigilation-table">
+                <thead>
+                  <tr>
+                    <th>Candidate ID</th>
+                    <th>Name</th>
+                    <th>Category</th>
+                    <th>Sub-Category</th>
+                    <th>Invigilator</th>
+                    <th>Start Time</th>
+                    <th>Status</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {loading ? (
+                    <tr><td colSpan={8}>Loading assessment candidates...</td></tr>
+                  ) : visibleCandidates.length === 0 ? (
+                    <tr><td colSpan={8}>{error ? "Unable to show candidates." : "No candidates are assigned to an invigilator for this assessment."}</td></tr>
+                  ) : visibleCandidates.map((candidate) => (
+                    <tr key={candidate.candidate_id}>
+                      <td>{getCandidateFieldValue(candidate.candidate_data, "Candidate ID") || `ID ${candidate.candidate_id}`}</td>
+                      <td>{getCandidateFieldValue(candidate.candidate_data, "Candidate Name") || candidate.candidate_name}</td>
+                      <td>{candidate.category}</td>
+                      <td>{candidate.sub_category}</td>
+                      <td>{candidate.invigilator_name || "—"}</td>
+                      <td>{assessment.start_date ? new Date(assessment.start_date).toLocaleString() : "—"}</td>
+                      <td><span className={`invigilation-candidate-status${candidate.candidate_status ? "" : " is-inactive"}`}>{candidate.candidate_status ? "Not Started Yet" : "Inactive"}</span></td>
+                      <td>
+                        <div className="invigilation-candidate-actions">
+                          <button type="button" aria-label={`View timeline for ${candidate.candidate_name}`} title="View timeline" onClick={() => setCandidateAction({ candidate, action: "timeline" })}>◷</button>
+                          <button type="button" aria-label={`View live feed for ${candidate.candidate_name}`} title="View live feed" onClick={() => setCandidateAction({ candidate, action: "feed" })}>▣</button>
+                          <button type="button" aria-label={`Restart exam for ${candidate.candidate_name}`} title="Restart exam" onClick={() => setCandidateAction({ candidate, action: "restart" })}>↻</button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <footer className="invigilation-table-footer">
+              Showing {visibleCandidates.length ? 1 : 0} to {visibleCandidates.length} of {visibleCandidates.length} entries
+            </footer>
+          </section>
+        )}
+      </main>
+      {actionDetails && (
+        <div className="invigilation-action-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setCandidateAction(null); }}>
+          <section className="invigilation-action-dialog" role="dialog" aria-modal="true" aria-labelledby="invigilation-action-title">
+            <h2 id="invigilation-action-title">{actionDetails.title}</h2>
+            <p>{actionDetails.message}</p>
+            <button type="button" onClick={() => setCandidateAction(null)}>Close</button>
+          </section>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -481,7 +1393,7 @@ function ManualAssessmentForm({ onClose, onSaved, initialAssessment }: { onClose
                   </select>
                   <input data-section-field="question-count" type="number" min="1" aria-label={`Section ${index + 1} question count`} placeholder="Question Count" defaultValue={initialAssessment?.sections?.[index]?.question_count ?? ""} />
                   <input data-section-field="correct-mark" type="number" min="0" aria-label={`Section ${index + 1} correct mark`} placeholder="Correct Mark" defaultValue={initialAssessment?.sections?.[index]?.correct_mark ?? ""} />
-                  <input data-section-field="wrong-mark" type="number" min="0" aria-label={`Section ${index + 1} wrong mark`} placeholder="Wrong Mark" defaultValue={initialAssessment?.sections?.[index]?.wrong_mark ?? ""} />
+                  <input data-section-field="wrong-mark" type="number" max="0" step="any" aria-label={`Section ${index + 1} wrong mark`} placeholder="Wrong Mark (0 or negative)" defaultValue={initialAssessment?.sections?.[index]?.wrong_mark ?? ""} />
                 </div>
                 <p className="difficulty-label">% of Questions from Difficulty Levels <span>(total should be 100)</span></p>
                 <div className="difficulty-fields">
@@ -2829,25 +3741,29 @@ function AddRoleForm({ role, onClose, onSaved }: { role?: any; onClose: () => vo
   );
 }
 
-function AddUserForm({ roles, onClose, onSaved }: { roles: any[]; onClose: () => void; onSaved: () => void }) {
-  const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
-  const [mobile, setMobile] = useState("");
-  const [role, setRole] = useState("");
+function AddUserForm({ roles, user, onClose, onSaved }: { roles: any[]; user?: any; onClose: () => void; onSaved: () => void }) {
+  const [name, setName] = useState(user?.name ?? "");
+  const [email, setEmail] = useState(user?.email ?? "");
+  const [mobile, setMobile] = useState(user?.mobile ?? "");
+  const [role, setRole] = useState(user?.role ?? "");
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
 
   const saveUser = async (e: FormEvent) => {
     e.preventDefault();
     setSaving(true);
+    setError("");
     try {
       const res = await fetch("/api/users", {
-        method: "POST",
+        method: user ? "PUT" : "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, email, mobile, role }),
+        body: JSON.stringify({ ...(user ? { id: user.id } : {}), name, email, mobile, role }),
       });
-      if (res.ok) onSaved();
-    } catch (err) {
-      console.error(err);
+      const result = await res.json() as { error?: string };
+      if (!res.ok) throw new Error(result.error ?? `Unable to ${user ? "update" : "create"} user`);
+      onSaved();
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : `Unable to ${user ? "update" : "create"} user`);
     } finally {
       setSaving(false);
     }
@@ -2857,7 +3773,7 @@ function AddUserForm({ roles, onClose, onSaved }: { roles: any[]; onClose: () =>
     <div className="form-overlay" role="presentation" style={{ zIndex: 1000 }}>
       <section className="candidate-form" role="dialog" aria-modal="true" style={{ width: "500px", maxWidth: "90%" }}>
         <div className="bulk-upload-header" style={{ padding: '20px', borderBottom: '1px solid #eee' }}>
-          <h1 style={{ fontSize: '20px', margin: 0, color: '#444' }}>Add New User</h1>
+          <h1 style={{ fontSize: '20px', margin: 0, color: '#444' }}>{user ? "Edit User" : "Add New User"}</h1>
           <button className="form-close-icon" type="button" onClick={onClose}>×</button>
         </div>
         <form className="candidate-form-fields" onSubmit={saveUser} style={{ display: 'block', padding: '20px' }}>
@@ -2880,9 +3796,73 @@ function AddUserForm({ roles, onClose, onSaved }: { roles: any[]; onClose: () =>
               {roles.map((r) => <option key={r.id} value={r.role_name}>{r.role_name}</option>)}
             </select>
           </div>
+          {error && <p className="form-error" role="alert">{error}</p>}
           <div className="form-actions" style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '20px' }}>
             <button className="form-cancel-button" type="button" onClick={onClose} style={{ padding: '8px 20px', border: '1px solid #ccc', borderRadius: '4px', background: 'transparent' }}>CLOSE</button>
-            <button className="form-save-button" type="submit" disabled={saving || !role} style={{ padding: '8px 20px', border: 'none', borderRadius: '4px', background: '#6366f1', color: 'white', cursor: 'pointer' }}>{saving ? "SAVING..." : "SAVE"}</button>
+            <button className="form-save-button" type="submit" disabled={saving || !role} style={{ padding: '8px 20px', border: 'none', borderRadius: '4px', background: '#6366f1', color: 'white', cursor: 'pointer' }}>{saving ? "SAVING..." : user ? "UPDATE" : "SAVE"}</button>
+          </div>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+function ResetUserPasswordForm({ user, onClose, onSaved }: { user: { id: number; email: string }; onClose: () => void; onSaved: () => void }) {
+  const [password, setPassword] = useState("");
+  const [reenteredPassword, setReenteredPassword] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const resetPassword = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setError("");
+    if (password !== reenteredPassword) {
+      setError("The passwords do not match.");
+      return;
+    }
+    if (!password) {
+      setError("Enter a new password.");
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const response = await fetch("/api/users", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: user.id, password }),
+      });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error ?? "Unable to reset user password");
+      onSaved();
+    } catch (resetError) {
+      setError(resetError instanceof Error ? resetError.message : "Unable to reset user password");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="form-overlay" role="presentation" style={{ zIndex: 1000 }}>
+      <section className="candidate-form" role="dialog" aria-modal="true" aria-labelledby="reset-user-password-title" style={{ width: "500px", maxWidth: "90%" }}>
+        <div className="bulk-upload-header" style={{ padding: "20px", borderBottom: "1px solid #eee" }}>
+          <h1 id="reset-user-password-title" style={{ fontSize: "20px", margin: 0, color: "#444" }}>Reset Password</h1>
+          <button className="form-close-icon" type="button" onClick={onClose} aria-label="Close reset password form">×</button>
+        </div>
+        <form className="candidate-form-fields" onSubmit={resetPassword} style={{ display: "block", padding: "20px" }}>
+          <p className="reset-password-username">Login ID: <strong>{user.email}</strong></p>
+          <div className="form-field full-width" style={{ marginBottom: "15px" }}>
+            <label htmlFor="reset-user-password">Enter Password</label>
+            <input id="reset-user-password" type="password" autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} required style={{ width: "100%", padding: "8px" }} />
+          </div>
+          <div className="form-field full-width" style={{ marginBottom: "15px" }}>
+            <label htmlFor="reenter-user-password">Re-enter Password</label>
+            <input id="reenter-user-password" type="password" autoComplete="new-password" value={reenteredPassword} onChange={(event) => setReenteredPassword(event.target.value)} required style={{ width: "100%", padding: "8px" }} />
+          </div>
+          {error && <p className="form-error" role="alert">{error}</p>}
+          <div className="form-actions" style={{ display: "flex", justifyContent: "flex-end", gap: "10px", marginTop: "20px" }}>
+            <button className="form-cancel-button" type="button" onClick={onClose} disabled={saving} style={{ padding: "8px 20px", border: "1px solid #ccc", borderRadius: "4px", background: "transparent" }}>CLOSE</button>
+            <button className="form-save-button" type="submit" disabled={saving} style={{ padding: "8px 20px", border: "none", borderRadius: "4px", background: "#6366f1", color: "white", cursor: "pointer" }}>{saving ? "RESETTING..." : "RESET PASSWORD"}</button>
           </div>
         </form>
       </section>
@@ -2895,12 +3875,15 @@ function UsersPanel({ currentRole }: { currentRole?: any }) {
   const [showAddRole, setShowAddRole] = useState(false);
   const [editingRole, setEditingRole] = useState<any | null>(null);
   const [showAddUser, setShowAddUser] = useState(false);
+  const [editingUser, setEditingUser] = useState<any | null>(null);
+  const [resettingPasswordUser, setResettingPasswordUser] = useState<any | null>(null);
   const [roles, setRoles] = useState<any[]>([]);
   const [users, setUsers] = useState<any[]>([]);
   const canCreateRoles = hasRolePermission(currentRole, "Users:Roles & Permissions", "create");
   const canEditRoles = hasRolePermission(currentRole, "Users:Roles & Permissions", "edit");
   const canDeleteRoles = hasRolePermission(currentRole, "Users:Roles & Permissions", "delete");
   const canCreateUsers = hasRolePermission(currentRole, "Users:List", "create");
+  const canEditUsers = hasRolePermission(currentRole, "Users:List", "edit");
   const canDeleteUsers = hasRolePermission(currentRole, "Users:List", "delete");
 
   const fetchRoles = () => {
@@ -3036,13 +4019,17 @@ function UsersPanel({ currentRole }: { currentRole?: any }) {
                         className="row-more-button"
                         type="button"
                         aria-label={`Options for ${user.name}`}
+                        aria-haspopup="menu"
+                        aria-expanded={activeUserMenu === user.id}
                         onClick={() => setActiveUserMenu(activeUserMenu === user.id ? null : user.id)}
                       >
                         ⋮
                       </button>
                       {activeUserMenu === user.id && (
                         <div className="row-action-menu" role="menu">
-                          {canDeleteUsers && <button type="button" onClick={() => { deleteUser(user.id); setActiveUserMenu(null); }}>Delete</button>}
+                          {canEditUsers && <button type="button" role="menuitem" onClick={() => { setResettingPasswordUser(user); setActiveUserMenu(null); }}>Reset Password</button>}
+                          {canEditUsers && <button type="button" role="menuitem" onClick={() => { setEditingUser(user); setActiveUserMenu(null); }}>Edit</button>}
+                          {canDeleteUsers && <button type="button" role="menuitem" onClick={() => { deleteUser(user.id); setActiveUserMenu(null); }}>Delete</button>}
                         </div>
                       )}
                     </td>
@@ -3062,6 +4049,21 @@ function UsersPanel({ currentRole }: { currentRole?: any }) {
       {showAddUser && (
         <AddUserForm roles={roles} onClose={() => setShowAddUser(false)} onSaved={() => { setShowAddUser(false); fetchUsers(); }} />
       )}
+      {editingUser && canEditUsers && (
+        <AddUserForm
+          roles={roles}
+          user={editingUser}
+          onClose={() => setEditingUser(null)}
+          onSaved={() => { setEditingUser(null); fetchUsers(); }}
+        />
+      )}
+      {resettingPasswordUser && canEditUsers && (
+        <ResetUserPasswordForm
+          user={resettingPasswordUser}
+          onClose={() => setResettingPasswordUser(null)}
+          onSaved={() => setResettingPasswordUser(null)}
+        />
+      )}
     </section>
   );
 }
@@ -3070,13 +4072,38 @@ function DashboardPanel({ name, shortcuts, onNavigate }: { name: string; shortcu
   return (
     <section className="dashboard-content">
       <div className="dashboard-heading">
-        <p className="section-kicker">Examination workspace</p>
-        <h1>Dashboard</h1>
-        <p>Welcome back, {name}.</p>
+        <div className="dashboard-heading-copy">
+          <p className="section-kicker">Examination workspace</p>
+          <h1>Dashboard</h1>
+          <p>Welcome back, {name}.</p>
+          <p className="dashboard-intro">Manage your examination system efficiently.</p>
+        </div>
+        <div className="dashboard-hero-art" aria-hidden="true">
+          <svg viewBox="0 0 300 150" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M36 129c8-29 28-39 48-26 9-33 50-37 66-10 18-30 54-21 57 8 28-13 52 4 56 28H36Z" fill="#DDD6FE" />
+            <rect x="82" y="28" width="134" height="91" rx="12" fill="#312E81" />
+            <rect x="91" y="37" width="116" height="72" rx="6" fill="white" />
+            <path d="M106 55h71M106 69h88M106 83h61" stroke="#C4B5FD" strokeWidth="5" strokeLinecap="round" />
+            <circle cx="103" cy="55" r="3" fill="#818CF8" />
+            <circle cx="103" cy="69" r="3" fill="#818CF8" />
+            <circle cx="103" cy="83" r="3" fill="#818CF8" />
+            <path d="M70 119h160l-14 9H84l-14-9Z" fill="#A5B4FC" />
+            <path d="m145 17 48 17-48 17-48-17 48-17Z" fill="#4338CA" />
+            <path d="M183 39v20" stroke="#6366F1" strokeWidth="3" strokeLinecap="round" />
+            <path d="M178 60h10l-5 9-5-9Z" fill="#FBBF24" />
+            <circle cx="69" cy="104" r="22" fill="white" stroke="#818CF8" strokeWidth="5" />
+            <path d="M69 91v14l9 5" stroke="#4338CA" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+            <path d="m49 42-4-8m207 54 8-4M62 64l-8 2" stroke="#A78BFA" strokeWidth="4" strokeLinecap="round" />
+          </svg>
+        </div>
+        <div className="dashboard-hero-note">
+          <span aria-hidden="true">✦</span>
+          <strong>Better exams,<br />better future.</strong>
+        </div>
       </div>
       <div className="dashboard-shortcuts">
         {shortcuts.map((shortcut) => (
-          <button className="dashboard-shortcut" type="button" key={shortcut.label} onClick={() => onNavigate(shortcut.label)}>
+          <button className={`dashboard-shortcut dashboard-shortcut-tone-${dashboardShortcutTones[dashboardPages.findIndex((page) => page.label === shortcut.label)] ?? 0}`} type="button" key={shortcut.label} onClick={() => onNavigate(shortcut.label)}>
             <span className="dashboard-shortcut-icon" aria-hidden="true">{shortcut.icon}</span>
             <span className="dashboard-shortcut-copy">
               <strong>{shortcut.label}</strong>
@@ -3664,12 +4691,15 @@ function QuestionsPanel({ currentRole }: { currentRole?: any }) {
   const canCreate = hasRolePermission(currentRole, "Questions", "create");
   const canEdit = hasRolePermission(currentRole, "Questions", "edit");
   const canDelete = hasRolePermission(currentRole, "Questions", "delete");
+  const canStatus = hasRolePermission(currentRole, "Questions", "status");
   const [showQuestionUpload, setShowQuestionUpload] = useState(false);
   const [showAddQuestion, setShowAddQuestion] = useState(false);
   const [editingQuestion, setEditingQuestion] = useState<QuestionRecord | null>(null);
   const [questions, setQuestions] = useState<QuestionRecord[]>([]);
   const [loadingQuestions, setLoadingQuestions] = useState(true);
   const [questionLoadError, setQuestionLoadError] = useState("");
+  const [questionStatusError, setQuestionStatusError] = useState("");
+  const [updatingQuestionStatuses, setUpdatingQuestionStatuses] = useState<number[]>([]);
   const [search, setSearch] = useState("");
   const [pageSize, setPageSize] = useState(25);
   const [currentPage, setCurrentPage] = useState(1);
@@ -3707,6 +4737,25 @@ function QuestionsPanel({ currentRole }: { currentRole?: any }) {
   const visibleQuestions = filteredQuestions.slice((currentPage - 1) * pageSize, currentPage * pageSize);
   const firstVisibleEntry = filteredQuestions.length === 0 ? 0 : (currentPage - 1) * pageSize + 1;
   const lastVisibleEntry = Math.min(currentPage * pageSize, filteredQuestions.length);
+
+  const toggleQuestionStatus = async (question: QuestionRecord) => {
+    setUpdatingQuestionStatuses((current) => [...current, question.id]);
+    setQuestionStatusError("");
+    try {
+      const response = await fetch("/api/questions", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: question.id, status: !question.status }),
+      });
+      const result = await response.json() as QuestionRecord & { error?: string };
+      if (!response.ok) throw new Error(result.error ?? "Unable to update question status");
+      setQuestions((current) => current.map((item) => item.id === result.id ? result : item));
+    } catch (statusError) {
+      setQuestionStatusError(statusError instanceof Error ? statusError.message : "Unable to update question status");
+    } finally {
+      setUpdatingQuestionStatuses((current) => current.filter((id) => id !== question.id));
+    }
+  };
 
   const deleteQuestion = async (question: QuestionRecord) => {
     if (!window.confirm("Delete this question?")) return;
@@ -3753,6 +4802,7 @@ function QuestionsPanel({ currentRole }: { currentRole?: any }) {
             <input id="questions-search" value={search} onChange={(event) => { setSearch(event.target.value); setCurrentPage(1); }} />
           </label>
         </div>
+        {questionStatusError && <p className="form-error" role="alert">{questionStatusError}</p>}
         <div className="candidate-table-wrapper">
           <table className="candidate-table">
             <thead>
@@ -3783,7 +4833,25 @@ function QuestionsPanel({ currentRole }: { currentRole?: any }) {
                   <td>{question.difficulty_level ?? "-"}</td>
                   <td>{question.language ?? "-"}</td>
                   <td>{question.question}</td>
-                  <td>{question.status ? "Active" : "Inactive"}</td>
+                  <td>
+                    {canStatus ? (
+                      <button
+                        className={`question-status-toggle${question.status ? " is-active" : ""}`}
+                        type="button"
+                        role="switch"
+                        aria-checked={question.status}
+                        aria-label={`${question.status ? "Deactivate" : "Activate"} question`}
+                        title={`Click to ${question.status ? "deactivate" : "activate"} this question`}
+                        disabled={updatingQuestionStatuses.includes(question.id)}
+                        onClick={() => toggleQuestionStatus(question)}
+                      >
+                        <span className="question-status-track" aria-hidden="true"><span /></span>
+                        <span>{question.status ? "Active" : "Inactive"}</span>
+                      </button>
+                    ) : (
+                      question.status ? "Active" : "Inactive"
+                    )}
+                  </td>
                   <td>{new Date(question.created_at).toLocaleString()}</td>
                   <td>
                     <div className="category-actions">
@@ -3945,10 +5013,20 @@ export default function Home() {
   const [showCreateOptions, setShowCreateOptions] = useState(false);
   const [showManualForm, setShowManualForm] = useState(false);
   const [editingAssessment, setEditingAssessment] = useState<AssessmentCardData | null>(null);
+  const [previewAssessment, setPreviewAssessment] = useState<AssessmentCardData | null>(null);
+  const [candidateAssignmentAssessment, setCandidateAssignmentAssessment] = useState<AssessmentCardData | null>(null);
+  const [evaluatorAssignmentAssessment, setEvaluatorAssignmentAssessment] = useState<AssessmentCardData | null>(null);
+  const [invigilatorAssignmentAssessment, setInvigilatorAssignmentAssessment] = useState<AssessmentCardData | null>(null);
+  const [invigilatingAssessment, setInvigilatingAssessment] = useState<AssessmentCardData | null>(null);
   const [showBulkUpload, setShowBulkUpload] = useState(false);
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [currentRole, setCurrentRole] = useState<any>(null);
   const [savedAssessments, setSavedAssessments] = useState<AssessmentCardData[]>([]);
+  const [moduleSearch, setModuleSearch] = useState("");
+  const [showModuleSearchResults, setShowModuleSearchResults] = useState(false);
+  const [profileMenuAnchor, setProfileMenuAnchor] = useState<"header" | "sidebar" | null>(null);
+  const headerProfileRef = useRef<HTMLDivElement>(null);
+  const sidebarProfileRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const savedUser = window.localStorage.getItem(AUTH_STORAGE_KEY);
@@ -4089,6 +5167,15 @@ export default function Home() {
     })
     .filter(Boolean) as typeof navigationItems;
   const visibleDashboardPages = dashboardPages.filter((page) => hasAccess(page.label));
+  const searchableDashboardPages = [
+    { label: "Dashboard", description: "Examination workspace" },
+    ...visibleDashboardPages,
+  ];
+  const matchingDashboardPages = moduleSearch.trim()
+    ? searchableDashboardPages.filter((page) =>
+      `${page.label} ${page.description}`.toLowerCase().includes(moduleSearch.trim().toLowerCase())
+    ).slice(0, 6)
+    : [];
   const assessmentCards = savedAssessments;
 
   useEffect(() => {
@@ -4108,11 +5195,28 @@ export default function Home() {
   }, [openNavigation, sidebarExpanded]);
 
   useEffect(() => {
+    if (!profileMenuAnchor) return;
+
+    const closeProfileMenuOutside = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (
+        !headerProfileRef.current?.contains(target) &&
+        !sidebarProfileRef.current?.contains(target)
+      ) {
+        setProfileMenuAnchor(null);
+      }
+    };
+
+    document.addEventListener("pointerdown", closeProfileMenuOutside);
+    return () => document.removeEventListener("pointerdown", closeProfileMenuOutside);
+  }, [profileMenuAnchor]);
+
+  useEffect(() => {
     if (!sidebarExpanded || sidebarHovered) return;
     const timeout = window.setTimeout(() => {
       setSidebarExpanded(false);
       setOpenNavigation(null);
-    }, 3000);
+    }, 2000);
     return () => window.clearTimeout(timeout);
   }, [sidebarExpanded, sidebarHovered]);
 
@@ -4132,6 +5236,106 @@ export default function Home() {
             <span className="brand-mark">U</span>
             <span className="brand-name">ums<span>.</span>exam</span>
           </a>
+          <button
+            className="header-sidebar-toggle"
+            type="button"
+            aria-label={sidebarExpanded ? "Collapse navigation" : "Expand navigation"}
+            aria-expanded={sidebarExpanded}
+            onClick={() => {
+              setSidebarExpanded((expanded) => !expanded);
+              setOpenNavigation(null);
+            }}
+          >
+            <span aria-hidden="true">☰</span>
+          </button>
+          <div className="header-module-search">
+            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none">
+              <circle cx="10.8" cy="10.8" r="6.8" stroke="currentColor" strokeWidth="1.8" />
+              <path d="m16 16 4.2 4.2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+            </svg>
+            <input
+              id="header-module-search"
+              role="combobox"
+              aria-label="Search modules and pages"
+              aria-expanded={showModuleSearchResults && matchingDashboardPages.length > 0}
+              aria-controls="header-search-results"
+              aria-autocomplete="list"
+              placeholder="Search modules, pages..."
+              value={moduleSearch}
+              onChange={(event) => {
+                setModuleSearch(event.target.value);
+                setShowModuleSearchResults(true);
+              }}
+              onFocus={() => setShowModuleSearchResults(true)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") setShowModuleSearchResults(false);
+                if (event.key === "Enter" && matchingDashboardPages[0]) {
+                  setActiveSection(matchingDashboardPages[0].label);
+                  setModuleSearch("");
+                  setShowModuleSearchResults(false);
+                }
+              }}
+            />
+            {showModuleSearchResults && matchingDashboardPages.length > 0 && (
+              <div id="header-search-results" className="header-search-results" role="listbox" aria-label="Matching modules">
+                {matchingDashboardPages.map((page) => (
+                  <button
+                    key={page.label}
+                    type="button"
+                    role="option"
+                    aria-selected="false"
+                    onClick={() => {
+                      setActiveSection(page.label);
+                      setModuleSearch("");
+                      setShowModuleSearchResults(false);
+                    }}
+                  >
+                    <span>{page.label}</span>
+                    <small>{page.description}</small>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <span className="header-notification" aria-label="Notifications">
+            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none">
+              <path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9ZM10 21h4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+              <circle cx="18" cy="5" r="2.5" fill="#F472B6" stroke="white" strokeWidth="1.5" />
+            </svg>
+          </span>
+          <div className="header-profile-menu" ref={headerProfileRef}>
+            <button
+              className="header-user"
+              type="button"
+              aria-label={`Profile menu for ${currentUser?.name || "Administrator"}`}
+              aria-haspopup="menu"
+              aria-expanded={profileMenuAnchor === "header"}
+              onClick={() => setProfileMenuAnchor(profileMenuAnchor === "header" ? null : "header")}
+            >
+              <span className="header-user-avatar">{String(currentUser?.name || "A").slice(0, 1).toUpperCase()}</span>
+              <span className="header-user-copy">
+                <small>Welcome back,</small>
+                <strong>{currentUser?.name || "Administrator"}</strong>
+              </span>
+              <span className="header-user-chevron" aria-hidden="true">⌄</span>
+            </button>
+            {profileMenuAnchor === "header" && (
+              <div className="profile-dropdown header-profile-dropdown" role="menu">
+                <div className="profile-dropdown-heading">
+                  <strong>{currentUser?.name || "Administrator"}</strong>
+                  <small>{currentUser?.role || "Admin account"}</small>
+                </div>
+                <button
+                  className="profile-menu-logout"
+                  type="button"
+                  role="menuitem"
+                  onClick={() => { setProfileMenuAnchor(null); setSessionUser(null); }}
+                >
+                  <span aria-hidden="true">↪</span> Logout
+                </button>
+              </div>
+            )}
+          </div>
         </div>
 
       </header>
@@ -4141,7 +5345,19 @@ export default function Home() {
         className={`app-sidebar${sidebarExpanded ? " is-expanded" : ""}`}
         aria-label="Application sidebar"
         onMouseEnter={() => { setSidebarHovered(true); setSidebarExpanded(true); }}
-        onMouseLeave={() => setSidebarHovered(false)}
+        onMouseLeave={() => {
+          setSidebarHovered(false);
+          setSidebarExpanded(false);
+          setOpenNavigation(null);
+        }}
+        onWheelCapture={() => {
+          setSidebarHovered(true);
+          setSidebarExpanded(true);
+        }}
+        onTouchMove={() => {
+          setSidebarHovered(true);
+          setSidebarExpanded(true);
+        }}
         onClick={(event) => {
           const target = event.target as HTMLElement;
           if (!target.closest("button") && !sidebarExpanded) setSidebarExpanded(true);
@@ -4261,17 +5477,39 @@ export default function Home() {
           ))}
         </nav>
         <div className="sidebar-footer">
-          <div className="sidebar-profile" title={!sidebarExpanded ? `${currentUser?.name || "Administrator"} · ${currentUser?.role || "Admin account"}` : undefined}>
-            <span className="profile-icon" aria-hidden="true">♙</span>
-            <span className="sidebar-profile-copy">
-              <strong>{currentUser?.name || "Administrator"}</strong>
-              <small>{currentUser?.role || "Admin account"}</small>
-            </span>
+          <div className="sidebar-profile-menu" ref={sidebarProfileRef}>
+            <button
+              className="sidebar-profile"
+              type="button"
+              title={!sidebarExpanded ? `${currentUser?.name || "Administrator"} · ${currentUser?.role || "Admin account"}` : undefined}
+              aria-label={`Profile menu for ${currentUser?.name || "Administrator"}`}
+              aria-haspopup="menu"
+              aria-expanded={profileMenuAnchor === "sidebar"}
+              onClick={() => setProfileMenuAnchor(profileMenuAnchor === "sidebar" ? null : "sidebar")}
+            >
+              <span className="profile-icon" aria-hidden="true">♙</span>
+              <span className="sidebar-profile-copy">
+                <strong>{currentUser?.name || "Administrator"}</strong>
+                <small>{currentUser?.role || "Admin account"}</small>
+              </span>
+            </button>
+            {profileMenuAnchor === "sidebar" && (
+              <div className="profile-dropdown sidebar-profile-dropdown" role="menu">
+                <div className="profile-dropdown-heading">
+                  <strong>{currentUser?.name || "Administrator"}</strong>
+                  <small>{currentUser?.role || "Admin account"}</small>
+                </div>
+                <button
+                  className="profile-menu-logout"
+                  type="button"
+                  role="menuitem"
+                  onClick={() => { setProfileMenuAnchor(null); setSessionUser(null); }}
+                >
+                  <span aria-hidden="true">↪</span> Logout
+                </button>
+              </div>
+            )}
           </div>
-          <button className="sidebar-logout" type="button" title={!sidebarExpanded ? "Logout" : undefined} onClick={() => setSessionUser(null)}>
-            <span className="sidebar-logout-icon" aria-hidden="true">↪</span>
-            <span className="sidebar-logout-label">Logout</span>
-          </button>
         </div>
       </aside>
 
@@ -4334,11 +5572,21 @@ export default function Home() {
               key={assessment.id ?? assessment.title}
               onDeleted={(id) => setSavedAssessments((current) => current.filter((item) => item.id !== id))}
               onEdit={(selectedAssessment) => { setEditingAssessment(selectedAssessment); setShowManualForm(true); }}
+              onPreview={setPreviewAssessment}
+              onAssignCandidates={setCandidateAssignmentAssessment}
+              onAssignEvaluator={setEvaluatorAssignmentAssessment}
+              onAssignInvigilator={setInvigilatorAssignmentAssessment}
+              onInvigilate={setInvigilatingAssessment}
             />
           ))}
         </div>
         </section> : activeSection === "Users" ? <UsersPanel currentRole={currentRole} /> : <SectionPlaceholder title={activeSection} />}
       </div>
+      {previewAssessment && <AssessmentPreview assessment={previewAssessment} onClose={() => setPreviewAssessment(null)} />}
+      {candidateAssignmentAssessment && <CandidateAssignment assessment={candidateAssignmentAssessment} onClose={() => setCandidateAssignmentAssessment(null)} />}
+      {evaluatorAssignmentAssessment && <AssessmentStaffAssignment assessment={evaluatorAssignmentAssessment} role="evaluator" onClose={() => setEvaluatorAssignmentAssessment(null)} />}
+      {invigilatorAssignmentAssessment && <AssessmentStaffAssignment assessment={invigilatorAssignmentAssessment} role="invigilator" onClose={() => setInvigilatorAssignmentAssessment(null)} />}
+      {invigilatingAssessment && <AssessmentInvigilation assessment={invigilatingAssessment} onClose={() => setInvigilatingAssessment(null)} />}
       {showManualForm && <ManualAssessmentForm
         initialAssessment={editingAssessment ?? undefined}
         onClose={() => { setShowManualForm(false); setEditingAssessment(null); }}
@@ -4372,4 +5620,3 @@ export default function Home() {
     </main>
   );
 }
-

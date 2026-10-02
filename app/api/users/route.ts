@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { databasePool } from "@/lib/db";
+import { hashPassword } from "@/lib/password";
 
 export const runtime = "nodejs";
 
@@ -43,7 +44,7 @@ export async function POST(request: Request) {
   try {
     const body = await request.json();
     const { name, email, mobile, role } = body;
-    const password = "123456"; // default password
+    const password = await hashPassword("123456");
 
     await ensureUsersTable();
     const result = await databasePool.query(
@@ -59,6 +60,86 @@ export async function POST(request: Request) {
   } catch (error) {
     console.error("Failed to create user", error);
     return NextResponse.json({ error: "Unable to create user" }, { status: 500 });
+  }
+}
+
+export async function PATCH(request: Request) {
+  try {
+    const body = await request.json() as { id?: unknown; password?: unknown };
+    const userId = Number(body.id);
+    const password = typeof body.password === "string" ? body.password : "";
+
+    if (!Number.isInteger(userId) || userId <= 0) {
+      return NextResponse.json({ error: "A valid user id is required" }, { status: 400 });
+    }
+    if (!password) {
+      return NextResponse.json({ error: "A new password is required" }, { status: 400 });
+    }
+
+    await ensureUsersTable();
+    const result = await databasePool.query(
+      `
+        UPDATE users
+        SET password = $2
+        WHERE id = $1
+        RETURNING id, name, email
+      `,
+      [userId, await hashPassword(password)],
+    );
+
+    if (result.rowCount === 0) {
+      return NextResponse.json({ error: "User not found" }, { status: 404 });
+    }
+    return NextResponse.json({ success: true, user: result.rows[0] });
+  } catch (error) {
+    console.error("Failed to reset user password", error);
+    return NextResponse.json({ error: "Unable to reset user password" }, { status: 500 });
+  }
+}
+
+export async function PUT(request: Request) {
+  try {
+    const body = await request.json() as {
+      id?: unknown;
+      name?: unknown;
+      email?: unknown;
+      mobile?: unknown;
+      role?: unknown;
+    };
+    const userId = Number(body.id);
+    const name = typeof body.name === "string" ? body.name.trim() : "";
+    const email = typeof body.email === "string" ? body.email.trim() : "";
+    const mobile = typeof body.mobile === "string" ? body.mobile.trim() : "";
+    const role = typeof body.role === "string" ? body.role.trim() : "";
+
+    if (!Number.isInteger(userId) || userId <= 0) {
+      return NextResponse.json({ error: "A valid user id is required" }, { status: 400 });
+    }
+    if (!name || !email || !mobile || !role) {
+      return NextResponse.json({ error: "Name, email, mobile, and role are required" }, { status: 400 });
+    }
+
+    await ensureUsersTable();
+    const result = await databasePool.query(
+      `
+        UPDATE users
+        SET name = $2, email = $3, mobile = $4, role = $5
+        WHERE id = $1
+        RETURNING id, name, email, role, mobile, status, verified, created_on
+      `,
+      [userId, name, email, mobile, role],
+    );
+
+    if (result.rowCount === 0) {
+      return NextResponse.json({ error: "User not found" }, { status: 404 });
+    }
+    return NextResponse.json(result.rows[0]);
+  } catch (error) {
+    if (typeof error === "object" && error !== null && "code" in error && error.code === "23505") {
+      return NextResponse.json({ error: "A user with this email already exists" }, { status: 409 });
+    }
+    console.error("Failed to update user", error);
+    return NextResponse.json({ error: "Unable to update user" }, { status: 500 });
   }
 }
 

@@ -50,6 +50,13 @@ const optionalDate = (value: unknown) => {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 };
+const hasInvalidWrongMark = (sections: unknown) => Array.isArray(sections) && sections.some((section) => {
+  if (!section || typeof section !== "object" || Array.isArray(section)) return false;
+  const wrongMark = (section as { wrong_mark?: unknown }).wrong_mark;
+  if (wrongMark === undefined || wrongMark === null || wrongMark === "") return false;
+  const parsed = typeof wrongMark === "number" || typeof wrongMark === "string" ? Number(wrongMark) : Number.NaN;
+  return !Number.isFinite(parsed) || parsed > 0;
+});
 
 export async function GET() {
   try {
@@ -130,6 +137,9 @@ export async function POST(request: Request) {
             rowErrors.push(`Row ${rowNumber}: Sections JSON must be a valid JSON array.`);
           }
         }
+        if (hasInvalidWrongMark(sections)) {
+          rowErrors.push(`Row ${rowNumber}: Wrong Mark must be zero or a negative number.`);
+        }
 
         preparedRows.push({
           examination: examination ?? "",
@@ -200,6 +210,9 @@ export async function POST(request: Request) {
     }
 
     const sections = Array.isArray(body.sections) ? body.sections : [];
+    if (hasInvalidWrongMark(sections)) {
+      return NextResponse.json({ error: "Wrong Mark must be zero or a negative number." }, { status: 400 });
+    }
     await ensureAssessmentTable();
     const result = await databasePool.query(`
       INSERT INTO assessment (
@@ -242,6 +255,9 @@ export async function PATCH(request: Request) {
     }
 
     const sections = Array.isArray(body.sections) ? body.sections : [];
+    if (hasInvalidWrongMark(sections)) {
+      return NextResponse.json({ error: "Wrong Mark must be zero or a negative number." }, { status: 400 });
+    }
     await ensureAssessmentTable();
     const result = await databasePool.query(`
       UPDATE assessment

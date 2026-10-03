@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import NextImage from "next/image";
 import Papa from "papaparse";
 import readXlsxFile from "read-excel-file/browser";
 
@@ -88,7 +89,15 @@ type AssessmentSection = {
   difficulty_percentages: Array<{ level: string; percentage: string }>;
 };
 
-function AssessmentCard({ assessment, currentRole, onDeleted, onEdit, onPreview, onAssignCandidates, onAssignEvaluator, onAssignInvigilator, onInvigilate }: { assessment: AssessmentCardData; currentRole?: any; onDeleted?: (id: number) => void; onEdit?: (assessment: AssessmentCardData) => void; onPreview?: (assessment: AssessmentCardData) => void; onAssignCandidates?: (assessment: AssessmentCardData) => void; onAssignEvaluator?: (assessment: AssessmentCardData) => void; onAssignInvigilator?: (assessment: AssessmentCardData) => void; onInvigilate?: (assessment: AssessmentCardData) => void }) {
+function getAssessmentMaxMark(sections: AssessmentSection[] | undefined) {
+  return (sections ?? []).reduce((total, section) => {
+    const questionCount = Number(section.question_count);
+    const correctMark = Number(section.correct_mark);
+    return total + (Number.isFinite(questionCount) && Number.isFinite(correctMark) ? questionCount * correctMark : 0);
+  }, 0);
+}
+
+function AssessmentCard({ assessment, currentRole, canEvaluate, onDeleted, onEdit, onPreview, onAssignCandidates, onAssignEvaluator, onAssignInvigilator, onInvigilate, onEvaluate }: { assessment: AssessmentCardData; currentRole?: any; canEvaluate?: boolean; onDeleted?: (id: number) => void; onEdit?: (assessment: AssessmentCardData) => void; onPreview?: (assessment: AssessmentCardData) => void; onAssignCandidates?: (assessment: AssessmentCardData) => void; onAssignEvaluator?: (assessment: AssessmentCardData) => void; onAssignInvigilator?: (assessment: AssessmentCardData) => void; onInvigilate?: (assessment: AssessmentCardData) => void; onEvaluate?: (assessment: AssessmentCardData) => void }) {
   const [showOptions, setShowOptions] = useState(false);
   const [openAssignment, setOpenAssignment] = useState<string | null>(null);
   const cardRef = useRef<HTMLElement>(null);
@@ -180,7 +189,7 @@ function AssessmentCard({ assessment, currentRole, onDeleted, onEdit, onPreview,
             ))}
             <button className="option-menu-item" type="button" role="menuitem">Settings</button>
             <button className="option-menu-item" type="button" role="menuitem" onClick={() => { onInvigilate?.(assessment); setShowOptions(false); }}>Invigilate</button>
-            <button className="option-menu-item" type="button" role="menuitem">Evaluate</button>
+            {canEvaluate && <button className="option-menu-item" type="button" role="menuitem" onClick={() => { onEvaluate?.(assessment); setShowOptions(false); }}>Evaluate</button>}
             <button className="option-menu-item" type="button" role="menuitem">Reports</button>
           </div>
         )}
@@ -332,6 +341,380 @@ function AssessmentPreview({ assessment, onClose }: { assessment: AssessmentCard
             ))
           )}
         </div>
+      </section>
+    </div>
+  );
+}
+
+type EvaluationCandidate = {
+  candidate_id: number;
+  candidate_name: string;
+  candidate_code: string;
+  category: string;
+  sub_category: string;
+  status: "Pending" | "Submitted" | "Evaluated";
+  has_submission: boolean;
+  started_at: string | null;
+  submitted_at: string | null;
+  evaluated_at: string | null;
+  obtained_mark: number | null;
+};
+
+type EvaluationQuestion = {
+  id: number;
+  question_type: string;
+  question: string;
+  section: string;
+  options: string[];
+  correct_answer: unknown;
+  correct_mark: number;
+  wrong_mark: number;
+  passage: string | null;
+  grade: { status: "correct" | "incorrect" | "manual" | "unanswered"; mark: number | null } | null;
+  is_manual: boolean;
+};
+
+type EvaluationDetail = {
+  assessment: { id: number; name: string; examination: string };
+  candidate: {
+    id: number;
+    name: string;
+    candidate_id: string;
+    category: string;
+    sub_category: string;
+  };
+  started_at: string;
+  submitted_at: string;
+  evaluated_at: string | null;
+  obtained_mark: number | null;
+  max_mark: number;
+  answers: Record<string, string | string[]>;
+  manual_marks: Record<string, number>;
+  selfie_photo: string;
+  id_photo: string;
+  questions: EvaluationQuestion[];
+};
+
+function AssessmentEvaluation({ assessment, accountUserId, onClose }: {
+  assessment: AssessmentCardData;
+  accountUserId: number | null;
+  onClose: () => void;
+}) {
+  const [candidates, setCandidates] = useState<EvaluationCandidate[]>([]);
+  const [candidateSearch, setCandidateSearch] = useState("");
+  const [selectedCandidateId, setSelectedCandidateId] = useState<number | null>(null);
+  const [detail, setDetail] = useState<EvaluationDetail | null>(null);
+  const [manualMarks, setManualMarks] = useState<Record<string, number>>({});
+  const [loading, setLoading] = useState(Boolean(accountUserId && assessment.id));
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+  const [retryCount, setRetryCount] = useState(0);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    if (!accountUserId || !assessment.id) {
+      return () => controller.abort();
+    }
+    fetch(`/api/assessment-evaluations?assessmentId=${assessment.id}&accountUserId=${accountUserId}`, { signal: controller.signal })
+      .then(async (response) => {
+        const payload = await response.json() as { candidates?: EvaluationCandidate[]; error?: string };
+        if (!response.ok) throw new Error(payload.error ?? "Unable to load evaluation candidates.");
+        if (!Array.isArray(payload.candidates)) throw new Error("The evaluation candidate list could not be read.");
+        setCandidates(payload.candidates);
+      })
+      .catch((loadError) => {
+        if (loadError instanceof Error && loadError.name === "AbortError") return;
+        setError(loadError instanceof Error ? loadError.message : "Unable to load evaluation candidates.");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, [accountUserId, assessment.id, retryCount]);
+
+  useEffect(() => {
+    if (!selectedCandidateId || !accountUserId || !assessment.id) {
+      return;
+    }
+    const controller = new AbortController();
+    fetch(`/api/assessment-evaluations?assessmentId=${assessment.id}&accountUserId=${accountUserId}&candidateId=${selectedCandidateId}`, { signal: controller.signal })
+      .then(async (response) => {
+        const payload = await response.json() as EvaluationDetail & { error?: string };
+        if (!response.ok) throw new Error(payload.error ?? "Unable to load this candidate's submitted answers.");
+        setDetail(payload);
+        setManualMarks(payload.manual_marks ?? {});
+      })
+      .catch((loadError) => {
+        if (loadError instanceof Error && loadError.name === "AbortError") return;
+        setDetail(null);
+        setError(loadError instanceof Error ? loadError.message : "Unable to load this candidate's submitted answers.");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setDetailLoading(false);
+      });
+    return () => controller.abort();
+  }, [accountUserId, assessment.id, retryCount, selectedCandidateId]);
+
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        if (selectedCandidateId !== null) {
+          setSelectedCandidateId(null);
+          setDetail(null);
+          setDetailLoading(false);
+          setError("");
+        }
+        else onClose();
+      }
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [onClose, selectedCandidateId]);
+
+  const filteredCandidates = candidates.filter((candidate) =>
+    `${candidate.candidate_code} ${candidate.candidate_name} ${candidate.category} ${candidate.sub_category} ${candidate.status}`
+      .toLocaleLowerCase()
+      .includes(candidateSearch.trim().toLocaleLowerCase()),
+  );
+  const accessError = !accountUserId || !assessment.id
+    ? "Sign in as an administrator or evaluator to view assessment evaluations."
+    : "";
+  const listError = error || accessError;
+  const manualQuestions = detail?.questions.filter((question) => question.is_manual) ?? [];
+  const missingManualMarks = manualQuestions.some((question) =>
+    !Number.isFinite(Number(manualMarks[String(question.id)]))
+    || manualMarks[String(question.id)] < 0
+    || manualMarks[String(question.id)] > Math.max(question.correct_mark, 0),
+  );
+  const estimatedMark = detail?.questions.reduce((total, question) => {
+    if (question.is_manual) return total + (Number(manualMarks[String(question.id)]) || 0);
+    return total + (question.grade?.mark ?? 0);
+  }, 0) ?? 0;
+
+  const markAsEvaluated = async () => {
+    if (!detail || !accountUserId || missingManualMarks) return;
+    setSaving(true);
+    setError("");
+    setSuccess("");
+    try {
+      const response = await fetch("/api/assessment-evaluations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          assessmentId: assessment.id,
+          accountUserId,
+          candidateId: detail.candidate.id,
+          manualMarks,
+        }),
+      });
+      const payload = await response.json() as { error?: string; obtained_mark?: number; evaluated_at?: string };
+      if (!response.ok) throw new Error(payload.error ?? "Unable to mark this assessment as evaluated.");
+      setDetail((current) => current ? {
+        ...current,
+        evaluated_at: payload.evaluated_at ?? new Date().toISOString(),
+        obtained_mark: Number(payload.obtained_mark ?? 0),
+        manual_marks: manualMarks,
+        questions: current.questions.map((question) => {
+          if (!question.is_manual) return question;
+          const mark = Number(manualMarks[String(question.id)] ?? 0);
+          return {
+            ...question,
+            grade: { status: mark > 0 ? "correct" : "incorrect", mark },
+          };
+        }),
+      } : current);
+      setCandidates((current) => current.map((candidate) => candidate.candidate_id === detail.candidate.id
+        ? { ...candidate, status: "Evaluated", evaluated_at: payload.evaluated_at ?? new Date().toISOString(), obtained_mark: Number(payload.obtained_mark ?? 0) }
+        : candidate));
+      setSuccess("Evaluation saved successfully.");
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Unable to save this evaluation.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="assessment-evaluation-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section className="assessment-evaluation-dialog" role="dialog" aria-modal="true" aria-label={`Evaluate ${assessment.title}`}>
+        <header className="assessment-evaluation-heading">
+          <div>
+            <p>{assessment.subtitle || "Assessment"}</p>
+            <h1>{assessment.title}</h1>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Close evaluation">×</button>
+        </header>
+        {selectedCandidateId === null ? (
+          <div className="assessment-evaluation-list">
+            <div className="assessment-evaluation-list-toolbar">
+              <p>Select a submitted candidate to review their answers and photos.</p>
+              <label>Search: <input value={candidateSearch} onChange={(event) => setCandidateSearch(event.target.value)} /></label>
+            </div>
+            {listError && <p className="assessment-evaluation-error" role="alert">{listError}{!accessError && <button type="button" onClick={() => { setLoading(true); setError(""); setRetryCount((count) => count + 1); }}>Try again</button>}</p>}
+            <div className="assessment-evaluation-table-wrap">
+              <table className="assessment-evaluation-table">
+                <thead><tr><th>Candidate ID</th><th>Name</th><th>Category</th><th>Sub-Category</th><th>Status</th><th>Action</th></tr></thead>
+                <tbody>
+                  {loading && !accessError ? (
+                    <tr><td colSpan={6} className="assessment-evaluation-empty">Loading candidates…</td></tr>
+                  ) : listError ? (
+                    <tr><td colSpan={6} className="assessment-evaluation-empty">Evaluation access is unavailable.</td></tr>
+                  ) : filteredCandidates.length === 0 ? (
+                    <tr><td colSpan={6} className="assessment-evaluation-empty">No candidates are assigned to this assessment.</td></tr>
+                  ) : filteredCandidates.map((candidate) => (
+                    <tr key={candidate.candidate_id}>
+                      <td>{candidate.candidate_code || candidate.candidate_id}</td>
+                      <td>{candidate.candidate_name}</td>
+                      <td>{candidate.category || "—"}</td>
+                      <td>{candidate.sub_category || "—"}</td>
+                      <td><span className={`assessment-evaluation-status is-${candidate.status.toLocaleLowerCase()}`}>{candidate.status}</span></td>
+                      <td>
+                        <button
+                          className="assessment-evaluation-open"
+                          type="button"
+                          disabled={!candidate.has_submission}
+                          aria-label={`Evaluate ${candidate.candidate_name}`}
+                          title={candidate.has_submission ? "Open candidate evaluation" : "Candidate has not submitted yet"}
+                          onClick={() => {
+                            setDetail(null);
+                            setDetailLoading(true);
+                            setError("");
+                            setSuccess("");
+                            setSelectedCandidateId(candidate.candidate_id);
+                          }}
+                        >
+                          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h8l4 4v5M14 3v5h5M7 12v8h12v-5M4 16l3 3 6-7" /></svg>
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="assessment-evaluation-count">Showing {filteredCandidates.length ? 1 : 0} to {filteredCandidates.length} of {filteredCandidates.length} entries</p>
+          </div>
+        ) : (
+          <div className="assessment-evaluation-detail">
+            <div className="assessment-evaluation-detail-toolbar">
+              <button type="button" onClick={() => { setSelectedCandidateId(null); setDetail(null); setDetailLoading(false); setError(""); }}>← Candidate list</button>
+              {detail && <span>Exam Start Time: <strong>{formatStudentExamDate(detail.started_at)}</strong></span>}
+            </div>
+            {error && <p className="assessment-evaluation-error" role="alert">{error}<button type="button" onClick={() => { setDetailLoading(true); setError(""); setRetryCount((count) => count + 1); }}>Retry</button></p>}
+            {detailLoading && <p className="assessment-evaluation-empty">Loading candidate answers…</p>}
+            {detail && (
+              <>
+                <section className="assessment-evaluation-summary">
+                  <p className="assessment-evaluation-candidate-name">Candidate: <strong>{detail.candidate.name} ({detail.candidate.candidate_id || detail.candidate.id})</strong></p>
+                  <div className="assessment-evaluation-summary-grid">
+                    <table>
+                      <tbody>
+                        <tr><th>Session</th><td>{detail.assessment.examination || "—"}</td></tr>
+                        <tr><th>Exam</th><td>{detail.assessment.name}</td></tr>
+                        <tr><th>Total Mark</th><td>{detail.max_mark}</td></tr>
+                        <tr><th>Mark Obtained</th><td>{detail.evaluated_at ? detail.obtained_mark : estimatedMark}</td></tr>
+                      </tbody>
+                    </table>
+                    <div className="assessment-evaluation-photos">
+                      <figure><figcaption>Photo</figcaption><NextImage src={detail.selfie_photo} alt={`Check-in selfie of ${detail.candidate.name}`} width={130} height={150} unoptimized /></figure>
+                      <figure><figcaption>Photo with ID Card</figcaption><NextImage src={detail.id_photo} alt={`Check-in ID photo of ${detail.candidate.name}`} width={130} height={150} unoptimized /></figure>
+                    </div>
+                  </div>
+                </section>
+                {detail.questions.length === 0 ? (
+                  <p className="assessment-evaluation-empty">No assessment questions are available to review.</p>
+                ) : (
+                  <div className="assessment-evaluation-sections">
+                    {Array.from(new Set(detail.questions.map((question) => question.section))).map((section) => (
+                      <section key={section}>
+                        <h2>Section: {section}</h2>
+                        {detail.questions.filter((question) => question.section === section).map((question, index) => {
+                          const response = detail.answers[String(question.id)];
+                          const options = question.options;
+                          const grade = question.grade;
+                          return (
+                            <article className="assessment-evaluation-question" key={question.id}>
+                              <div className="assessment-evaluation-question-heading">
+                                <h3>{index + 1}. {question.question}</h3>
+                                {question.is_manual ? (
+                                  <span className={`assessment-evaluation-answer-badge${grade?.status === "correct" ? " is-correct" : grade?.status === "incorrect" ? " is-incorrect" : ""}`}>
+                                    {grade?.status === "correct" ? "✓ Correct" : grade?.status === "incorrect" ? "× Incorrect" : "Manual marking"}
+                                  </span>
+                                ) : (
+                                  <span className={`assessment-evaluation-answer-badge${grade?.status === "correct" ? " is-correct" : grade?.status === "incorrect" ? " is-incorrect" : ""}`}>
+                                    {grade?.status === "correct" ? "✓ Correct" : grade?.status === "unanswered" ? "— No answer" : "× Incorrect"}
+                                  </span>
+                                )}
+                              </div>
+                              {question.passage && <p className="assessment-evaluation-passage">{question.passage}</p>}
+                              {options.length > 0 ? (
+                                <ul className="assessment-evaluation-options">
+                                  {options.map((option, optionIndex) => {
+                                    const correct = Array.isArray(question.correct_answer)
+                                      ? question.correct_answer.some((item) => String(item).trim().toLocaleLowerCase() === option.trim().toLocaleLowerCase())
+                                      : String(question.correct_answer ?? "").trim().toLocaleLowerCase() === option.trim().toLocaleLowerCase();
+                                    const chosen = Array.isArray(response)
+                                      ? response.some((item) => item.trim().toLocaleLowerCase() === option.trim().toLocaleLowerCase())
+                                      : typeof response === "string" && response.trim().toLocaleLowerCase() === option.trim().toLocaleLowerCase();
+                                    return (
+                                      <li className={`${chosen ? "is-selected" : ""}${correct ? " is-correct-answer" : ""}`} key={`${question.id}-${optionIndex}`}>
+                                        <span className="assessment-evaluation-option-marker">{String.fromCharCode(65 + optionIndex)}</span>
+                                        <span>{option}</span>
+                                        {chosen && <small>Your answer</small>}
+                                        {correct && <small className="is-correct-label">Correct answer</small>}
+                                      </li>
+                                    );
+                                  })}
+                                </ul>
+                              ) : (
+                                <div className="assessment-evaluation-written-answer">
+                                  <div><span>Candidate answer</span><p>{Array.isArray(response) ? response.join(", ") : response || "No answer provided"}</p></div>
+                                  {!question.is_manual && <div><span>Correct answer</span><p>{Array.isArray(question.correct_answer) ? question.correct_answer.join(", ") : String(question.correct_answer ?? "Not configured")}</p></div>}
+                                </div>
+                              )}
+                              <div className="assessment-evaluation-question-footer">
+                                <span>{grade?.mark ?? 0} / {question.correct_mark} marks</span>
+                                {question.is_manual && detail.evaluated_at === null && (
+                                  <label>
+                                    Manual mark
+                                    <input
+                                      type="number"
+                                      min="0"
+                                      max={Math.max(question.correct_mark, 0)}
+                                      step="any"
+                                      value={manualMarks[String(question.id)] ?? ""}
+                                      onChange={(event) => {
+                                        const value = event.target.value;
+                                        setManualMarks((current) => {
+                                          const next = { ...current };
+                                          if (value === "") delete next[String(question.id)];
+                                          else next[String(question.id)] = Number(value);
+                                          return next;
+                                        });
+                                      }}
+                                    />
+                                  </label>
+                                )}
+                              </div>
+                            </article>
+                          );
+                        })}
+                      </section>
+                    ))}
+                  </div>
+                )}
+                {success && <p className="assessment-evaluation-success" role="status">{success}</p>}
+                <div className="assessment-evaluation-submit">
+                  {detail.evaluated_at && <span>Evaluated {formatStudentExamDate(detail.evaluated_at)}</span>}
+                  <button type="button" disabled={saving || Boolean(detail.evaluated_at) || missingManualMarks} onClick={() => void markAsEvaluated()}>
+                    {saving ? "Saving…" : detail.evaluated_at ? "Evaluated" : "Mark as evaluated"}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
       </section>
     </div>
   );
@@ -959,6 +1342,8 @@ const liveActivityItems = [
   { label: "No Face Detected", icon: "◉", tone: "alert", countKey: "noFace" },
   { label: "OK", icon: "☻", tone: "success", countKey: "okay" },
   { label: "Multiple Face Detected", icon: "♟", tone: "alert", countKey: "multipleFaces" },
+  { label: "Person changed", icon: "♟", tone: "alert", countKey: "personChanges" },
+  { label: "Motion detected", icon: "↔", tone: "alert", countKey: "motionEvents" },
   { label: "Camera blocked!", icon: "▧", tone: "alert", countKey: "cameraBlocked" },
   { label: "Tab change detected!", icon: "▣", tone: "alert", countKey: "tabChanges" },
   { label: "Full-Screen Mode disabled!", icon: "▣", tone: "alert", countKey: "fullscreenDisabled" },
@@ -968,6 +1353,8 @@ type InvigilationProctorCounts = {
   noFace: number;
   okay: number;
   multipleFaces: number;
+  personChanges: number;
+  motionEvents: number;
   cameraBlocked: number;
   tabChanges: number;
   fullscreenDisabled: number;
@@ -1519,8 +1906,8 @@ function ManualAssessmentForm({ onClose, onSaved, initialAssessment }: { onClose
         start: data.start_date ? new Date(data.start_date).toLocaleString() : "Not scheduled",
         end: data.end_date ? new Date(data.end_date).toLocaleString() : "Not scheduled",
         questions: String((data.sections ?? sections).reduce((total, section) => total + (Number(section.question_count) || 0), 0)),
-        marks: "0",
-        candidates: "0",
+        marks: String(getAssessmentMaxMark(data.sections ?? sections)),
+        candidates: initialAssessment?.candidates ?? "0",
       });
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Unable to save assessment");
@@ -1728,11 +2115,12 @@ function ManualAssessmentForm({ onClose, onSaved, initialAssessment }: { onClose
 
 type AssessmentUploadRecord = {
   id: number;
+  candidate_count?: number;
   examination: string;
   name: string;
   start_date: string | null;
   end_date: string | null;
-  sections: Array<{ question_count?: string }>;
+  sections: AssessmentSection[];
 };
 
 function BulkUploadForm({ onClose, onUploaded }: { onClose: () => void; onUploaded: (assessments: AssessmentUploadRecord[]) => void }) {
@@ -5431,6 +5819,7 @@ type StudentAssessment = {
   last_login: number | null;
   total_questions: number;
   total_marks: number;
+  has_submitted: boolean;
 };
 
 function formatStudentExamDate(value: string | null) {
@@ -5463,21 +5852,25 @@ type StudentExamSection = {
 
 type StudentExamPayload = {
   assessment?: { id: number; name: string };
+  started_at?: string;
   duration_seconds?: number | null;
   end_at?: string | null;
   sections?: StudentExamSection[];
   error?: string;
 };
 
-function StudentExamFlow({ student, assessment, onClose }: {
+function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
   student: { id: number; name: string; candidateId: string; dateOfBirth: string };
   assessment: StudentAssessment;
   onClose: () => void;
+  onSubmitted: (assessmentId: number) => void;
 }) {
   const initialProctorCounts = {
     noFace: 0,
     okay: 0,
     multipleFaces: 0,
+    personChanges: 0,
+    motionEvents: 0,
     cameraBlocked: 0,
     tabChanges: 0,
     fullscreenDisabled: 0,
@@ -5493,6 +5886,7 @@ function StudentExamFlow({ student, assessment, onClose }: {
   const [answers, setAnswers] = useState<Record<number, string | string[]>>({});
   const [activeQuestion, setActiveQuestion] = useState(0);
   const [examDeadline, setExamDeadline] = useState<number | null>(null);
+  const [examStartedAt, setExamStartedAt] = useState("");
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
   const [motionWarning, setMotionWarning] = useState("");
   const [switchAlertOpen, setSwitchAlertOpen] = useState(false);
@@ -5502,8 +5896,12 @@ function StudentExamFlow({ student, assessment, onClose }: {
   const [proctorCounts, setProctorCounts] = useState(initialProctorCounts);
   const proctorCountsRef = useRef(initialProctorCounts);
   const [submittedLocally, setSubmittedLocally] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submissionError, setSubmissionError] = useState("");
+  const submissionPending = useRef(false);
+  const deadlineSubmissionAttempted = useRef(false);
+  const submitExamRef = useRef<() => void>(() => {});
   const videoRef = useRef<HTMLVideoElement>(null);
-  const motionAlertAt = useRef(0);
   const focusViolationAt = useRef(0);
   const multipleFaceFrames = useRef(0);
   const noFaceFrames = useRef(0);
@@ -5523,8 +5921,8 @@ function StudentExamFlow({ student, assessment, onClose }: {
     setProctorCounts(next);
     return next[key];
   }, []);
-  const openProctorAlert = useCallback((message: string) => {
-    if (Date.now() - proctorAlertAt.current < 8000) return;
+  const openProctorAlert = useCallback((message: string, immediate = false) => {
+    if (!immediate && Date.now() - proctorAlertAt.current < 8000) return;
     proctorAlertAt.current = Date.now();
     setSwitchAlertMessage(message);
     setSwitchAlertOpen(true);
@@ -5552,6 +5950,46 @@ function StudentExamFlow({ student, assessment, onClose }: {
       setTelemetryStatus(error instanceof Error ? error.message : "Unable to share live counts with your invigilator.");
     }
   }, [assessment.id, student.candidateId, student.dateOfBirth]);
+
+  const submitExam = useCallback(async () => {
+    if (submissionPending.current || submittedLocally) return;
+    if (!photo || !idPhoto || !examStartedAt) {
+      setSubmissionError("The check-in photos or exam start time are missing. Contact your administrator before leaving this page.");
+      return;
+    }
+    submissionPending.current = true;
+    setIsSubmitting(true);
+    setSubmissionError("");
+    try {
+      const response = await fetch("/api/candidates/student-exam/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          candidateId: student.candidateId,
+          dateOfBirth: student.dateOfBirth,
+          assessmentId: assessment.id,
+          answers,
+          selfiePhoto: photo,
+          idPhoto,
+          startedAt: examStartedAt,
+        }),
+      });
+      const payload = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(payload.error ?? "Unable to submit this assessment.");
+      onSubmitted(assessment.id);
+      setSubmittedLocally(true);
+      setStep("finished");
+    } catch (submitError) {
+      console.error("Failed to submit student assessment", submitError);
+      setSubmissionError(submitError instanceof Error ? submitError.message : "Unable to submit this assessment. Please try again.");
+    } finally {
+      submissionPending.current = false;
+      setIsSubmitting(false);
+    }
+  }, [answers, assessment.id, examStartedAt, idPhoto, onSubmitted, photo, student.candidateId, student.dateOfBirth, submittedLocally]);
+  useEffect(() => {
+    submitExamRef.current = () => { void submitExam(); };
+  }, [submitExam]);
 
   useEffect(() => {
     if (step !== "exam" || !cameraStream || !liveFeedConsent) return;
@@ -5701,6 +6139,8 @@ function StudentExamFlow({ student, assessment, onClose }: {
     const context = canvas.getContext("2d", { willReadFrequently: true });
     let previousFrame: Uint8ClampedArray | null = null;
     let warningTimeout = 0;
+    let motionActive = false;
+    let motionQuietFrames = 0;
     const monitor = window.setInterval(() => {
       if (video && context && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0) {
         canvas.width = 160;
@@ -5716,11 +6156,22 @@ function StudentExamFlow({ student, assessment, onClose }: {
           previousFrame[index / 4] = gray;
           sampled += 1;
         }
-        if (sampled > 0 && changed / sampled > 0.24 && Date.now() - motionAlertAt.current > 10_000) {
-          motionAlertAt.current = Date.now();
-          setMotionWarning("Significant camera-frame movement detected. Please remain in view and keep still.");
-          window.clearTimeout(warningTimeout);
-          warningTimeout = window.setTimeout(() => setMotionWarning(""), 6000);
+        if (sampled > 0 && changed / sampled > 0.24) {
+          motionQuietFrames = 0;
+          if (!motionActive) {
+            motionActive = true;
+            const count = incrementProctorCount("motionEvents");
+            const message = `Significant camera-frame movement detected (${count}). Please remain in view and keep still.`;
+            setMotionWarning(message);
+            openProctorAlert(message, true);
+            window.clearTimeout(warningTimeout);
+            warningTimeout = window.setTimeout(() => {
+              setMotionWarning((current) => current === message ? "" : current);
+            }, 6000);
+          }
+        } else if (motionActive) {
+          motionQuietFrames += 1;
+          if (motionQuietFrames >= 2) motionActive = false;
         }
       }
     }, 900);
@@ -5753,7 +6204,6 @@ function StudentExamFlow({ student, assessment, onClose }: {
     if (step !== "exam") return;
     const controller = new AbortController();
     const publish = () => void publishProctorCounts(proctorCountsRef.current, controller.signal);
-    publish();
     const interval = window.setInterval(publish, 5000);
     return () => {
       controller.abort();
@@ -5762,10 +6212,60 @@ function StudentExamFlow({ student, assessment, onClose }: {
   }, [publishProctorCounts, step]);
 
   useEffect(() => {
+    if (step !== "exam") return;
+    const timeout = window.setTimeout(() => {
+      void publishProctorCounts(proctorCounts);
+    }, 0);
+    return () => window.clearTimeout(timeout);
+  }, [proctorCounts, publishProctorCounts, step]);
+
+  useEffect(() => {
     if (step !== "exam" || !cameraStream) return;
     let cancelled = false;
     let detector: import("@mediapipe/tasks-vision").FaceDetector | null = null;
     let timeout = 0;
+    const referenceDescriptors: Float32Array[] = [];
+    let identityMismatchFrames = 0;
+    let personChangeActive = false;
+    const identityCanvas = document.createElement("canvas");
+    identityCanvas.width = 16;
+    identityCanvas.height = 16;
+    const identityContext = identityCanvas.getContext("2d", { willReadFrequently: true });
+
+    const createFaceDescriptor = (
+      source: CanvasImageSource,
+      sourceWidth: number,
+      sourceHeight: number,
+      bounds: { originX: number; originY: number; width: number; height: number } | undefined,
+    ) => {
+      if (!identityContext || !bounds || sourceWidth <= 0 || sourceHeight <= 0) return null;
+      const side = Math.max(bounds.width, bounds.height) * 1.18;
+      const centerX = bounds.originX + bounds.width / 2;
+      const centerY = bounds.originY + bounds.height / 2;
+      const left = Math.max(0, centerX - side / 2);
+      const top = Math.max(0, centerY - side / 2);
+      const right = Math.min(sourceWidth, centerX + side / 2);
+      const bottom = Math.min(sourceHeight, centerY + side / 2);
+      if (right <= left || bottom <= top) return null;
+
+      identityContext.clearRect(0, 0, identityCanvas.width, identityCanvas.height);
+      identityContext.drawImage(source, left, top, right - left, bottom - top, 0, 0, identityCanvas.width, identityCanvas.height);
+      const pixels = identityContext.getImageData(0, 0, identityCanvas.width, identityCanvas.height).data;
+      const grayscale = new Float32Array(identityCanvas.width * identityCanvas.height);
+      let mean = 0;
+      for (let index = 0; index < grayscale.length; index += 1) {
+        const pixelIndex = index * 4;
+        const value = pixels[pixelIndex] * 0.299 + pixels[pixelIndex + 1] * 0.587 + pixels[pixelIndex + 2] * 0.114;
+        grayscale[index] = value;
+        mean += value;
+      }
+      mean /= grayscale.length;
+      let variance = 0;
+      for (const value of grayscale) variance += (value - mean) ** 2;
+      const standardDeviation = Math.sqrt(variance / grayscale.length);
+      if (standardDeviation < 12) return null;
+      return grayscale.map((value) => (value - mean) / standardDeviation);
+    };
 
     async function startFaceDetection() {
       try {
@@ -5786,7 +6286,40 @@ function StudentExamFlow({ student, assessment, onClose }: {
           return;
         }
         detector = faceDetector;
-        setFaceDetectionStatus("Proctor checks active · analyzed on this device");
+        for (const checkInPhoto of [photo, idPhoto]) {
+          if (!checkInPhoto) continue;
+          try {
+            const image = new Image();
+            image.src = checkInPhoto;
+            await image.decode();
+            const referenceFace = faceDetector.detect(image).detections
+              .filter((detection) => detection.boundingBox)
+              .sort((first, second) => {
+                const firstBox = first.boundingBox!;
+                const secondBox = second.boundingBox!;
+                return secondBox.width * secondBox.height - firstBox.width * firstBox.height;
+              })[0];
+            if (referenceFace?.boundingBox) {
+              const descriptor = createFaceDescriptor(
+                image,
+                image.naturalWidth,
+                image.naturalHeight,
+                referenceFace.boundingBox,
+              );
+              if (descriptor) referenceDescriptors.push(descriptor);
+            }
+          } catch (error) {
+            console.error("Unable to analyze a candidate check-in photo", error);
+          }
+        }
+        if (cancelled) {
+          faceDetector.close();
+          detector = null;
+          return;
+        }
+        setFaceDetectionStatus(referenceDescriptors.length
+          ? "Face and check-in photo comparison active · analyzed on this device"
+          : "Face-count checks active; check-in photo comparison is unavailable");
 
         const inspectFrame = () => {
           if (cancelled) return;
@@ -5795,6 +6328,38 @@ function StudentExamFlow({ student, assessment, onClose }: {
             try {
               const result = detector.detectForVideo(video, performance.now());
               const faceCount = result.detections.length;
+              if (faceCount === 1 && referenceDescriptors.length > 0) {
+                const detection = result.detections[0];
+                const currentDescriptor = detection.boundingBox
+                  ? createFaceDescriptor(video, video.videoWidth, video.videoHeight, detection.boundingBox)
+                  : null;
+                if (currentDescriptor) {
+                  let closestDifference = Number.POSITIVE_INFINITY;
+                  for (const referenceDescriptor of referenceDescriptors) {
+                    let difference = 0;
+                    for (let index = 0; index < referenceDescriptor.length; index += 1) {
+                      difference += Math.abs(referenceDescriptor[index] - currentDescriptor[index]);
+                    }
+                    closestDifference = Math.min(closestDifference, difference / referenceDescriptor.length);
+                  }
+                  if (closestDifference > 0.82) {
+                    identityMismatchFrames += 1;
+                    if (identityMismatchFrames >= 2 && !personChangeActive) {
+                      personChangeActive = true;
+                      const count = incrementProctorCount("personChanges");
+                      const message = `The person on camera does not appear to match the check-in photos (${count}). Please show your face clearly.`;
+                      setMotionWarning(message);
+                      openProctorAlert(message, true);
+                    }
+                  } else {
+                    identityMismatchFrames = 0;
+                    personChangeActive = false;
+                  }
+                }
+              } else if (faceCount !== 1) {
+                identityMismatchFrames = 0;
+                personChangeActive = false;
+              }
               if (faceCount > 1) {
                 multipleFaceFrames.current += 1;
                 noFaceFrames.current = 0;
@@ -5845,7 +6410,7 @@ function StudentExamFlow({ student, assessment, onClose }: {
       window.clearTimeout(timeout);
       detector?.close();
     };
-  }, [cameraStream, incrementProctorCount, openProctorAlert, step]);
+  }, [cameraStream, idPhoto, incrementProctorCount, openProctorAlert, photo, step]);
 
   useEffect(() => {
     if (step !== "exam") return;
@@ -5886,7 +6451,10 @@ function StudentExamFlow({ student, assessment, onClose }: {
     const updateRemaining = () => {
       const remaining = Math.max(0, Math.ceil((examDeadline - Date.now()) / 1000));
       setRemainingSeconds(remaining);
-      if (remaining === 0) setStep("finished");
+      if (remaining === 0 && !deadlineSubmissionAttempted.current) {
+        deadlineSubmissionAttempted.current = true;
+        submitExamRef.current();
+      }
     };
     updateRemaining();
     const interval = window.setInterval(updateRemaining, 1000);
@@ -5932,15 +6500,16 @@ function StudentExamFlow({ student, assessment, onClose }: {
       return null;
     }
     const canvas = document.createElement("canvas");
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+    const scale = Math.min(1, 720 / Math.max(video.videoWidth, video.videoHeight));
+    canvas.width = Math.round(video.videoWidth * scale);
+    canvas.height = Math.round(video.videoHeight * scale);
     const context = canvas.getContext("2d");
     if (!context) {
       setCameraError("The photo could not be captured. Please try again.");
       return null;
     }
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
-    return canvas.toDataURL("image/jpeg", 0.86);
+    return canvas.toDataURL("image/jpeg", 0.74);
   }
 
   async function continueFromIdProof() {
@@ -5968,6 +6537,7 @@ function StudentExamFlow({ student, assessment, onClose }: {
       if (!response.ok) throw new Error(payload.error ?? "Unable to load this exam.");
       const sections = payload.sections ?? [];
       setExamSections(sections);
+      setExamStartedAt(payload.started_at ?? new Date().toISOString());
       const deadlineCandidates = [
         typeof payload.duration_seconds === "number" && payload.duration_seconds > 0
           ? Date.now() + payload.duration_seconds * 1000
@@ -5984,11 +6554,6 @@ function StudentExamFlow({ student, assessment, onClose }: {
 
   function setAnswer(questionId: number, value: string | string[]) {
     setAnswers((current) => ({ ...current, [questionId]: value }));
-  }
-
-  function submitExam() {
-    setSubmittedLocally(true);
-    setStep("finished");
   }
 
   const formattedTime = remainingSeconds === null
@@ -6022,7 +6587,7 @@ function StudentExamFlow({ student, assessment, onClose }: {
                 <div className="student-exam-gate-icon" aria-hidden="true">◉</div>
                 <p className="student-exam-eyebrow">BEFORE YOU BEGIN</p>
                 <h1 id="student-exam-gate-title">Camera check</h1>
-                <p className="student-exam-gate-copy">Allow camera access to take your check-in photo and a photo with your valid ID. Photos stay in this browser and are not uploaded or stored.</p>
+                <p className="student-exam-gate-copy">Allow camera access to take a selfie and a photo with your valid ID. Both check-in photos and your submitted answers will be stored so authorized administrators and evaluators can review your exam.</p>
                 <ul className="student-exam-check-list">
                   <li>Use a well-lit, quiet space</li>
                   <li>Keep your face clearly visible</li>
@@ -6030,7 +6595,7 @@ function StudentExamFlow({ student, assessment, onClose }: {
                 </ul>
                 <label className="student-exam-live-feed-consent">
                   <input type="checkbox" checked={liveFeedConsent} onChange={(event) => setLiveFeedConsent(event.target.checked)} />
-                  <span>I understand that an authorized administrator or assigned invigilator may view my live camera during this exam. The live stream is not recorded or stored and ends when the exam or feed ends.</span>
+                  <span>I consent to storing my check-in selfie, ID photo, and submitted answers for review by authorized administrators and assigned evaluators. An authorized administrator or assigned invigilator may also view my live camera; the live stream is not recorded and ends when the exam or feed ends.</span>
                 </label>
                 <button className="student-exam-primary-button" type="button" onClick={enableCamera} disabled={!liveFeedConsent}>Enable camera and continue</button>
               </>
@@ -6061,7 +6626,7 @@ function StudentExamFlow({ student, assessment, onClose }: {
               </>
             )}
             {step === "camera" && cameraError && <p className="student-exam-camera-error" role="alert">{cameraError}</p>}
-            <p className="student-exam-privacy-note">No microphone is requested. Photos are held temporarily in page memory only; the ID image is not verified or uploaded.</p>
+            <p className="student-exam-privacy-note">No microphone is requested. Check-in photos are uploaded with your submitted exam and can be viewed by authorized examination staff. The ID image is not automatically verified.</p>
           </div>
           <button className="student-exam-gate-cancel" type="button" onClick={onClose}>Return to schedule</button>
         </section>
@@ -6070,7 +6635,7 @@ function StudentExamFlow({ student, assessment, onClose }: {
           <div className="student-exam-finished-icon" aria-hidden="true">✓</div>
           <p className="student-exam-eyebrow">{submittedLocally ? "EXAM COMPLETE" : "ASSESSMENT ENDED"}</p>
           <h1>{submittedLocally ? "Exam complete" : remainingSeconds === 0 ? "Time is up" : "Exam session ended"}</h1>
-          <p>{submittedLocally ? "You completed the exam in this browser. Answers were not saved or submitted to the portal." : "Your answers were held only in this browser session and were not saved or submitted. Contact your institution to confirm the official submission process."}</p>
+          <p>{submittedLocally ? "Your answers and check-in photos were submitted for evaluation." : remainingSeconds === 0 ? "Time expired. Your submission could not be saved; contact your administrator." : "The exam session ended without a successful submission. Contact your administrator."}</p>
           <button className="student-exam-primary-button" type="button" onClick={onClose}>Return to exam schedule</button>
         </section>
       ) : (
@@ -6118,6 +6683,8 @@ function StudentExamFlow({ student, assessment, onClose }: {
                 <div className={proctorCounts.noFace ? "has-violations" : ""}><span>No Face Detected</span><strong>{proctorCounts.noFace}</strong></div>
                 <div><span>OK · One Face</span><strong>{proctorCounts.okay}</strong></div>
                 <div className={proctorCounts.multipleFaces ? "has-violations" : ""}><span>Multiple Face Detected</span><strong>{proctorCounts.multipleFaces}</strong></div>
+                <div className={proctorCounts.personChanges ? "has-violations" : ""}><span>Person changed</span><strong>{proctorCounts.personChanges}</strong></div>
+                <div className={proctorCounts.motionEvents ? "has-violations" : ""}><span>Motion detected</span><strong>{proctorCounts.motionEvents}</strong></div>
                 <div className={proctorCounts.cameraBlocked ? "has-violations" : ""}><span>Camera blocked!</span><strong>{proctorCounts.cameraBlocked}</strong></div>
                 <div className={proctorCounts.tabChanges ? "has-violations" : ""}><span>Tab change detected!</span><strong>{proctorCounts.tabChanges}</strong></div>
                 <div className={proctorCounts.fullscreenDisabled ? "has-violations" : ""}><span>Full-Screen Mode disabled!</span><strong>{proctorCounts.fullscreenDisabled}</strong></div>
@@ -6128,8 +6695,9 @@ function StudentExamFlow({ student, assessment, onClose }: {
               <p className="student-exam-motion-disclaimer">{faceDetectionStatus}. Camera frames are analyzed in this browser; no video is recorded or uploaded. Microphone access is not requested.</p>
             </aside>
             <section className="student-exam-question-area" aria-live="polite">
-              <div className="student-exam-session-banner"><span>●</span> Your answers are temporary and are not saved to the portal.</div>
+              <div className="student-exam-session-banner"><span>●</span> Your answers and check-in photos are saved when you submit the exam.</div>
               {motionWarning && <p className="student-exam-motion-warning" role="alert">⚠ {motionWarning}</p>}
+              {submissionError && <p className="student-exam-motion-warning" role="alert">{submissionError}</p>}
               {questions.length === 0 ? (
                 <div className="student-exam-no-questions"><h1>No questions are available</h1><p>No active questions match this assessment’s configured sections and classifications.</p><button className="student-exam-secondary-button" type="button" onClick={onClose}>Return to schedule</button></div>
               ) : question ? (
@@ -6177,8 +6745,8 @@ function StudentExamFlow({ student, assessment, onClose }: {
                   </article>
                   <div className="student-exam-question-controls">
                     <span>{Object.keys(answers).length} of {questions.length} answered</span>
-                    {activeQuestion === questions.length - 1
-                      ? <button className="student-exam-primary-button" type="button" onClick={submitExam}>Submit Exam</button>
+                    {activeQuestion === questions.length - 1 || remainingSeconds === 0 || Boolean(submissionError)
+                      ? <button className="student-exam-primary-button" type="button" onClick={() => void submitExam()} disabled={isSubmitting}>{isSubmitting ? "Submitting…" : submissionError ? "Retry submission" : "Submit Exam"}</button>
                       : <button className="student-exam-primary-button" type="button" onClick={() => setActiveQuestion((index) => Math.min(questions.length - 1, index + 1))}>Next question →</button>}
                   </div>
                 </>
@@ -6237,7 +6805,16 @@ function StudentPortalDashboard({ student, onLogout }: { student: { id: number; 
   }, [student.candidateId, student.dateOfBirth]);
 
   if (activeAssessment) {
-    return <StudentExamFlow student={student} assessment={activeAssessment} onClose={() => setActiveAssessment(null)} />;
+    return <StudentExamFlow
+      student={student}
+      assessment={activeAssessment}
+      onClose={() => setActiveAssessment(null)}
+      onSubmitted={(assessmentId) => {
+        setAssessments((current) => current.map((assessment) =>
+          assessment.id === assessmentId ? { ...assessment, has_submitted: true } : assessment,
+        ));
+      }}
+    />;
   }
 
   return (
@@ -6324,7 +6901,7 @@ function StudentPortalDashboard({ student, onLogout }: { student: { id: number; 
               </table>
             </div>
             {attendNotice && <p className="student-exam-notice" role="status">{attendNotice}</p>}
-            <p className="student-exam-delivery-note">“Attend Exam” is shown only during the permitted login window. Camera captures and answers remain temporary in this browser and are not submitted.</p>
+            <p className="student-exam-delivery-note">“Attend Exam” is shown only during the permitted login window. Your exam answers and two check-in photos are submitted for authorized evaluation when you finish.</p>
           </section>
         </section>
       </div>
@@ -6341,7 +6918,9 @@ function StudentExamScheduleRow({ assessment, currentTime, onAttend }: {
   const endTime = assessment.end_date ? new Date(assessment.end_date).getTime() : Number.NaN;
   let action: React.ReactNode = "Schedule unavailable";
 
-  if (Number.isFinite(startTime)) {
+  if (assessment.has_submitted) {
+    action = <span className="student-exam-status is-attended">Exam Attended</span>;
+  } else if (Number.isFinite(startTime)) {
     if (currentTime < startTime) {
       action = <span className="student-exam-status is-upcoming">Upcoming Examination</span>;
     } else {
@@ -6386,6 +6965,7 @@ export default function Home() {
   const [evaluatorAssignmentAssessment, setEvaluatorAssignmentAssessment] = useState<AssessmentCardData | null>(null);
   const [invigilatorAssignmentAssessment, setInvigilatorAssignmentAssessment] = useState<AssessmentCardData | null>(null);
   const [invigilatingAssessment, setInvigilatingAssessment] = useState<AssessmentCardData | null>(null);
+  const [evaluatingAssessment, setEvaluatingAssessment] = useState<AssessmentCardData | null>(null);
   const [showBulkUpload, setShowBulkUpload] = useState(false);
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [currentRole, setCurrentRole] = useState<any>(null);
@@ -6463,6 +7043,8 @@ export default function Home() {
           topic: string | null;
           question_language: string | null;
           sections: AssessmentSection[];
+          candidate_count: number;
+          total_marks: number;
         }> & { error?: string };
         if (!response.ok) throw new Error(data.error ?? "Unable to load assessments");
         setSavedAssessments(data.map((assessment) => ({
@@ -6482,8 +7064,8 @@ export default function Home() {
           start: assessment.start_date ? new Date(assessment.start_date).toLocaleString() : "Not scheduled",
           end: assessment.end_date ? new Date(assessment.end_date).toLocaleString() : "Not scheduled",
           questions: String((assessment.sections ?? []).reduce((total, section) => total + (Number(section.question_count) || 0), 0)),
-          marks: "0",
-          candidates: "0",
+          marks: String(assessment.total_marks ?? getAssessmentMaxMark(assessment.sections)),
+          candidates: String(assessment.candidate_count ?? 0),
         })));
       })
       .catch(() => setSavedAssessments([]));
@@ -6941,6 +7523,7 @@ export default function Home() {
             <AssessmentCard
               assessment={assessment}
               currentRole={currentRole}
+              canEvaluate={/admin|evaluator/i.test(String(currentUser?.role ?? ""))}
               key={assessment.id ?? assessment.title}
               onDeleted={(id) => setSavedAssessments((current) => current.filter((item) => item.id !== id))}
               onEdit={(selectedAssessment) => { setEditingAssessment(selectedAssessment); setShowManualForm(true); }}
@@ -6949,19 +7532,68 @@ export default function Home() {
               onAssignEvaluator={setEvaluatorAssignmentAssessment}
               onAssignInvigilator={setInvigilatorAssignmentAssessment}
               onInvigilate={setInvigilatingAssessment}
+              onEvaluate={setEvaluatingAssessment}
             />
           ))}
         </div>
         </section> : activeSection === "Users" ? <UsersPanel currentRole={currentRole} /> : <SectionPlaceholder title={activeSection} />}
       </div>
       {previewAssessment && <AssessmentPreview assessment={previewAssessment} onClose={() => setPreviewAssessment(null)} />}
-      {candidateAssignmentAssessment && <CandidateAssignment assessment={candidateAssignmentAssessment} onClose={() => setCandidateAssignmentAssessment(null)} />}
+      {candidateAssignmentAssessment && <CandidateAssignment assessment={candidateAssignmentAssessment} onClose={() => {
+        setCandidateAssignmentAssessment(null);
+        fetch("/api/assessments")
+          .then(async (response) => {
+            const data = await response.json() as Array<{
+              id: number;
+              examination: string;
+              name: string;
+              start_date: string | null;
+              end_date: string | null;
+              total_time: number | null;
+              last_login: number | null;
+              question_category: string | null;
+              sub_category: string | null;
+              topic: string | null;
+              question_language: string | null;
+              sections: AssessmentSection[];
+              candidate_count: number;
+              total_marks: number;
+            }> & { error?: string };
+            if (!response.ok) throw new Error(data.error ?? "Unable to refresh assessment candidates");
+            setSavedAssessments(data.map((assessment) => ({
+              id: assessment.id,
+              title: assessment.name,
+              subtitle: assessment.examination,
+              examination: assessment.examination,
+              start_date: assessment.start_date,
+              end_date: assessment.end_date,
+              total_time: assessment.total_time,
+              last_login: assessment.last_login,
+              question_category: assessment.question_category,
+              sub_category: assessment.sub_category,
+              topic: assessment.topic,
+              question_language: assessment.question_language,
+              sections: assessment.sections ?? [],
+              start: assessment.start_date ? new Date(assessment.start_date).toLocaleString() : "Not scheduled",
+              end: assessment.end_date ? new Date(assessment.end_date).toLocaleString() : "Not scheduled",
+              questions: String((assessment.sections ?? []).reduce((total, section) => total + (Number(section.question_count) || 0), 0)),
+              marks: String(assessment.total_marks ?? getAssessmentMaxMark(assessment.sections)),
+              candidates: String(assessment.candidate_count ?? 0),
+            })));
+          })
+          .catch((error) => console.error("Failed to refresh assessment candidate counts", error));
+      }} />}
       {evaluatorAssignmentAssessment && <AssessmentStaffAssignment assessment={evaluatorAssignmentAssessment} role="evaluator" onClose={() => setEvaluatorAssignmentAssessment(null)} />}
       {invigilatorAssignmentAssessment && <AssessmentStaffAssignment assessment={invigilatorAssignmentAssessment} role="invigilator" onClose={() => setInvigilatorAssignmentAssessment(null)} />}
       {invigilatingAssessment &&       <AssessmentInvigilation
         assessment={invigilatingAssessment}
         accountUserId={Number(currentUser?.id) || null}
         onClose={() => setInvigilatingAssessment(null)}
+      />}
+      {evaluatingAssessment && <AssessmentEvaluation
+        assessment={evaluatingAssessment}
+        accountUserId={Number(currentUser?.id) || null}
+        onClose={() => setEvaluatingAssessment(null)}
       />}
       {showManualForm && <ManualAssessmentForm
         initialAssessment={editingAssessment ?? undefined}
@@ -6982,11 +7614,13 @@ export default function Home() {
               id: assessment.id,
               title: assessment.name,
               subtitle: assessment.examination,
+              examination: assessment.examination,
+              sections: assessment.sections ?? [],
               start: assessment.start_date ? new Date(assessment.start_date).toLocaleString() : "Not scheduled",
               end: assessment.end_date ? new Date(assessment.end_date).toLocaleString() : "Not scheduled",
               questions: String((assessment.sections ?? []).reduce((total, section) => total + (Number(section.question_count) || 0), 0)),
-              marks: "0",
-              candidates: "0",
+              marks: String(getAssessmentMaxMark(assessment.sections)),
+              candidates: String(assessment.candidate_count ?? 0),
             })),
             ...current,
           ]);

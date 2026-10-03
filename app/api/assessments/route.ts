@@ -37,6 +37,42 @@ async function ensureAssessmentTable() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+  await databasePool.query(`
+    CREATE TABLE IF NOT EXISTS "Candidate Information" (
+      id SERIAL PRIMARY KEY,
+      record_type TEXT NOT NULL DEFAULT 'field',
+      name TEXT NOT NULL,
+      column_type TEXT NOT NULL,
+      is_dependent BOOLEAN NOT NULL DEFAULT FALSE,
+      status BOOLEAN NOT NULL DEFAULT TRUE,
+      is_required BOOLEAN NOT NULL DEFAULT FALSE,
+      min_value NUMERIC,
+      max_value NUMERIC,
+      options JSONB,
+      dependent_on TEXT,
+      date TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      candidate_data JSONB
+    )
+  `);
+  await databasePool.query('ALTER TABLE "Candidate Information" ADD COLUMN IF NOT EXISTS record_type TEXT NOT NULL DEFAULT \'field\'');
+  await databasePool.query('ALTER TABLE "Candidate Information" ADD COLUMN IF NOT EXISTS candidate_data JSONB');
+  await databasePool.query(`
+    CREATE TABLE IF NOT EXISTS candidate_sub_category (
+      id SERIAL PRIMARY KEY,
+      candidate_sub_category TEXT NOT NULL,
+      category TEXT NOT NULL,
+      status BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await databasePool.query(`
+    CREATE TABLE IF NOT EXISTS assessment_candidate_sub_category (
+      assessment_id INTEGER NOT NULL REFERENCES assessment(id) ON DELETE CASCADE,
+      candidate_sub_category_id INTEGER NOT NULL REFERENCES candidate_sub_category(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (assessment_id, candidate_sub_category_id)
+    )
+  `);
 }
 
 const optionalText = (value: unknown) => typeof value === "string" && value.trim() ? value.trim() : null;
@@ -64,7 +100,34 @@ export async function GET() {
     const result = await databasePool.query(`
       SELECT id, examination, name, start_date, end_date, total_time, last_login,
              question_category, sub_category, topic, question_language, sections,
-             status, created_at
+             status, created_at,
+             COALESCE((
+               SELECT SUM(
+                 CASE
+                   WHEN jsonb_typeof(section.value) = 'object'
+                     AND NULLIF(BTRIM(section.value->>'question_count'), '') ~ '^[0-9]+([.][0-9]+)?$'
+                     AND NULLIF(BTRIM(section.value->>'correct_mark'), '') ~ '^[0-9]+([.][0-9]+)?$'
+                   THEN (section.value->>'question_count')::numeric * (section.value->>'correct_mark')::numeric
+                   ELSE 0
+                 END
+               )
+               FROM jsonb_array_elements(
+                 CASE WHEN jsonb_typeof(assessment.sections) = 'array' THEN assessment.sections ELSE '[]'::jsonb END
+               ) AS section(value)
+             ), 0) AS total_marks,
+             (
+               SELECT COUNT(DISTINCT candidate.id)::int
+               FROM assessment_candidate_sub_category AS assignment
+               JOIN candidate_sub_category AS candidate_group
+                 ON candidate_group.id = assignment.candidate_sub_category_id
+                AND candidate_group.status = TRUE
+               JOIN "Candidate Information" AS candidate
+                 ON candidate.record_type = 'candidate'
+                AND candidate.status = TRUE
+                AND BTRIM(COALESCE(candidate.candidate_data->>'category', '')) = candidate_group.category
+                AND BTRIM(COALESCE(candidate.candidate_data->>'sub_category', '')) = candidate_group.candidate_sub_category
+               WHERE assignment.assessment_id = assessment.id
+             ) AS candidate_count
       FROM assessment
       ORDER BY created_at DESC, id DESC
     `);

@@ -39,6 +39,26 @@ async function ensureStudentScheduleTables() {
       PRIMARY KEY (assessment_id, candidate_sub_category_id)
     )
   `);
+  await databasePool.query(`
+    CREATE TABLE IF NOT EXISTS assessment_candidate_submissions (
+      assessment_id INTEGER NOT NULL REFERENCES assessment(id) ON DELETE CASCADE,
+      candidate_id INTEGER NOT NULL REFERENCES "Candidate Information"(id) ON DELETE CASCADE,
+      answers JSONB NOT NULL DEFAULT '{}'::jsonb,
+      questions_snapshot JSONB NOT NULL DEFAULT '[]'::jsonb,
+      selfie_photo TEXT NOT NULL,
+      id_photo TEXT NOT NULL,
+      started_at TIMESTAMPTZ NOT NULL,
+      submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      evaluated_at TIMESTAMPTZ,
+      obtained_mark NUMERIC,
+      manual_marks JSONB NOT NULL DEFAULT '{}'::jsonb,
+      PRIMARY KEY (assessment_id, candidate_id)
+    )
+  `);
+  await databasePool.query(`
+    ALTER TABLE assessment_candidate_submissions
+    ADD COLUMN IF NOT EXISTS questions_snapshot JSONB NOT NULL DEFAULT '[]'::jsonb
+  `);
 }
 
 function isCandidateIdFieldName(name: string) {
@@ -94,18 +114,22 @@ export async function POST(request: Request) {
     const assessments = await databasePool.query(`
       SELECT assessment.id, assessment.examination, assessment.name,
              assessment.start_date, assessment.end_date, assessment.total_time,
-             assessment.last_login, assessment.sections
+             assessment.last_login, assessment.sections,
+             (submission.submitted_at IS NOT NULL) AS has_submitted
       FROM assessment
       JOIN assessment_candidate_sub_category AS assignment
         ON assignment.assessment_id = assessment.id
       JOIN candidate_sub_category AS sub_category
         ON sub_category.id = assignment.candidate_sub_category_id
+      LEFT JOIN assessment_candidate_submissions AS submission
+        ON submission.assessment_id = assessment.id
+       AND submission.candidate_id = $3
       WHERE assessment.status = TRUE
         AND sub_category.status = TRUE
         AND sub_category.category = $1
         AND sub_category.candidate_sub_category = $2
       ORDER BY assessment.start_date ASC NULLS LAST, assessment.id ASC
-    `, [candidateData.category, candidateData.sub_category]);
+    `, [candidateData.category, candidateData.sub_category, candidate.id]);
 
     return NextResponse.json({
       assessments: assessments.rows.map((assessment) => {
@@ -131,6 +155,7 @@ export async function POST(request: Request) {
           last_login: assessment.last_login,
           total_questions: totalQuestions,
           total_marks: totalMarks,
+          has_submitted: Boolean(assessment.has_submitted),
         };
       }),
     });

@@ -7,6 +7,8 @@ const proctorKeys = [
   "noFace",
   "okay",
   "multipleFaces",
+  "personChanges",
+  "motionEvents",
   "cameraBlocked",
   "tabChanges",
   "fullscreenDisabled",

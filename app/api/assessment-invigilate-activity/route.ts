@@ -7,6 +7,8 @@ const countKeys = [
   "noFace",
   "okay",
   "multipleFaces",
+  "personChanges",
+  "motionEvents",
   "cameraBlocked",
   "tabChanges",
   "fullscreenDisabled",

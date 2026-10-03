@@ -235,6 +235,7 @@ export async function POST(request: Request) {
     const durationMinutes = Number(assessment.total_time);
     return NextResponse.json({
       assessment: { id: assessment.id, name: assessment.name },
+      started_at: new Date().toISOString(),
       duration_seconds: Number.isFinite(durationMinutes) && durationMinutes > 0 ? Math.floor(durationMinutes * 60) : null,
       end_at: Number.isFinite(endTime) ? new Date(endTime).toISOString() : null,
       sections: examSections.filter((section) => section.questions.length > 0),

@@ -71,6 +71,20 @@ async function ensureCandidateInfoTable() {
         ('Candidate Email', 'Email', FALSE, TRUE, TRUE)
     `);
   }
+
+  const dateOfBirthField = await databasePool.query(`
+    SELECT name
+    FROM "Candidate Information"
+    WHERE record_type = 'field'
+      AND LOWER(TRIM(name)) ~ '^(dob|date of birth|birth date)([[:space:]]*\\([^)]*\\))?$'
+    LIMIT 1
+  `);
+  if (dateOfBirthField.rowCount === 0) {
+    await databasePool.query(`
+      INSERT INTO "Candidate Information" (record_type, name, column_type, status, is_required)
+      VALUES ('field', 'Date of Birth', 'Date', TRUE, TRUE)
+    `);
+  }
 }
 
 export async function GET() {

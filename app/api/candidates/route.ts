@@ -1,7 +1,23 @@
 import { NextResponse } from "next/server";
+import { randomInt } from "node:crypto";
+import type { PoolClient } from "pg";
 import { databasePool } from "@/lib/db";
 
 export const runtime = "nodejs";
+
+const candidateIdLockKey = 741923601;
+const candidateIdMinimum = 100000;
+const candidateIdRange = 900000;
+const candidateIdBackfillKey = "candidate_id_six_digit_backfill_v1";
+
+type CandidateRecord = {
+  id: number;
+  candidate_data: { fields?: Record<string, unknown> } | null;
+};
+
+function isCandidateIdFieldName(name: string) {
+  return /^candidate id(?:\s*\([^)]*\))?$/i.test(name.trim());
+}
 
 async function ensureCandidateInformationTable() {
   await databasePool.query(`
@@ -25,6 +41,123 @@ async function ensureCandidateInformationTable() {
   await databasePool.query('ALTER TABLE "Candidate Information" ADD COLUMN IF NOT EXISTS candidate_data JSONB');
 }
 
+async function acquireCandidateIdLock(client: PoolClient) {
+  await client.query("SELECT pg_advisory_xact_lock($1)", [candidateIdLockKey]);
+}
+
+async function getCandidateIdFieldName(client: PoolClient) {
+  const result = await client.query(`
+    SELECT name
+    FROM "Candidate Information"
+    WHERE record_type = 'field'
+    ORDER BY date ASC, id ASC
+  `);
+  const fieldNames = (result.rows as Array<{ name: string }>).map((row) => row.name);
+  return fieldNames.find((name) => name.trim().toLowerCase() === "candidate id")
+    ?? fieldNames.find(isCandidateIdFieldName)
+    ?? "Candidate ID";
+}
+
+function addCandidateIdsFromFields(existingIds: Set<string>, fields: Record<string, unknown>) {
+  for (const [name, value] of Object.entries(fields)) {
+    if (isCandidateIdFieldName(name) && typeof value === "string" && /^\d{6}$/.test(value)) {
+      existingIds.add(value);
+    }
+  }
+}
+
+async function loadExistingCandidateIds(client: PoolClient) {
+  const result = await client.query(`
+    SELECT candidate_data
+    FROM "Candidate Information"
+    WHERE record_type = 'candidate'
+  `);
+  const existingIds = new Set<string>();
+  for (const row of result.rows as Array<{ candidate_data: CandidateRecord["candidate_data"] }>) {
+    addCandidateIdsFromFields(existingIds, row.candidate_data?.fields ?? {});
+  }
+  return existingIds;
+}
+
+function generateUniqueCandidateId(existingIds: Set<string>) {
+  if (existingIds.size >= candidateIdRange) {
+    throw new Error("Unable to generate a unique candidate ID: all six-digit IDs are in use.");
+  }
+
+  const start = randomInt(candidateIdMinimum, candidateIdMinimum + candidateIdRange);
+  for (let offset = 0; offset < candidateIdRange; offset += 1) {
+    const candidateId = String(candidateIdMinimum + ((start - candidateIdMinimum + offset) % candidateIdRange));
+    if (!existingIds.has(candidateId)) {
+      existingIds.add(candidateId);
+      return candidateId;
+    }
+  }
+
+  throw new Error("Unable to generate a unique candidate ID.");
+}
+
+async function backfillCandidateIds(client: PoolClient, candidateIdFieldName: string) {
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS candidate_data_migrations (
+      migration_key TEXT PRIMARY KEY,
+      applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  const migrationResult = await client.query(
+    "SELECT 1 FROM candidate_data_migrations WHERE migration_key = $1",
+    [candidateIdBackfillKey],
+  );
+  if (migrationResult.rowCount) return;
+
+  const candidateResult = await client.query(`
+    SELECT id, candidate_data
+    FROM "Candidate Information"
+    WHERE record_type = 'candidate'
+    ORDER BY id ASC
+    FOR UPDATE
+  `);
+  const usedIds = new Set<string>();
+
+  for (const candidate of candidateResult.rows as CandidateRecord[]) {
+    const originalFields = candidate.candidate_data?.fields;
+    const fields = originalFields && typeof originalFields === "object" && !Array.isArray(originalFields)
+      ? { ...originalFields }
+      : {};
+    const candidateIdFields = Object.keys(fields).filter(isCandidateIdFieldName);
+    if (!candidateIdFields.includes(candidateIdFieldName)) candidateIdFields.push(candidateIdFieldName);
+
+    const existingId = candidateIdFields
+      .map((fieldName) => fields[fieldName])
+      .find((value): value is string => typeof value === "string" && /^\d{6}$/.test(value) && !usedIds.has(value));
+    const candidateId = existingId ?? generateUniqueCandidateId(usedIds);
+    usedIds.add(candidateId);
+
+    let changed = !originalFields || typeof originalFields !== "object" || Array.isArray(originalFields);
+    for (const fieldName of candidateIdFields) {
+      if (fields[fieldName] !== candidateId) {
+        fields[fieldName] = candidateId;
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      const candidateData = {
+        ...(candidate.candidate_data ?? {}),
+        fields,
+      };
+      await client.query(
+        `UPDATE "Candidate Information" SET candidate_data = $2::jsonb WHERE id = $1`,
+        [candidate.id, JSON.stringify(candidateData)],
+      );
+    }
+  }
+
+  await client.query(
+    "INSERT INTO candidate_data_migrations (migration_key) VALUES ($1) ON CONFLICT (migration_key) DO NOTHING",
+    [candidateIdBackfillKey],
+  );
+}
+
 export async function POST(request: Request) {
   try {
     const body = await request.json() as {
@@ -45,6 +178,7 @@ export async function POST(request: Request) {
       try {
         await client.query("BEGIN");
         transactionStarted = true;
+        await acquireCandidateIdLock(client);
         await client.query(`
           CREATE TABLE IF NOT EXISTS candidate_category (
             id SERIAL PRIMARY KEY,
@@ -95,7 +229,8 @@ export async function POST(request: Request) {
           }
 
           for (const field of infoResult.rows) {
-            const value = String(rawFields[String(field.name)] ?? "").trim();
+            if (isCandidateIdFieldName(String(field.name))) continue;
+            const value = String(field.name === "Candidate ID" ? "" : rawFields[String(field.name)] ?? "").trim();
             fields[String(field.name)] = value;
             if (field.is_required && !value) {
               rowErrors.push(`Row ${rowNumber}: ${field.name} is required.`);
@@ -140,7 +275,10 @@ export async function POST(request: Request) {
         }
 
         const insertedRows = [];
+        const candidateIdFieldName = await getCandidateIdFieldName(client);
+        const existingCandidateIds = await loadExistingCandidateIds(client);
         for (const row of preparedRows) {
+          row.fields[candidateIdFieldName] = generateUniqueCandidateId(existingCandidateIds);
           const candidateName = row.fields["Candidate Name"] || "Candidate";
           const result = await client.query(`
             INSERT INTO "Candidate Information" (record_type, name, column_type, candidate_data)
@@ -160,27 +298,51 @@ export async function POST(request: Request) {
       }
     }
 
-    const fields = body.fields && typeof body.fields === "object" && !Array.isArray(body.fields) ? body.fields : {};
-    const candidateData = {
-      category: typeof body.category === "string" ? body.category : null,
-      sub_category: typeof body.sub_category === "string" ? body.sub_category : null,
-      fields,
-    };
-    const candidateName = typeof (fields as Record<string, unknown>)["Candidate Name"] === "string"
-      ? String((fields as Record<string, unknown>)["Candidate Name"])
-      : "Candidate";
-
+    const fields = body.fields && typeof body.fields === "object" && !Array.isArray(body.fields)
+      ? { ...(body.fields as Record<string, unknown>) }
+      : {};
     await ensureCandidateInformationTable();
-    const result = await databasePool.query(
-      `
-        INSERT INTO "Candidate Information" (record_type, name, column_type, candidate_data)
-        VALUES ('candidate', $1, 'Candidate', $2)
-        RETURNING id, record_type, name, column_type, candidate_data, date
-      `,
-      [candidateName || "Candidate", JSON.stringify(candidateData)],
-    );
+    const client = await databasePool.connect();
+    let transactionStarted = false;
+    let candidate: Record<string, unknown>;
+    try {
+      await client.query("BEGIN");
+      transactionStarted = true;
+      await acquireCandidateIdLock(client);
+      const existingCandidateIds = await loadExistingCandidateIds(client);
+      const candidateIdFieldName = await getCandidateIdFieldName(client);
+      fields[candidateIdFieldName] = generateUniqueCandidateId(existingCandidateIds);
+      for (const fieldName of Object.keys(fields)) {
+        if (isCandidateIdFieldName(fieldName)) fields[fieldName] = fields[candidateIdFieldName];
+      }
+      const candidateData = {
+        category: typeof body.category === "string" ? body.category : null,
+        sub_category: typeof body.sub_category === "string" ? body.sub_category : null,
+        fields,
+      };
+      const candidateName = typeof fields["Candidate Name"] === "string"
+        ? fields["Candidate Name"]
+        : "Candidate";
 
-    return NextResponse.json(result.rows[0], { status: 201 });
+      const result = await client.query(
+        `
+          INSERT INTO "Candidate Information" (record_type, name, column_type, candidate_data)
+          VALUES ('candidate', $1, 'Candidate', $2)
+          RETURNING id, record_type, name, column_type, candidate_data, date
+        `,
+        [candidateName || "Candidate", JSON.stringify(candidateData)],
+      );
+      candidate = result.rows[0];
+      await client.query("COMMIT");
+      transactionStarted = false;
+    } catch (error) {
+      if (transactionStarted) await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+
+    return NextResponse.json(candidate, { status: 201 });
   } catch (error) {
     console.error("Failed to save candidate", error);
     return NextResponse.json({ error: "Unable to save candidate" }, { status: 500 });
@@ -188,9 +350,17 @@ export async function POST(request: Request) {
 }
 
 export async function GET() {
+  let client: PoolClient | undefined;
+  let transactionStarted = false;
   try {
     await ensureCandidateInformationTable();
-    const result = await databasePool.query(
+    client = await databasePool.connect();
+    await client.query("BEGIN");
+    transactionStarted = true;
+    await acquireCandidateIdLock(client);
+    const candidateIdFieldName = await getCandidateIdFieldName(client);
+    await backfillCandidateIds(client, candidateIdFieldName);
+    const result = await client.query(
       `
         SELECT id, name, candidate_data, status, date
         FROM "Candidate Information"
@@ -198,9 +368,14 @@ export async function GET() {
         ORDER BY id DESC
       `
     );
+    await client.query("COMMIT");
+    transactionStarted = false;
     return NextResponse.json(result.rows);
   } catch (error) {
+    if (client && transactionStarted) await client.query("ROLLBACK").catch(() => undefined);
     console.error("Failed to fetch candidates", error);
     return NextResponse.json({ error: "Unable to fetch candidates" }, { status: 500 });
+  } finally {
+    client?.release();
   }
 }

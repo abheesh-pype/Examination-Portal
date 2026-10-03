@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useRef, useState, type FormEvent } from "react";
+import React, { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import Papa from "papaparse";
 import readXlsxFile from "read-excel-file/browser";
 
@@ -340,8 +340,14 @@ function AssessmentPreview({ assessment, onClose }: { assessment: AssessmentCard
 function CandidateAssignment({ assessment, onClose }: { assessment: AssessmentCardData; onClose: () => void }) {
   const [categories, setCategories] = useState<CandidateCategory[]>([]);
   const [subCategories, setSubCategories] = useState<CandidateSubCategory[]>([]);
-  const [candidates, setCandidates] = useState<Array<{ candidate_data?: { category?: string; sub_category?: string }; status?: boolean }>>([]);
+  const [candidates, setCandidates] = useState<Array<{
+    id: number;
+    name: string;
+    candidate_data?: { category?: string; sub_category?: string; fields?: Record<string, unknown> };
+    status?: boolean;
+  }>>([]);
   const [selectedCategory, setSelectedCategory] = useState("");
+  const [expandedSubCategoryId, setExpandedSubCategoryId] = useState<number | null>(null);
   const [assignedIds, setAssignedIds] = useState<number[]>([]);
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [selectedRemovalIds, setSelectedRemovalIds] = useState<number[]>([]);
@@ -365,7 +371,12 @@ function CandidateAssignment({ assessment, onClose }: { assessment: AssessmentCa
         const [categoryData, subCategoryData, candidateData, assignmentData] = await Promise.all([
           categoryResponse.json() as Promise<CandidateCategory[] & { error?: string }>,
           subCategoryResponse.json() as Promise<CandidateSubCategory[] & { error?: string }>,
-          candidateResponse.json() as Promise<Array<{ candidate_data?: { category?: string; sub_category?: string }; status?: boolean }> & { error?: string }>,
+          candidateResponse.json() as Promise<Array<{
+            id: number;
+            name: string;
+            candidate_data?: { category?: string; sub_category?: string; fields?: Record<string, unknown> };
+            status?: boolean;
+          }> & { error?: string }>,
           assignmentResponse.json() as Promise<number[] & { error?: string }>,
         ]);
         if (!categoryResponse.ok) throw new Error(categoryData.error ?? "Unable to load candidate categories");
@@ -374,11 +385,12 @@ function CandidateAssignment({ assessment, onClose }: { assessment: AssessmentCa
         if (!assignmentResponse.ok) throw new Error(assignmentData.error ?? "Unable to load existing assignments");
         setCategories(categoryData);
         setSubCategories(subCategoryData);
-        setCandidates(candidateData);
+        setCandidates(candidateData.filter((candidate) => candidate.status !== false));
         setAssignedIds(assignmentData);
         setSelectedIds([]);
         setSelectedRemovalIds([]);
         setSelectedCategory("");
+        setExpandedSubCategoryId(null);
       })
       .catch((loadError) => {
         if (loadError instanceof Error && loadError.name === "AbortError") return;
@@ -401,19 +413,22 @@ function CandidateAssignment({ assessment, onClose }: { assessment: AssessmentCa
 
   const assignedSubCategories = subCategories.filter((item) => assignedIds.includes(item.id));
   const availableSubCategories = subCategories.filter((item) => item.status && !assignedIds.includes(item.id));
-  const availableCategories = categories.filter((item) =>
-    item.status || assignedSubCategories.some((subCategory) => subCategory.category === item.candidate_category)
-  );
-  const categorySubCategories = subCategories.filter((item) =>
-    activeTab === "assigned"
-      ? assignedIds.includes(item.id)
-      : item.category === selectedCategory && item.status && !assignedIds.includes(item.id)
-  );
+  const availableCategories = [...new Set([
+    ...categories
+      .filter((item) => item.status || assignedSubCategories.some((subCategory) => subCategory.category === item.candidate_category))
+      .map((item) => item.candidate_category),
+    ...candidates.map((candidate) => candidate.candidate_data?.category?.trim() ?? ""),
+  ].filter(Boolean))];
+  const categorySubCategories = activeTab === "assigned"
+    ? subCategories.filter((item) => assignedIds.includes(item.id))
+    : subCategories.filter((item) =>
+      item.category === selectedCategory && item.status && !assignedIds.includes(item.id)
+    );
   const countCandidates = (subCategory: CandidateSubCategory) => candidates.filter((candidate) =>
     candidate.status !== false
-    && candidate.candidate_data?.category === subCategory.category
-    && candidate.candidate_data?.sub_category === subCategory.candidate_sub_category
-  ).length;
+    && candidate.candidate_data?.category?.trim() === subCategory.category.trim()
+    && candidate.candidate_data?.sub_category?.trim() === subCategory.candidate_sub_category.trim()
+  );
 
   const saveAssignments = async () => {
     if (!assessment.id) {
@@ -486,9 +501,9 @@ function CandidateAssignment({ assessment, onClose }: { assessment: AssessmentCa
               {activeTab === "available" && (
                 <label className="candidate-assignment-category" htmlFor="assignment-candidate-category">
                   <span>Category</span>
-                  <select id="assignment-candidate-category" value={selectedCategory} onChange={(event) => setSelectedCategory(event.target.value)}>
+                  <select id="assignment-candidate-category" value={selectedCategory} onChange={(event) => { setSelectedCategory(event.target.value); setExpandedSubCategoryId(null); }}>
                     <option value="">Select a category</option>
-                    {availableCategories.map((category) => <option key={category.id} value={category.candidate_category}>{category.candidate_category}</option>)}
+                    {availableCategories.map((category) => <option key={category} value={category}>{category}</option>)}
                   </select>
                 </label>
               )}
@@ -515,13 +530,48 @@ function CandidateAssignment({ assessment, onClose }: { assessment: AssessmentCa
                     </tr>
                   </thead>
                   <tbody>
-                    {categorySubCategories.map((subCategory) => (
-                      <tr key={subCategory.id}>
-                        <td><input type="checkbox" aria-label={`${activeTab === "assigned" ? "Remove" : "Assign"} ${subCategory.candidate_sub_category}`} checked={visibleSelectionIds.includes(subCategory.id)} onChange={() => activeTab === "assigned" ? toggleSubCategoryRemoval(subCategory.id) : toggleSubCategory(subCategory.id)} /></td>
-                        <td>{subCategory.candidate_sub_category}{!subCategory.status && <small className="candidate-assignment-inactive">Inactive</small>}</td>
-                        <td>{countCandidates(subCategory)}</td>
-                      </tr>
-                    ))}
+                    {categorySubCategories.map((subCategory) => {
+                      const subCategoryCandidates = countCandidates(subCategory);
+                      const isExpanded = expandedSubCategoryId === subCategory.id;
+                      return (
+                        <React.Fragment key={subCategory.id}>
+                          <tr>
+                            <td><input type="checkbox" aria-label={`${activeTab === "assigned" ? "Remove" : "Assign"} ${subCategory.candidate_sub_category}`} checked={visibleSelectionIds.includes(subCategory.id)} onChange={() => activeTab === "assigned" ? toggleSubCategoryRemoval(subCategory.id) : toggleSubCategory(subCategory.id)} /></td>
+                            <td>{subCategory.candidate_sub_category}{!subCategory.status && <small className="candidate-assignment-inactive">Inactive</small>}</td>
+                            <td>
+                              <button
+                                className="candidate-assignment-count-button"
+                                type="button"
+                                aria-expanded={isExpanded}
+                                onClick={() => setExpandedSubCategoryId(isExpanded ? null : subCategory.id)}
+                              >
+                                {subCategoryCandidates.length} {subCategoryCandidates.length === 1 ? "student" : "students"}
+                                <span aria-hidden="true">{isExpanded ? "⌃" : "⌄"}</span>
+                              </button>
+                            </td>
+                          </tr>
+                          {isExpanded && (
+                            <tr className="candidate-assignment-student-row">
+                              <td />
+                              <td colSpan={2}>
+                                {subCategoryCandidates.length > 0 ? (
+                                  <ul className="candidate-assignment-student-list">
+                                    {subCategoryCandidates.map((candidate) => (
+                                      <li key={candidate.id}>
+                                        <span>{getCandidateFieldValue(candidate.candidate_data, "Candidate Name") || candidate.name}</span>
+                                        <strong>{getCandidateFieldValue(candidate.candidate_data, "Candidate ID") || `ID ${candidate.id}`}</strong>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                ) : (
+                                  <span className="candidate-assignment-no-students">No active students in this sub-category.</span>
+                                )}
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      );
+                    })}
                     {categorySubCategories.length === 0 && (
                       <tr><td colSpan={3}>{activeTab === "assigned" ? "No sub-categories are assigned to this assessment." : selectedCategory ? "No sub-categories in this view." : "Select a candidate category to view its sub-categories."}</td></tr>
                     )}
@@ -556,6 +606,12 @@ type EvaluatorCandidate = {
 function getCandidateFieldValue(candidateData: EvaluatorCandidate["candidate_data"], fieldLabel: string) {
   const fields = candidateData?.fields;
   if (!fields) return "";
+  if (isCandidateIdFieldName(fieldLabel)) {
+    const candidateId = Object.entries(fields).find(([label, value]) =>
+      isCandidateIdFieldName(label) && value != null && /^\d{6}$/.test(String(value).trim())
+    );
+    return candidateId ? String(candidateId[1]).trim() : "";
+  }
   const targetLabel = fieldLabel.toLocaleLowerCase();
   const matchingEntry = Object.entries(fields).find(([label, value]) =>
     label.trim().toLocaleLowerCase() === targetLabel && value != null && String(value).trim()
@@ -896,31 +952,68 @@ type InvigilationCandidate = {
   category: string;
   sub_category: string;
   candidate_status: boolean;
-  invigilator_name: string;
+  invigilator_name: string | null;
 };
 
 const liveActivityItems = [
-  { label: "No Face Detected", icon: "◉", tone: "alert" },
-  { label: "OK", icon: "☻", tone: "success" },
-  { label: "Multiple Face Detected", icon: "♟", tone: "alert" },
-  { label: "Camera and Mic blocked!", icon: "▧", tone: "alert" },
-  { label: "Tab change detected!", icon: "▣", tone: "alert" },
-  { label: "Full-Screen Mode disabled!", icon: "▣", tone: "alert" },
+  { label: "No Face Detected", icon: "◉", tone: "alert", countKey: "noFace" },
+  { label: "OK", icon: "☻", tone: "success", countKey: "okay" },
+  { label: "Multiple Face Detected", icon: "♟", tone: "alert", countKey: "multipleFaces" },
+  { label: "Camera blocked!", icon: "▧", tone: "alert", countKey: "cameraBlocked" },
+  { label: "Tab change detected!", icon: "▣", tone: "alert", countKey: "tabChanges" },
+  { label: "Full-Screen Mode disabled!", icon: "▣", tone: "alert", countKey: "fullscreenDisabled" },
 ] as const;
 
-function AssessmentInvigilation({ assessment, onClose }: { assessment: AssessmentCardData; onClose: () => void }) {
+type InvigilationProctorCounts = {
+  noFace: number;
+  okay: number;
+  multipleFaces: number;
+  cameraBlocked: number;
+  tabChanges: number;
+  fullscreenDisabled: number;
+};
+
+type InvigilationActivity = {
+  assessment_id: number;
+  account_user_id: number;
+  viewer_role: "admin" | "invigilator";
+  live_candidates: number;
+  assigned_candidates: number;
+  totals: InvigilationProctorCounts;
+  candidates: Array<{
+    candidate_id: number;
+    candidate_name: string;
+    candidate_data?: EvaluatorCandidate["candidate_data"];
+    counts: InvigilationProctorCounts;
+    last_seen: string | null;
+    is_live: boolean;
+  }>;
+};
+
+function AssessmentInvigilation({ assessment, accountUserId, onClose }: { assessment: AssessmentCardData; accountUserId: number | null; onClose: () => void }) {
   const [activeTab, setActiveTab] = useState<"activity" | "candidates">("activity");
   const [candidates, setCandidates] = useState<InvigilationCandidate[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [activity, setActivity] = useState<InvigilationActivity | null>(null);
+  const [activityError, setActivityError] = useState("");
   const [search, setSearch] = useState("");
   const [candidateAction, setCandidateAction] = useState<{ candidate: InvigilationCandidate; action: "timeline" | "feed" | "restart" } | null>(null);
+  const [liveFeedStatus, setLiveFeedStatus] = useState("");
+  const [liveFeedStream, setLiveFeedStream] = useState<MediaStream | null>(null);
+  const liveFeedVideoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
     const controller = new AbortController();
     setLoading(true);
     setError("");
-    fetch(`/api/assessment-invigilate-candidates?assessmentId=${assessment.id}`, { signal: controller.signal })
+    if (!accountUserId) {
+      setCandidates([]);
+      setError("Sign in with an administrator or invigilator account to view assessment candidates.");
+      setLoading(false);
+      return () => controller.abort();
+    }
+    fetch(`/api/assessment-invigilate-candidates?assessmentId=${assessment.id}&accountUserId=${accountUserId}`, { signal: controller.signal })
       .then(async (response) => {
         const data = await response.json() as InvigilationCandidate[] & { error?: string };
         if (!response.ok) throw new Error(data.error ?? "Unable to load assessment candidates");
@@ -935,7 +1028,37 @@ function AssessmentInvigilation({ assessment, onClose }: { assessment: Assessmen
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [assessment.id]);
+  }, [accountUserId, assessment.id]);
+
+  useEffect(() => {
+    if (!accountUserId) {
+      setActivity(null);
+      setActivityError("Sign in with an administrator or invigilator account to view live monitoring counts.");
+      return;
+    }
+    const controller = new AbortController();
+    const loadActivity = async () => {
+      try {
+        const response = await fetch(
+          `/api/assessment-invigilate-activity?assessmentId=${assessment.id}&accountUserId=${accountUserId}`,
+          { signal: controller.signal },
+        );
+        const payload = await response.json() as InvigilationActivity & { error?: string };
+        if (!response.ok) throw new Error(payload.error ?? "Unable to load live monitoring counts.");
+        setActivity(payload);
+        setActivityError("");
+      } catch (loadError) {
+        if (loadError instanceof Error && loadError.name === "AbortError") return;
+        setActivityError(loadError instanceof Error ? loadError.message : "Unable to load live monitoring counts.");
+      }
+    };
+    void loadActivity();
+    const interval = window.setInterval(() => void loadActivity(), 5000);
+    return () => {
+      controller.abort();
+      window.clearInterval(interval);
+    };
+  }, [accountUserId, assessment.id]);
 
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -951,14 +1074,160 @@ function AssessmentInvigilation({ assessment, onClose }: { assessment: Assessmen
     return () => document.removeEventListener("keydown", closeOnEscape);
   }, [candidateAction, onClose]);
 
+  useEffect(() => {
+    if (candidateAction?.action !== "feed" || !accountUserId) {
+      return;
+    }
+    let cancelled = false;
+    let polling = false;
+    let pollTimer = 0;
+    let signalCursor = 0;
+    const sessionId = crypto.randomUUID();
+    const candidateRecordId = candidateAction.candidate.candidate_id;
+    const pendingIceCandidates: RTCIceCandidateInit[] = [];
+    const peer = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+    peer.addTransceiver("video", { direction: "recvonly" });
+    const baseBody = {
+      side: "staff",
+      assessmentId: assessment.id,
+      candidateRecordId,
+      viewerUserId: accountUserId,
+      sessionId,
+    };
+    let remoteDescriptionReady = false;
+    let endSignalSent = false;
+    const postSignal = async (action: "start" | "send", messageType: "offer" | "ice" | "end", payload: object) => {
+      const response = await fetch("/api/candidates/student-exam/live-feed", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...baseBody, action, messageType, payload }),
+      });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error ?? "Unable to connect to the candidate live feed.");
+    };
+
+    const closePeer = () => {
+      peer.close();
+      setLiveFeedStream(null);
+    };
+
+    const stopFeed = (notifyCandidate: boolean) => {
+      if (notifyCandidate && !endSignalSent) {
+        endSignalSent = true;
+        void postSignal("send", "end", {}).catch((error) => console.error("Unable to end candidate live-feed session", error));
+      }
+      closePeer();
+    };
+
+    peer.ontrack = (event) => {
+      if (event.streams[0]) {
+        setLiveFeedStream(event.streams[0]);
+        setLiveFeedStatus("Live camera connected.");
+      }
+    };
+    peer.onicecandidate = (event) => {
+      if (event.candidate && !cancelled) {
+        void postSignal("send", "ice", event.candidate.toJSON())
+          .catch((error) => console.error("Unable to send staff ICE information", error));
+      }
+    };
+    peer.onconnectionstatechange = () => {
+      if (peer.connectionState === "connected") setLiveFeedStatus("Live camera connected.");
+      if (peer.connectionState === "failed") setLiveFeedStatus("Could not establish the live camera connection. A network relay may be required.");
+      if (peer.connectionState === "disconnected") setLiveFeedStatus("Live camera connection interrupted.");
+    };
+
+    const pollSignals = async () => {
+      if (cancelled || polling) return;
+      polling = true;
+      try {
+        const response = await fetch("/api/candidates/student-exam/live-feed", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...baseBody, action: "poll", afterId: signalCursor }),
+        });
+        const result = await response.json() as {
+          signals: Array<{ id: string | number; message_type: string; payload: RTCSessionDescriptionInit | RTCIceCandidateInit }>;
+          error?: string;
+        };
+        if (!response.ok) throw new Error(result.error ?? "Unable to receive the candidate live feed.");
+        if (cancelled) return;
+        for (const signal of result.signals ?? []) {
+          const id = Number(signal.id);
+          if (Number.isSafeInteger(id)) signalCursor = Math.max(signalCursor, id);
+          if (signal.message_type === "answer" && !remoteDescriptionReady) {
+            await peer.setRemoteDescription(signal.payload as RTCSessionDescriptionInit);
+            remoteDescriptionReady = true;
+            for (const candidate of pendingIceCandidates.splice(0)) await peer.addIceCandidate(candidate);
+          } else if (signal.message_type === "ice") {
+            const candidate = signal.payload as RTCIceCandidateInit;
+            if (remoteDescriptionReady) await peer.addIceCandidate(candidate);
+            else pendingIceCandidates.push(candidate);
+          } else if (signal.message_type === "end") {
+            endSignalSent = true;
+            setLiveFeedStatus("The candidate or examination has ended the live feed.");
+            closePeer();
+            return;
+          }
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.error("Unable to receive candidate live-feed signals", error);
+          setLiveFeedStatus(error instanceof Error ? error.message : "Unable to connect to the candidate live feed.");
+        }
+      } finally {
+        polling = false;
+      }
+    };
+
+    void (async () => {
+      try {
+        const offer = await peer.createOffer();
+        await peer.setLocalDescription(offer);
+        await postSignal("start", "offer", { type: offer.type, sdp: offer.sdp });
+        if (cancelled) return;
+        setLiveFeedStatus("Waiting for the candidate to accept the live camera request…");
+        await pollSignals();
+        pollTimer = window.setInterval(() => void pollSignals(), 1000);
+      } catch (error) {
+        if (!cancelled) {
+          console.error("Unable to start candidate live-feed session", error);
+          setLiveFeedStatus(error instanceof Error ? error.message : "Unable to start the live camera request.");
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+      window.clearInterval(pollTimer);
+      stopFeed(true);
+    };
+  }, [accountUserId, assessment.id, candidateAction]);
+
+  useEffect(() => {
+    if (liveFeedVideoRef.current) liveFeedVideoRef.current.srcObject = liveFeedStream;
+  }, [liveFeedStream]);
+
   const normalizedSearch = search.trim().toLocaleLowerCase();
+  const openCandidateAction = (candidate: InvigilationCandidate, action: "timeline" | "feed" | "restart") => {
+    if (action === "feed") {
+      setLiveFeedStream(null);
+      setLiveFeedStatus("Requesting consented live camera connection…");
+    }
+    setCandidateAction({ candidate, action });
+  };
+  const closeCandidateAction = () => {
+    setCandidateAction(null);
+    setLiveFeedStream(null);
+    setLiveFeedStatus("");
+  };
   const visibleCandidates = candidates.filter((candidate) => [
     getCandidateFieldValue(candidate.candidate_data, "Candidate ID"),
     getCandidateFieldValue(candidate.candidate_data, "Candidate Name") || candidate.candidate_name,
     candidate.category,
     candidate.sub_category,
   ].some((value) => value.toLocaleLowerCase().includes(normalizedSearch)));
-  const attendingCount = 0;
+  const attendingCount = activity?.live_candidates ?? 0;
+  const assignedCandidateCount = activity?.assigned_candidates ?? 0;
   const assessmentDetails = [
     { label: "Examination", value: assessment.subtitle },
     { label: "Start Date", value: assessment.start_date ? new Date(assessment.start_date).toLocaleString() : "" },
@@ -976,7 +1245,7 @@ function AssessmentInvigilation({ assessment, onClose }: { assessment: Assessmen
     },
     feed: {
       title: `Live Feed — ${getCandidateFieldValue(candidateAction.candidate.candidate_data, "Candidate Name") || candidateAction.candidate.candidate_name}`,
-      message: "No live feed is available because exam monitoring is not implemented yet.",
+      message: "",
     },
     restart: {
       title: "Restart Exam",
@@ -1024,7 +1293,10 @@ function AssessmentInvigilation({ assessment, onClose }: { assessment: Assessmen
 
         {activeTab === "activity" ? (
           <section className="invigilation-panel" aria-label="Live activity">
-            <p className="invigilation-placeholder">Live activity will be available when exam monitoring is implemented.</p>
+            <p className="invigilation-placeholder">
+              Live counts from {attendingCount} of {assignedCandidateCount} candidates {activity?.viewer_role === "admin" ? "assigned to this assessment" : "assigned to you"} · refreshes every 5 seconds.
+            </p>
+            {activityError && <p className="invigilation-error" role="alert">{activityError}</p>}
             <div className="invigilation-activity-list">
               {liveActivityItems.map((item) => (
                 <details className="invigilation-activity-item" key={item.label}>
@@ -1032,11 +1304,24 @@ function AssessmentInvigilation({ assessment, onClose }: { assessment: Assessmen
                     <span className="invigilation-activity-label">
                       <span className="invigilation-activity-icon" aria-hidden="true">{item.icon}</span>
                       {item.label}
-                      <b className={`invigilation-count ${item.tone}`}>0</b>
+                      <b className={`invigilation-count ${item.tone}`}>{activity?.totals[item.countKey] ?? 0}</b>
                     </span>
                     <span className="invigilation-chevron" aria-hidden="true" />
                   </summary>
-                  <div className="invigilation-activity-details" aria-live="polite" />
+                  <div className="invigilation-activity-details" aria-live="polite">
+                    {!activity || activity.candidates.filter((candidate) => candidate.is_live && candidate.counts[item.countKey] > 0).length === 0 ? (
+                      <p>No active candidate events for this check.</p>
+                    ) : (
+                      <ul className="invigilation-activity-candidate-list">
+                        {activity.candidates.filter((candidate) => candidate.is_live && candidate.counts[item.countKey] > 0).map((candidate) => (
+                          <li key={candidate.candidate_id}>
+                            <span>{getCandidateFieldValue(candidate.candidate_data, "Candidate Name") || candidate.candidate_name} · {getCandidateFieldValue(candidate.candidate_data, "Candidate ID") || `ID ${candidate.candidate_id}`}</span>
+                            <b>{candidate.counts[item.countKey]}</b>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
                 </details>
               ))}
             </div>
@@ -1044,7 +1329,7 @@ function AssessmentInvigilation({ assessment, onClose }: { assessment: Assessmen
         ) : (
           <section className="invigilation-panel invigilation-candidates-panel" aria-label="Assessment candidates">
             <div className="invigilation-candidates-toolbar">
-              <p><strong>{attendingCount} / {candidates.length}</strong> candidates attending · Attendance tracking is not available yet.</p>
+              <p><strong>{attendingCount} / {assignedCandidateCount}</strong> candidates with live monitoring data.</p>
               <label>
                 Search:
                 <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} />
@@ -1081,9 +1366,9 @@ function AssessmentInvigilation({ assessment, onClose }: { assessment: Assessmen
                       <td><span className={`invigilation-candidate-status${candidate.candidate_status ? "" : " is-inactive"}`}>{candidate.candidate_status ? "Not Started Yet" : "Inactive"}</span></td>
                       <td>
                         <div className="invigilation-candidate-actions">
-                          <button type="button" aria-label={`View timeline for ${candidate.candidate_name}`} title="View timeline" onClick={() => setCandidateAction({ candidate, action: "timeline" })}>◷</button>
-                          <button type="button" aria-label={`View live feed for ${candidate.candidate_name}`} title="View live feed" onClick={() => setCandidateAction({ candidate, action: "feed" })}>▣</button>
-                          <button type="button" aria-label={`Restart exam for ${candidate.candidate_name}`} title="Restart exam" onClick={() => setCandidateAction({ candidate, action: "restart" })}>↻</button>
+                          <button type="button" aria-label={`View timeline for ${candidate.candidate_name}`} title="View timeline" onClick={() => openCandidateAction(candidate, "timeline")}>◷</button>
+                          <button type="button" aria-label={`View live feed for ${candidate.candidate_name}`} title="View live feed" onClick={() => openCandidateAction(candidate, "feed")}>▣</button>
+                          <button type="button" aria-label={`Restart exam for ${candidate.candidate_name}`} title="Restart exam" onClick={() => openCandidateAction(candidate, "restart")}>↻</button>
                         </div>
                       </td>
                     </tr>
@@ -1098,12 +1383,28 @@ function AssessmentInvigilation({ assessment, onClose }: { assessment: Assessmen
         )}
       </main>
       {actionDetails && (
-        <div className="invigilation-action-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setCandidateAction(null); }}>
-          <section className="invigilation-action-dialog" role="dialog" aria-modal="true" aria-labelledby="invigilation-action-title">
-            <h2 id="invigilation-action-title">{actionDetails.title}</h2>
-            <p>{actionDetails.message}</p>
-            <button type="button" onClick={() => setCandidateAction(null)}>Close</button>
-          </section>
+        <div className="invigilation-action-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeCandidateAction(); }}>
+          {candidateAction?.action === "feed" ? (
+            <section className="invigilation-action-dialog invigilation-live-feed-dialog" role="dialog" aria-modal="true" aria-labelledby="invigilation-action-title">
+              <header>
+                <div><h2 id="invigilation-action-title">{actionDetails.title}</h2><p>Live camera · Not recorded or stored</p></div>
+              <button type="button" onClick={closeCandidateAction} aria-label="Close live feed">×</button>
+              </header>
+              <div className="invigilation-live-feed-video">
+                <video ref={liveFeedVideoRef} autoPlay playsInline />
+                {!liveFeedStream && <p role="status">{liveFeedStatus || "Waiting for candidate consent and camera connection…"}</p>}
+                {liveFeedStream && <span><i /> LIVE</span>}
+              </div>
+              <p className="invigilation-live-feed-status" role="status">{liveFeedStatus}</p>
+              <button type="button" onClick={closeCandidateAction}>End live view</button>
+            </section>
+          ) : (
+            <section className="invigilation-action-dialog" role="dialog" aria-modal="true" aria-labelledby="invigilation-action-title">
+              <h2 id="invigilation-action-title">{actionDetails.title}</h2>
+              <p>{actionDetails.message}</p>
+              <button type="button" onClick={closeCandidateAction}>Close</button>
+            </section>
+          )}
         </div>
       )}
     </div>
@@ -1590,7 +1891,8 @@ function CandidateUploadForm({ onClose, onUploaded, candidateInfo }: { onClose: 
   const [success, setSuccess] = useState("");
 
   const downloadTemplate = () => {
-    const headers = ["Category", "Sub-Category", ...candidateInfo.map((item) => item.name)];
+    const candidateFields = candidateInfo.filter((item) => !isCandidateIdFieldName(item.name));
+    const headers = ["Category", "Sub-Category", ...candidateFields.map((item) => item.name)];
     const csv = Papa.unparse([headers, headers.map(() => "")]);
     const blob = new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -1633,7 +1935,7 @@ function CandidateUploadForm({ onClose, onUploaded, candidateInfo }: { onClose: 
         throw new Error("Choose a CSV or XLSX file. Legacy XLS files are not supported.");
       }
 
-      const expectedHeaders = ["Category", "Sub-Category", ...candidateInfo.map((item) => item.name)];
+      const expectedHeaders = ["Category", "Sub-Category", ...candidateInfo.filter((item) => !isCandidateIdFieldName(item.name)).map((item) => item.name)];
       const missingHeaders = expectedHeaders.filter((header) => !headers.includes(header));
       if (missingHeaders.length > 0) {
         throw new Error(`Missing columns: ${missingHeaders.join(", ")}. Download the template and keep its column names.`);
@@ -1661,7 +1963,9 @@ function CandidateUploadForm({ onClose, onUploaded, candidateInfo }: { onClose: 
           rows: rows.map((row) => ({
             category: String(row.Category ?? "").trim(),
             sub_category: String(row["Sub-Category"] ?? "").trim(),
-            fields: Object.fromEntries(candidateInfo.map((item) => [item.name, String(row[item.name] ?? "").trim()])),
+            fields: Object.fromEntries(candidateInfo
+              .filter((item) => !isCandidateIdFieldName(item.name))
+              .map((item) => [item.name, String(row[item.name] ?? "").trim()])),
           })),
         }),
       });
@@ -1777,7 +2081,13 @@ function AddCandidateForm({ onClose, currentRole }: { onClose: () => void; curre
       const response = await fetch("/api/candidates", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ category, sub_category: subCategory, fields: Object.fromEntries(candidateInfo.map((item) => [item.name, values[item.id] ?? ""])) }),
+        body: JSON.stringify({
+          category,
+          sub_category: subCategory,
+          fields: Object.fromEntries(candidateInfo
+            .filter((item) => !isCandidateIdFieldName(item.name))
+            .map((item) => [item.name, values[item.id] ?? ""])),
+        }),
       });
       const data = await response.json() as { error?: string };
       if (!response.ok) throw new Error(data.error ?? "Unable to save candidate");
@@ -1825,9 +2135,10 @@ function AddCandidateForm({ onClose, currentRole }: { onClose: () => void; curre
               {availableSubCategories.map((item) => <option key={item.id} value={item.candidate_sub_category}>{item.candidate_sub_category}</option>)}
             </select>
           </div>
+          <p className="candidate-id-generated-note">Candidate ID will be generated automatically as a unique 6-digit number.</p>
           {loading && <p>Loading candidate fields...</p>}
           {error && <p className="form-error" role="alert">{error}</p>}
-          {!loading && candidateInfo.map((item) => {
+          {!loading && candidateInfo.filter((item) => !isCandidateIdFieldName(item.name)).map((item) => {
             const fieldId = `candidate-field-${item.id}`;
             const value = values[item.id] ?? "";
             const inputType = item.column_type === "Email" ? "email" : item.column_type === "Date" ? "date" : item.column_type === "Number" ? "number" : "text";
@@ -1888,6 +2199,9 @@ function CandidatesPanel({ currentRole }: { currentRole?: any }) {
   const [candidateInfo, setCandidateInfo] = useState<CandidateInfoItem[]>([]);
   const [loading, setLoading] = useState(true);
   const canCreate = hasRolePermission(currentRole, "Candidates", "create");
+  const additionalCandidateInfo = candidateInfo.filter((info) =>
+    !isCandidateIdFieldName(info.name) && !isDateOfBirthFieldName(info.name)
+  );
 
   const fetchData = () => {
     setLoading(true);
@@ -1943,7 +2257,8 @@ function CandidatesPanel({ currentRole }: { currentRole?: any }) {
             <thead>
               <tr>
                 <th>Candidate ID</th>
-                {candidateInfo.map((info) => (
+                <th>Date of Birth</th>
+                {additionalCandidateInfo.map((info) => (
                   <th key={info.id}>{info.name}</th>
                 ))}
                 <th>Category</th>
@@ -1954,17 +2269,18 @@ function CandidatesPanel({ currentRole }: { currentRole?: any }) {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={candidateInfo.length + 4}>Loading candidates...</td>
+                  <td colSpan={additionalCandidateInfo.length + 5}>Loading candidates...</td>
                 </tr>
               ) : candidates.length === 0 ? (
                 <tr>
-                  <td colSpan={candidateInfo.length + 4}>No data available in table</td>
+                  <td colSpan={additionalCandidateInfo.length + 5}>No data available in table</td>
                 </tr>
               ) : (
                 candidates.map((c) => (
                   <tr key={c.id}>
-                    <td>#{c.id}</td>
-                    {candidateInfo.map((info) => (
+                    <td>{getCandidateFieldValue(c.candidate_data, "Candidate ID") || "-"}</td>
+                    <td>{getCandidateFieldValue(c.candidate_data, "Date of Birth") || "Not provided"}</td>
+                    {additionalCandidateInfo.map((info) => (
                       <td key={info.id}>{c.candidate_data?.fields?.[info.name] || "-"}</td>
                     ))}
                     <td>{c.candidate_data?.category || "-"}</td>
@@ -3183,6 +3499,16 @@ type CandidateInfoItem = {
   status: boolean;
   created_at: string;
 };
+
+function isCandidateIdFieldName(name: string) {
+  return /^candidate id(?:\s*\([^)]*\))?$/i.test(name.trim());
+}
+
+function isDateOfBirthFieldName(name: string) {
+  const normalizedName = name.trim().toLowerCase();
+  return normalizedName === "dob"
+    || /^(date of birth|birth date)(?:\s*\([^)]*\))?$/.test(normalizedName);
+}
 
 function CandidateInfoForm({ item, onClose, onSaved }: { item?: CandidateInfoItem; onClose: () => void; onSaved: (item: CandidateInfoItem) => void }) {
   const [infoName, setInfoName] = useState(item?.name ?? "");
@@ -4912,9 +5238,12 @@ const hasRolePermission = (role: any, sectionId: string, action: "view" | "creat
   return Number(permission[action] || 0) === 1;
 };
 
-function LoginPage({ onLogin }: { onLogin: (user: any) => void }) {
+function LoginPage({ onLogin, onStudentLogin }: { onLogin: (user: any) => void; onStudentLogin: (student: any) => void }) {
+  const [portal, setPortal] = useState<"choose" | "organization" | "student">("choose");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [candidateId, setCandidateId] = useState("");
+  const [dateOfBirth, setDateOfBirth] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -4944,60 +5273,1099 @@ function LoginPage({ onLogin }: { onLogin: (user: any) => void }) {
     }
   };
 
+  const handleStudentSubmit = async (event: FormEvent) => {
+    event.preventDefault();
+    setLoading(true);
+    setError("");
+    try {
+      const response = await fetch("/api/candidates/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ candidateId, dateOfBirth }),
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.student) {
+        throw new Error(payload.error || "Student login failed.");
+      }
+      onStudentLogin(payload.student);
+    } catch (loginError) {
+      setError(loginError instanceof Error ? loginError.message : "Unable to login.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
-    <main className="login-shell">
-      <div className="login-card">
+    <main className="login-shell portal-login-shell">
+      <div className={`login-card portal-login-card${portal === "choose" ? " portal-choice-card" : ""}`}>
         <div className="login-brand">
-          <span className="brand-mark">U</span>
+          <span className="portal-crest" aria-hidden="true">
+            <svg viewBox="0 0 48 56" fill="none">
+              <path d="M24 2 44 9v17c0 12-8.5 21-20 28C12.5 47 4 38 4 26V9L24 2Z" fill="#fff" stroke="currentColor" strokeWidth="2.5" />
+              <path d="M15 16v12c0 5.2 3.4 8.5 9 8.5s9-3.3 9-8.5V16" stroke="currentColor" strokeWidth="4" strokeLinecap="round" />
+              <path d="M11 42c3.6 3.3 8 5.8 13 8 5-2.2 9.4-4.7 13-8" stroke="#c68b3c" strokeWidth="2.5" strokeLinecap="round" />
+            </svg>
+          </span>
           <span className="brand-name">ums<span>.</span>exam</span>
         </div>
 
-        <h1>Administrator Login</h1>
-        <p>Please sign in with your user email and password.</p>
-
-        <form onSubmit={handleSubmit} className="login-form">
-          <label>
-            <span>Email</span>
-            <input
-              type="email"
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-              placeholder="admin@eduexpoits.in"
-              autoComplete="email"
-              required
-            />
-          </label>
-
-          <label>
-            <span>Password</span>
-            <div className="password-input-wrap">
-              <input
-                type={showPassword ? "text" : "password"}
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-                placeholder="Enter password"
-                autoComplete="current-password"
-                required
-              />
-              <button
-                type="button"
-                className="password-toggle-btn"
-                aria-label={showPassword ? "Hide password" : "Show password"}
-                onClick={() => setShowPassword((current) => !current)}
-              >
-                {showPassword ? "Hide" : "Show"}
+        {portal === "choose" ? (
+          <>
+            <h1>Login As</h1>
+            <div className="portal-choice-grid">
+              <button className="portal-choice-button" type="button" onClick={() => { setPortal("organization"); setError(""); }}>
+                <svg aria-hidden="true" viewBox="0 0 40 40" fill="none">
+                  <circle cx="14" cy="11" r="4" stroke="currentColor" strokeWidth="2.5" />
+                  <circle cx="27" cy="13" r="3" stroke="currentColor" strokeWidth="2.5" />
+                  <path d="M4 31v-2c0-4.4 4-7 10-7s10 2.6 10 7v2H4Z" stroke="currentColor" strokeWidth="2.5" strokeLinejoin="round" />
+                  <path d="M25 23c5.5-.7 10 1.5 10 5.5V31H27" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+                <span>Organization</span>
+              </button>
+              <button className="portal-choice-button" type="button" onClick={() => { setPortal("student"); setError(""); }}>
+                <svg aria-hidden="true" viewBox="0 0 40 40" fill="none">
+                  <circle cx="20" cy="10" r="5" stroke="currentColor" strokeWidth="2.5" />
+                  <path d="M8 34v-6c0-5.2 4.5-9 12-9s12 3.8 12 9v6H8Z" stroke="currentColor" strokeWidth="2.5" strokeLinejoin="round" />
+                  <path d="m17 21 3 4 3-4m-3 4v9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+                <span>Student</span>
               </button>
             </div>
-          </label>
+          </>
+        ) : portal === "organization" ? (
+          <>
+            <button className="portal-back-button" type="button" onClick={() => { setPortal("choose"); setError(""); }}>‹ <span>Back</span></button>
+            <h1>Organization Login</h1>
+            <p>Please sign in with your user email and password.</p>
 
-          {error && <div className="login-error" role="alert">{error}</div>}
+            <form onSubmit={handleSubmit} className="login-form">
+              <label>
+                <span>Email</span>
+                <input
+                  type="email"
+                  value={email}
+                  onChange={(event) => setEmail(event.target.value)}
+                  placeholder="admin@eduexpoits.in"
+                  autoComplete="email"
+                  required
+                />
+              </label>
 
-          <button type="submit" disabled={loading}>
-            {loading ? "Signing in..." : "Login"}
-          </button>
-        </form>
+              <label>
+                <span>Password</span>
+                <div className="password-input-wrap">
+                  <input
+                    type={showPassword ? "text" : "password"}
+                    value={password}
+                    onChange={(event) => setPassword(event.target.value)}
+                    placeholder="Enter password"
+                    autoComplete="current-password"
+                    required
+                  />
+                  <button
+                    type="button"
+                    className="password-toggle-btn"
+                    aria-label={showPassword ? "Hide password" : "Show password"}
+                    onClick={() => setShowPassword((current) => !current)}
+                  >
+                    {showPassword ? "Hide" : "Show"}
+                  </button>
+                </div>
+              </label>
+
+              {error && <div className="login-error" role="alert">{error}</div>}
+
+              <button type="submit" disabled={loading}>
+                {loading ? "Signing in..." : "Login"}
+              </button>
+            </form>
+          </>
+        ) : (
+          <>
+            <button className="portal-back-button" type="button" onClick={() => { setPortal("choose"); setError(""); }}>‹ <span>Back</span></button>
+            <h1>Student Login</h1>
+            <p>Enter your candidate ID and date of birth.</p>
+
+            <form onSubmit={handleStudentSubmit} className="login-form">
+              <label>
+                <span>Candidate ID</span>
+                <input
+                  type="text"
+                  value={candidateId}
+                  onChange={(event) => { setCandidateId(event.target.value); setError(""); }}
+                  placeholder="Enter candidate ID"
+                  autoComplete="username"
+                  required
+                />
+              </label>
+
+              <label>
+                <span>Date of Birth</span>
+                <input
+                  type="date"
+                  value={dateOfBirth}
+                  onChange={(event) => { setDateOfBirth(event.target.value); setError(""); }}
+                  autoComplete="bday"
+                  required
+                />
+              </label>
+
+              {error && <div className="login-error student-login-notice" role="status">{error}</div>}
+
+              <button type="submit" disabled={loading}>{loading ? "Signing in..." : "Login"}</button>
+            </form>
+          </>
+        )}
       </div>
     </main>
+  );
+}
+
+type StudentAssessment = {
+  id: number;
+  examination: string;
+  name: string;
+  start_date: string | null;
+  end_date: string | null;
+  total_time: number | null;
+  last_login: number | null;
+  total_questions: number;
+  total_marks: number;
+};
+
+function formatStudentExamDate(value: string | null) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return new Intl.DateTimeFormat("en-GB", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+  }).format(date);
+}
+
+type StudentExamQuestion = {
+  id: number;
+  question_type: string;
+  question: string;
+  details: Record<string, unknown>;
+  section: string;
+  correct_mark: number;
+};
+
+type StudentExamSection = {
+  name: string;
+  questions: StudentExamQuestion[];
+};
+
+type StudentExamPayload = {
+  assessment?: { id: number; name: string };
+  duration_seconds?: number | null;
+  end_at?: string | null;
+  sections?: StudentExamSection[];
+  error?: string;
+};
+
+function StudentExamFlow({ student, assessment, onClose }: {
+  student: { id: number; name: string; candidateId: string; dateOfBirth: string };
+  assessment: StudentAssessment;
+  onClose: () => void;
+}) {
+  const initialProctorCounts = {
+    noFace: 0,
+    okay: 0,
+    multipleFaces: 0,
+    cameraBlocked: 0,
+    tabChanges: 0,
+    fullscreenDisabled: 0,
+  };
+  const [step, setStep] = useState<"camera" | "selfie" | "id-proof" | "loading" | "exam" | "finished">("camera");
+  const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
+  const [cameraError, setCameraError] = useState("");
+  const [liveFeedConsent, setLiveFeedConsent] = useState(false);
+  const [remoteFeedStatus, setRemoteFeedStatus] = useState("Live view is available to authorized examination staff.");
+  const [photo, setPhoto] = useState<string | null>(null);
+  const [idPhoto, setIdPhoto] = useState<string | null>(null);
+  const [examSections, setExamSections] = useState<StudentExamSection[]>([]);
+  const [answers, setAnswers] = useState<Record<number, string | string[]>>({});
+  const [activeQuestion, setActiveQuestion] = useState(0);
+  const [examDeadline, setExamDeadline] = useState<number | null>(null);
+  const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
+  const [motionWarning, setMotionWarning] = useState("");
+  const [switchAlertOpen, setSwitchAlertOpen] = useState(false);
+  const [switchAlertMessage, setSwitchAlertMessage] = useState("A change in the browser tab has been identified.");
+  const [faceDetectionStatus, setFaceDetectionStatus] = useState("Loading multiple-person detection…");
+  const [telemetryStatus, setTelemetryStatus] = useState("Connecting live activity to the invigilator…");
+  const [proctorCounts, setProctorCounts] = useState(initialProctorCounts);
+  const proctorCountsRef = useRef(initialProctorCounts);
+  const [submittedLocally, setSubmittedLocally] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const motionAlertAt = useRef(0);
+  const focusViolationAt = useRef(0);
+  const multipleFaceFrames = useRef(0);
+  const noFaceFrames = useRef(0);
+  const faceState = useRef<"unknown" | "none" | "one" | "multiple">("unknown");
+  const cameraBlocked = useRef(false);
+  const proctorAlertAt = useRef(0);
+  const candidateLivePeer = useRef<RTCPeerConnection | null>(null);
+  const candidateLiveSessionId = useRef<string | null>(null);
+  const candidateLiveSignalCursor = useRef(0);
+  const candidateLivePollPending = useRef(false);
+
+  const questions = examSections.flatMap((section) => section.questions);
+  const question = questions[activeQuestion];
+  const incrementProctorCount = useCallback((key: keyof typeof initialProctorCounts) => {
+    const next = { ...proctorCountsRef.current, [key]: proctorCountsRef.current[key] + 1 };
+    proctorCountsRef.current = next;
+    setProctorCounts(next);
+    return next[key];
+  }, []);
+  const openProctorAlert = useCallback((message: string) => {
+    if (Date.now() - proctorAlertAt.current < 8000) return;
+    proctorAlertAt.current = Date.now();
+    setSwitchAlertMessage(message);
+    setSwitchAlertOpen(true);
+  }, []);
+
+  const publishProctorCounts = useCallback(async (counts: typeof initialProctorCounts, signal?: AbortSignal) => {
+    try {
+      const response = await fetch("/api/candidates/student-exam/proctor", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          candidateId: student.candidateId,
+          dateOfBirth: student.dateOfBirth,
+          assessmentId: assessment.id,
+          counts,
+        }),
+        signal,
+      });
+      const payload = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(payload.error ?? "Unable to publish live monitoring counts.");
+      setTelemetryStatus("Live counts are available in the authorized invigilation view.");
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") return;
+      console.error("Failed to publish student proctor counts", error);
+      setTelemetryStatus(error instanceof Error ? error.message : "Unable to share live counts with your invigilator.");
+    }
+  }, [assessment.id, student.candidateId, student.dateOfBirth]);
+
+  useEffect(() => {
+    if (step !== "exam" || !cameraStream || !liveFeedConsent) return;
+    let cancelled = false;
+    let polling = false;
+    let pollTimer = 0;
+    const pendingIceCandidates: RTCIceCandidateInit[] = [];
+    const baseBody = {
+      side: "candidate",
+      assessmentId: assessment.id,
+      candidateRecordId: student.id,
+      candidateId: student.candidateId,
+      dateOfBirth: student.dateOfBirth,
+    };
+
+    const sendSignal = async (sessionId: string, messageType: "answer" | "ice" | "end", payload: object) => {
+      const response = await fetch("/api/candidates/student-exam/live-feed", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...baseBody, action: "send", sessionId, messageType, payload }),
+      });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error ?? "Unable to signal the live camera feed.");
+    };
+
+    const closePeer = (notify: boolean) => {
+      const peer = candidateLivePeer.current;
+      const sessionId = candidateLiveSessionId.current;
+      if (notify && sessionId) void sendSignal(sessionId, "end", {}).catch((error) => console.error("Unable to close candidate live-feed session", error));
+      peer?.close();
+      candidateLivePeer.current = null;
+      candidateLiveSessionId.current = null;
+      candidateLiveSignalCursor.current = 0;
+      candidateLivePollPending.current = false;
+    };
+
+    const pollSignals = async () => {
+      if (cancelled || polling || candidateLivePollPending.current) return;
+      polling = true;
+      candidateLivePollPending.current = true;
+      try {
+        const currentSessionId = candidateLiveSessionId.current;
+        const response = await fetch("/api/candidates/student-exam/live-feed", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ...baseBody,
+            action: "poll",
+            sessionId: currentSessionId,
+            afterId: currentSessionId ? candidateLiveSignalCursor.current : 0,
+          }),
+        });
+        const result = await response.json() as {
+          sessionId: string | null;
+          signals: Array<{ id: string | number; message_type: string; payload: RTCSessionDescriptionInit | RTCIceCandidateInit }>;
+          error?: string;
+        };
+        if (!response.ok) throw new Error(result.error ?? "Unable to check for a live camera request.");
+        if (cancelled) return;
+        if (result.sessionId !== candidateLiveSessionId.current) {
+          const hadActiveSession = Boolean(candidateLiveSessionId.current);
+          closePeer(false);
+          if (result.sessionId) {
+            candidateLiveSessionId.current = result.sessionId;
+            setRemoteFeedStatus("An authorized staff member requested a live camera view.");
+          } else if (hadActiveSession) {
+            setRemoteFeedStatus("The live camera view has ended or expired.");
+          }
+        }
+        for (const signal of result.signals ?? []) {
+          const id = Number(signal.id);
+          if (Number.isSafeInteger(id)) candidateLiveSignalCursor.current = Math.max(candidateLiveSignalCursor.current, id);
+          if (signal.message_type === "offer") {
+            const offer = signal.payload as RTCSessionDescriptionInit;
+            const peer = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+            candidateLivePeer.current = peer;
+            cameraStream.getTracks().forEach((track) => peer.addTrack(track, cameraStream));
+            peer.onicecandidate = (event) => {
+              if (event.candidate && candidateLiveSessionId.current) {
+                void sendSignal(candidateLiveSessionId.current, "ice", event.candidate.toJSON())
+                  .catch((error) => console.error("Unable to send candidate ICE information", error));
+              }
+            };
+            peer.onconnectionstatechange = () => {
+              if (peer.connectionState === "connected") setRemoteFeedStatus("Live camera view connected to authorized examination staff.");
+              if (peer.connectionState === "failed" || peer.connectionState === "disconnected") {
+                setRemoteFeedStatus("Live camera view disconnected. The camera is not being recorded.");
+              }
+            };
+            await peer.setRemoteDescription(offer);
+            const answer = await peer.createAnswer();
+            await peer.setLocalDescription(answer);
+            const activeSessionId = candidateLiveSessionId.current;
+            if (!activeSessionId) throw new Error("The live-feed session ended before the candidate could answer.");
+            await sendSignal(activeSessionId, "answer", { type: answer.type, sdp: answer.sdp });
+            for (const candidate of pendingIceCandidates.splice(0)) await peer.addIceCandidate(candidate);
+          } else if (signal.message_type === "ice") {
+            const candidate = signal.payload as RTCIceCandidateInit;
+            if (candidateLivePeer.current?.remoteDescription) {
+              await candidateLivePeer.current.addIceCandidate(candidate);
+            } else {
+              pendingIceCandidates.push(candidate);
+            }
+          } else if (signal.message_type === "end") {
+            closePeer(false);
+            pendingIceCandidates.length = 0;
+            setRemoteFeedStatus("The live camera view has ended.");
+          }
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.error("Unable to process candidate live-feed request", error);
+          setRemoteFeedStatus(error instanceof Error ? error.message : "Unable to check live camera requests.");
+        }
+      } finally {
+        polling = false;
+        candidateLivePollPending.current = false;
+      }
+    };
+
+    void pollSignals();
+    pollTimer = window.setInterval(() => void pollSignals(), 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(pollTimer);
+      closePeer(true);
+    };
+  }, [assessment.id, cameraStream, liveFeedConsent, step, student.candidateId, student.dateOfBirth, student.id]);
+
+  useEffect(() => {
+    if (videoRef.current && cameraStream) {
+      videoRef.current.srcObject = cameraStream;
+      void videoRef.current.play().catch(() => {
+        setCameraError("The camera preview could not start. Check browser camera permissions and try again.");
+      });
+    }
+  }, [cameraStream, step]);
+
+  useEffect(() => () => {
+    cameraStream?.getTracks().forEach((track) => track.stop());
+  }, [cameraStream]);
+
+  useEffect(() => {
+    if (step !== "exam" || !cameraStream) return;
+    const video = videoRef.current;
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    let previousFrame: Uint8ClampedArray | null = null;
+    let warningTimeout = 0;
+    const monitor = window.setInterval(() => {
+      if (video && context && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0) {
+        canvas.width = 160;
+        canvas.height = Math.max(1, Math.round(160 * video.videoHeight / video.videoWidth));
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const frame = context.getImageData(0, 0, canvas.width, canvas.height).data;
+        let changed = 0;
+        let sampled = 0;
+        for (let index = 0; index < frame.length; index += 4 * 8) {
+          const gray = (frame[index] + frame[index + 1] + frame[index + 2]) / 3;
+          if (previousFrame && Math.abs(gray - previousFrame[index / 4]) > 34) changed += 1;
+          previousFrame ??= new Uint8ClampedArray(canvas.width * canvas.height);
+          previousFrame[index / 4] = gray;
+          sampled += 1;
+        }
+        if (sampled > 0 && changed / sampled > 0.24 && Date.now() - motionAlertAt.current > 10_000) {
+          motionAlertAt.current = Date.now();
+          setMotionWarning("Significant camera-frame movement detected. Please remain in view and keep still.");
+          window.clearTimeout(warningTimeout);
+          warningTimeout = window.setTimeout(() => setMotionWarning(""), 6000);
+        }
+      }
+    }, 900);
+    const tracks = cameraStream.getVideoTracks();
+    const onCameraBlocked = () => {
+      if (cameraBlocked.current) return;
+      cameraBlocked.current = true;
+      incrementProctorCount("cameraBlocked");
+      openProctorAlert("Camera blocked or disconnected. Reconnect your camera to continue the examination.");
+      setMotionWarning("Camera connection was interrupted. Reconnect the camera before continuing.");
+    };
+    const onCameraRestored = () => { cameraBlocked.current = false; };
+    tracks.forEach((track) => {
+      track.addEventListener("ended", onCameraBlocked);
+      track.addEventListener("mute", onCameraBlocked);
+      track.addEventListener("unmute", onCameraRestored);
+    });
+    return () => {
+      window.clearInterval(monitor);
+      window.clearTimeout(warningTimeout);
+      tracks.forEach((track) => {
+        track.removeEventListener("ended", onCameraBlocked);
+        track.removeEventListener("mute", onCameraBlocked);
+        track.removeEventListener("unmute", onCameraRestored);
+      });
+    };
+  }, [cameraStream, incrementProctorCount, openProctorAlert, step]);
+
+  useEffect(() => {
+    if (step !== "exam") return;
+    const controller = new AbortController();
+    const publish = () => void publishProctorCounts(proctorCountsRef.current, controller.signal);
+    publish();
+    const interval = window.setInterval(publish, 5000);
+    return () => {
+      controller.abort();
+      window.clearInterval(interval);
+    };
+  }, [publishProctorCounts, step]);
+
+  useEffect(() => {
+    if (step !== "exam" || !cameraStream) return;
+    let cancelled = false;
+    let detector: import("@mediapipe/tasks-vision").FaceDetector | null = null;
+    let timeout = 0;
+
+    async function startFaceDetection() {
+      try {
+        const { FaceDetector, FilesetResolver } = await import("@mediapipe/tasks-vision");
+        const vision = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm",
+        );
+        const faceDetector = await FaceDetector.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite",
+            delegate: "CPU",
+          },
+          runningMode: "VIDEO",
+          minDetectionConfidence: 0.6,
+        });
+        if (cancelled) {
+          faceDetector.close();
+          return;
+        }
+        detector = faceDetector;
+        setFaceDetectionStatus("Proctor checks active · analyzed on this device");
+
+        const inspectFrame = () => {
+          if (cancelled) return;
+          const video = videoRef.current;
+          if (video && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0 && detector) {
+            try {
+              const result = detector.detectForVideo(video, performance.now());
+              const faceCount = result.detections.length;
+              if (faceCount > 1) {
+                multipleFaceFrames.current += 1;
+                noFaceFrames.current = 0;
+                if (multipleFaceFrames.current >= 3 && faceState.current !== "multiple") {
+                  faceState.current = "multiple";
+                  incrementProctorCount("multipleFaces");
+                  openProctorAlert("Multiple Face Detected. Only the student taking the examination should be visible.");
+                }
+              } else if (faceCount === 1) {
+                multipleFaceFrames.current = 0;
+                noFaceFrames.current = 0;
+                if (faceState.current !== "one") {
+                  faceState.current = "one";
+                  incrementProctorCount("okay");
+                }
+              } else {
+                multipleFaceFrames.current = 0;
+                noFaceFrames.current += 1;
+                if (noFaceFrames.current >= 3 && faceState.current !== "none") {
+                  faceState.current = "none";
+                  incrementProctorCount("noFace");
+                  openProctorAlert("No Face Detected. Please make sure your face is clearly visible in the camera.");
+                }
+              }
+            } catch (error) {
+              console.error("Unable to analyze the live camera frame for multiple faces", error);
+              setFaceDetectionStatus("Multiple-person detection stopped because camera analysis failed.");
+              cancelled = true;
+              detector.close();
+              detector = null;
+              return;
+            }
+          }
+          timeout = window.setTimeout(inspectFrame, 900);
+        };
+        inspectFrame();
+      } catch (error) {
+        if (!cancelled) {
+          console.error("Unable to initialize in-browser face detection", error);
+          setFaceDetectionStatus("Face detection is unavailable. Check your internet connection and camera view.");
+        }
+      }
+    }
+
+    void startFaceDetection();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
+      detector?.close();
+    };
+  }, [cameraStream, incrementProctorCount, openProctorAlert, step]);
+
+  useEffect(() => {
+    if (step !== "exam") return;
+    const recordFocusViolation = (type: "tabChanges" | "fullscreenDisabled", message: (count: number) => string) => {
+      if (Date.now() - focusViolationAt.current < 1200) return;
+      focusViolationAt.current = Date.now();
+      const nextCount = incrementProctorCount(type);
+      setMotionWarning(message(nextCount));
+      openProctorAlert(type === "tabChanges"
+        ? "A change in the browser tab has been identified."
+        : "Full-Screen Mode disabled. Please return to full-screen mode to continue the examination.");
+    };
+    const warnAboutLeavingExam = () => {
+      if (document.visibilityState !== "hidden") return;
+      recordFocusViolation("tabChanges", (count) => `Exam page switch detected (${count}). Please stay on the examination page until time is complete.`);
+    };
+    const warnIfFullscreenEnds = () => {
+      if (!document.fullscreenElement) {
+        recordFocusViolation("fullscreenDisabled", (count) => `Full-screen exit detected (${count}). Return to the examination and stay until time is complete.`);
+      }
+    };
+    const warnBeforeLeaving = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    document.addEventListener("visibilitychange", warnAboutLeavingExam);
+    document.addEventListener("fullscreenchange", warnIfFullscreenEnds);
+    window.addEventListener("beforeunload", warnBeforeLeaving);
+    return () => {
+      document.removeEventListener("visibilitychange", warnAboutLeavingExam);
+      document.removeEventListener("fullscreenchange", warnIfFullscreenEnds);
+      window.removeEventListener("beforeunload", warnBeforeLeaving);
+    };
+  }, [incrementProctorCount, openProctorAlert, step]);
+
+  useEffect(() => {
+    if (step !== "exam" || examDeadline === null) return;
+    const updateRemaining = () => {
+      const remaining = Math.max(0, Math.ceil((examDeadline - Date.now()) / 1000));
+      setRemainingSeconds(remaining);
+      if (remaining === 0) setStep("finished");
+    };
+    updateRemaining();
+    const interval = window.setInterval(updateRemaining, 1000);
+    return () => window.clearInterval(interval);
+  }, [examDeadline, step]);
+
+  useEffect(() => {
+    if (step !== "finished") return;
+    cameraStream?.getTracks().forEach((track) => track.stop());
+    if (document.fullscreenElement) {
+      void document.exitFullscreen().catch(() => {
+        setMotionWarning("Full-screen mode could not be closed automatically.");
+      });
+    }
+  }, [cameraStream, step]);
+
+  async function enableCamera() {
+    setCameraError("");
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setCameraError("Camera access is not available in this browser. Use a current browser over HTTPS or localhost.");
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false });
+      setCameraStream(stream);
+      setStep("selfie");
+    } catch (error) {
+      const name = error instanceof DOMException ? error.name : "";
+      if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+        setCameraError("Camera permission was denied. Allow camera access in your browser settings, then try again.");
+      } else if (name === "NotFoundError" || name === "DevicesNotFoundError") {
+        setCameraError("No camera was found. Connect a camera and try again.");
+      } else {
+        setCameraError("Unable to start the camera. Check that it is connected and not being used by another application.");
+      }
+    }
+  }
+
+  function captureCameraPhoto() {
+    const video = videoRef.current;
+    if (!cameraStream || !video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || !video.videoWidth) {
+      setCameraError("Wait until the live camera preview is ready before taking the photo.");
+      return null;
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const context = canvas.getContext("2d");
+    if (!context) {
+      setCameraError("The photo could not be captured. Please try again.");
+      return null;
+    }
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL("image/jpeg", 0.86);
+  }
+
+  async function continueFromIdProof() {
+    const captured = captureCameraPhoto();
+    if (!captured) return;
+    setIdPhoto(captured);
+    if (document.documentElement.requestFullscreen) {
+      void document.documentElement.requestFullscreen().catch(() => {
+        setMotionWarning("Full-screen mode could not be enabled. Keep the exam page active until the examination is complete.");
+      });
+    }
+    setStep("loading");
+    setCameraError("");
+    try {
+      const response = await fetch("/api/candidates/student-exam", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          candidateId: student.candidateId,
+          dateOfBirth: student.dateOfBirth,
+          assessmentId: assessment.id,
+        }),
+      });
+      const payload = await response.json() as StudentExamPayload;
+      if (!response.ok) throw new Error(payload.error ?? "Unable to load this exam.");
+      const sections = payload.sections ?? [];
+      setExamSections(sections);
+      const deadlineCandidates = [
+        typeof payload.duration_seconds === "number" && payload.duration_seconds > 0
+          ? Date.now() + payload.duration_seconds * 1000
+          : Number.POSITIVE_INFINITY,
+        payload.end_at ? new Date(payload.end_at).getTime() : Number.POSITIVE_INFINITY,
+      ].filter(Number.isFinite);
+      setExamDeadline(deadlineCandidates.length ? Math.min(...deadlineCandidates) : null);
+      setStep("exam");
+    } catch (error) {
+      setCameraError(error instanceof Error ? error.message : "Unable to load this exam.");
+      setStep("id-proof");
+    }
+  }
+
+  function setAnswer(questionId: number, value: string | string[]) {
+    setAnswers((current) => ({ ...current, [questionId]: value }));
+  }
+
+  function submitExam() {
+    setSubmittedLocally(true);
+    setStep("finished");
+  }
+
+  const formattedTime = remainingSeconds === null
+    ? "--:--"
+    : `${String(Math.floor(remainingSeconds / 60)).padStart(2, "0")}:${String(remainingSeconds % 60).padStart(2, "0")}`;
+  const options = question && Array.isArray(question.details.options)
+    ? question.details.options.filter((option): option is string => typeof option === "string")
+    : [];
+  const fallbackOptions: Record<string, string[]> = {
+    "True/False": ["True", "False"],
+    "Yes/No": ["Yes", "No"],
+    "Agree/Disagree": ["Agree", "Disagree"],
+    "Good/Bad": ["Good", "Bad"],
+  };
+  const questionOptions = options.length ? options : fallbackOptions[question?.question_type ?? ""] ?? [];
+  const selectedAnswer = question ? answers[question.id] : undefined;
+
+  return (
+    <main className={`student-exam-flow${step === "exam" ? " is-taking-exam" : ""}`}>
+      {step === "camera" || step === "selfie" || step === "id-proof" || step === "loading" ? (
+        <section className="student-exam-gate" role="dialog" aria-modal="true" aria-labelledby="student-exam-gate-title">
+          <div className="student-exam-gate-brand"><span aria-hidden="true">U</span><strong>ums.exam</strong></div>
+          <div className="student-exam-gate-card">
+            <div className="student-exam-gate-progress" aria-label="Exam verification progress">
+              <span className={step !== "camera" ? "is-done" : "is-current"}>1</span><i />
+              <span className={step === "id-proof" || step === "loading" ? "is-current" : ""}>2</span><i />
+              <span>3</span>
+            </div>
+            {step === "camera" ? (
+              <>
+                <div className="student-exam-gate-icon" aria-hidden="true">◉</div>
+                <p className="student-exam-eyebrow">BEFORE YOU BEGIN</p>
+                <h1 id="student-exam-gate-title">Camera check</h1>
+                <p className="student-exam-gate-copy">Allow camera access to take your check-in photo and a photo with your valid ID. Photos stay in this browser and are not uploaded or stored.</p>
+                <ul className="student-exam-check-list">
+                  <li>Use a well-lit, quiet space</li>
+                  <li>Keep your face clearly visible</li>
+                  <li>Have your valid photo ID ready</li>
+                </ul>
+                <label className="student-exam-live-feed-consent">
+                  <input type="checkbox" checked={liveFeedConsent} onChange={(event) => setLiveFeedConsent(event.target.checked)} />
+                  <span>I understand that an authorized administrator or assigned invigilator may view my live camera during this exam. The live stream is not recorded or stored and ends when the exam or feed ends.</span>
+                </label>
+                <button className="student-exam-primary-button" type="button" onClick={enableCamera} disabled={!liveFeedConsent}>Enable camera and continue</button>
+              </>
+            ) : step === "loading" ? (
+              <div className="student-exam-gate-loading" role="status"><span className="student-exam-spinner" /><h1 id="student-exam-gate-title">Preparing your exam</h1><p>Verifying your exam access and loading assigned questions…</p></div>
+            ) : (
+              <>
+                <p className="student-exam-eyebrow">{step === "selfie" ? "STEP 1 OF 2 · SELFIE" : "STEP 2 OF 2 · ID CHECK"}</p>
+                <h1 id="student-exam-gate-title">{step === "selfie" ? "Take a selfie" : "Show your valid ID"}</h1>
+                <p className="student-exam-gate-copy">{step === "selfie" ? "Center your face in the frame and take a clear photo." : "Hold your valid photo ID beside your face. Make sure your photo and details are readable."}</p>
+                <div className="student-exam-camera-preview">
+                  <video ref={videoRef} autoPlay playsInline muted aria-label="Live camera preview" />
+                  <span className="student-exam-camera-live"><i /> LIVE</span>
+                  {step === "id-proof" && photo && <img className="student-exam-selfie-thumb" src={photo} alt="Selfie captured for this local session" />}
+                </div>
+                {cameraError && <p className="student-exam-camera-error" role="alert">{cameraError}</p>}
+                <div className="student-exam-gate-actions">
+                  <button className="student-exam-secondary-button" type="button" onClick={onClose}>Cancel</button>
+                  {step === "selfie" ? (
+                    <button className="student-exam-primary-button" type="button" onClick={() => {
+                      const captured = captureCameraPhoto();
+                      if (captured) { setPhoto(captured); setCameraError(""); setStep("id-proof"); }
+                    }}>Capture selfie</button>
+                  ) : (
+                    <button className="student-exam-primary-button" type="button" onClick={() => void continueFromIdProof()}>Capture ID photo and start exam</button>
+                  )}
+                </div>
+              </>
+            )}
+            {step === "camera" && cameraError && <p className="student-exam-camera-error" role="alert">{cameraError}</p>}
+            <p className="student-exam-privacy-note">No microphone is requested. Photos are held temporarily in page memory only; the ID image is not verified or uploaded.</p>
+          </div>
+          <button className="student-exam-gate-cancel" type="button" onClick={onClose}>Return to schedule</button>
+        </section>
+      ) : step === "finished" ? (
+        <section className="student-exam-finished" role="dialog" aria-modal="true">
+          <div className="student-exam-finished-icon" aria-hidden="true">✓</div>
+          <p className="student-exam-eyebrow">{submittedLocally ? "EXAM COMPLETE" : "ASSESSMENT ENDED"}</p>
+          <h1>{submittedLocally ? "Exam complete" : remainingSeconds === 0 ? "Time is up" : "Exam session ended"}</h1>
+          <p>{submittedLocally ? "You completed the exam in this browser. Answers were not saved or submitted to the portal." : "Your answers were held only in this browser session and were not saved or submitted. Contact your institution to confirm the official submission process."}</p>
+          <button className="student-exam-primary-button" type="button" onClick={onClose}>Return to exam schedule</button>
+        </section>
+      ) : (
+        <div className="student-exam-taking">
+          <header className="student-exam-topbar">
+            <div className="student-exam-wordmark"><span>U</span><strong>ums.exam</strong><i />{assessment.name}</div>
+            <div className="student-exam-topbar-actions">
+              <span className={`student-exam-timer${remainingSeconds !== null && remainingSeconds < 300 ? " is-low" : ""}`} aria-label="Time remaining">◷ {formattedTime}</span>
+              <span className="student-exam-candidate-name">{student.name}</span>
+            </div>
+          </header>
+          <div className="student-exam-workspace">
+            <aside className="student-exam-question-nav">
+              <div className="student-exam-nav-heading"><span>EXAM OVERVIEW</span><strong>{assessment.examination || "Examination"}</strong></div>
+              <div className="student-exam-info-card">
+                <h2>{assessment.name}</h2>
+                <dl>
+                  <div><dt>Candidate ID</dt><dd>{student.candidateId}</dd></div>
+                  <div><dt>Duration</dt><dd>{assessment.total_time ? `${assessment.total_time} minutes` : "Until exam closes"}</dd></div>
+                  <div><dt>Total questions</dt><dd>{questions.length}</dd></div>
+                  <div><dt>Total marks</dt><dd>{assessment.total_marks}</dd></div>
+                </dl>
+              </div>
+              <div className="student-exam-progress-summary">
+                <span>Progress</span>
+                <strong>{Object.keys(answers).length} / {questions.length} answered</strong>
+                <div><i style={{ width: `${questions.length ? Object.keys(answers).length / questions.length * 100 : 0}%` }} /></div>
+              </div>
+              {examSections.map((section) => (
+                <div className="student-exam-overview-section" key={section.name}>
+                  <h2>{section.name}</h2>
+                  <div className="student-exam-question-grid">
+                    {section.questions.map((item) => {
+                      const index = questions.findIndex((entry) => entry.id === item.id);
+                      return <button key={item.id} type="button" disabled={index <= activeQuestion} className={`${index === activeQuestion ? "is-current" : ""}${answers[item.id] !== undefined ? " is-answered" : ""}`} onClick={() => setActiveQuestion(index)} aria-label={`Question ${index + 1}${answers[item.id] !== undefined ? ", answered" : ""}${index < activeQuestion ? ", already passed" : ""}`}>{index + 1}</button>;
+                    })}
+                  </div>
+                </div>
+              ))}
+              <div className="student-exam-camera-status">
+                <video ref={videoRef} autoPlay playsInline muted aria-label="Live camera preview; video is not being recorded" />
+                <span><i /> LIVE</span>
+              </div>
+              <div className="student-exam-proctor-checks" aria-label="Examination monitoring checks">
+                <div className={proctorCounts.noFace ? "has-violations" : ""}><span>No Face Detected</span><strong>{proctorCounts.noFace}</strong></div>
+                <div><span>OK · One Face</span><strong>{proctorCounts.okay}</strong></div>
+                <div className={proctorCounts.multipleFaces ? "has-violations" : ""}><span>Multiple Face Detected</span><strong>{proctorCounts.multipleFaces}</strong></div>
+                <div className={proctorCounts.cameraBlocked ? "has-violations" : ""}><span>Camera blocked!</span><strong>{proctorCounts.cameraBlocked}</strong></div>
+                <div className={proctorCounts.tabChanges ? "has-violations" : ""}><span>Tab change detected!</span><strong>{proctorCounts.tabChanges}</strong></div>
+                <div className={proctorCounts.fullscreenDisabled ? "has-violations" : ""}><span>Full-Screen Mode disabled!</span><strong>{proctorCounts.fullscreenDisabled}</strong></div>
+              </div>
+              <p className="student-exam-focus-note">Stay on this page and keep one face visible until the exam ends.</p>
+              <p className={`student-exam-telemetry-status${telemetryStatus.startsWith("Unable") || telemetryStatus.includes("no invigilator") ? " has-error" : ""}`} role="status">{telemetryStatus}</p>
+              <p className="student-exam-live-feed-status" role="status">{remoteFeedStatus}</p>
+              <p className="student-exam-motion-disclaimer">{faceDetectionStatus}. Camera frames are analyzed in this browser; no video is recorded or uploaded. Microphone access is not requested.</p>
+            </aside>
+            <section className="student-exam-question-area" aria-live="polite">
+              <div className="student-exam-session-banner"><span>●</span> Your answers are temporary and are not saved to the portal.</div>
+              {motionWarning && <p className="student-exam-motion-warning" role="alert">⚠ {motionWarning}</p>}
+              {questions.length === 0 ? (
+                <div className="student-exam-no-questions"><h1>No questions are available</h1><p>No active questions match this assessment’s configured sections and classifications.</p><button className="student-exam-secondary-button" type="button" onClick={onClose}>Return to schedule</button></div>
+              ) : question ? (
+                <>
+                  <div className="student-exam-question-meta"><span>{question.section}</span><span>Question {activeQuestion + 1} of {questions.length}</span><span>{question.question_type}</span></div>
+                  {typeof question.details.passage === "string" && question.details.passage && <div className="student-exam-passage">{question.details.passage}</div>}
+                  <article className="student-exam-question-card">
+                    <div className="student-exam-question-title"><span>{String(activeQuestion + 1).padStart(2, "0")}</span><h1>{question.question}</h1></div>
+                    {questionOptions.length > 0 ? (
+                      <div className="student-exam-answer-options">
+                        {questionOptions.map((option, index) => {
+                          const multiple = question.question_type === "Multiple Choice";
+                          const checked = multiple
+                            ? Array.isArray(selectedAnswer) && selectedAnswer.includes(option)
+                            : selectedAnswer === option;
+                          return (
+                            <label key={`${question.id}-${index}`} className={`student-exam-answer-option${checked ? " is-selected" : ""}`}>
+                              <input
+                                type={multiple ? "checkbox" : "radio"}
+                                name={`answer-${question.id}`}
+                                checked={checked}
+                                onChange={() => {
+                                  if (!multiple) setAnswer(question.id, option);
+                                  else {
+                                    const current = Array.isArray(selectedAnswer) ? selectedAnswer : [];
+                                    setAnswer(question.id, checked ? current.filter((value) => value !== option) : [...current, option]);
+                                  }
+                                }}
+                              />
+                              <span className="student-exam-option-letter">{String.fromCharCode(65 + index)}</span><span>{option}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div className="student-exam-written-answer">
+                        <label htmlFor={`answer-${question.id}`}>{question.question_type === "Fill in the Blank" ? "Your answer" : "Write your response"}</label>
+                        {question.question_type === "Fill in the Blank" ? (
+                          <input id={`answer-${question.id}`} value={typeof selectedAnswer === "string" ? selectedAnswer : ""} onChange={(event) => setAnswer(question.id, event.target.value)} />
+                        ) : (
+                          <textarea id={`answer-${question.id}`} value={typeof selectedAnswer === "string" ? selectedAnswer : ""} onChange={(event) => setAnswer(question.id, event.target.value)} rows={7} />
+                        )}
+                      </div>
+                    )}
+                  </article>
+                  <div className="student-exam-question-controls">
+                    <span>{Object.keys(answers).length} of {questions.length} answered</span>
+                    {activeQuestion === questions.length - 1
+                      ? <button className="student-exam-primary-button" type="button" onClick={submitExam}>Submit Exam</button>
+                      : <button className="student-exam-primary-button" type="button" onClick={() => setActiveQuestion((index) => Math.min(questions.length - 1, index + 1))}>Next question →</button>}
+                  </div>
+                </>
+              ) : null}
+            </section>
+          </div>
+          {switchAlertOpen && (
+            <div className="student-exam-tab-alert-backdrop" role="presentation">
+              <section className="student-exam-tab-alert" role="alertdialog" aria-modal="true" aria-labelledby="student-exam-tab-alert-title" aria-describedby="student-exam-tab-alert-message">
+                <span className="student-exam-tab-alert-icon" aria-hidden="true">!</span>
+                <h2 id="student-exam-tab-alert-title">Alert</h2>
+                <p id="student-exam-tab-alert-message">{switchAlertMessage}</p>
+                <button className="student-exam-primary-button" type="button" autoFocus onClick={() => setSwitchAlertOpen(false)}>OK</button>
+              </section>
+            </div>
+          )}
+        </div>
+      )}
+    </main>
+  );
+}
+
+function StudentPortalDashboard({ student, onLogout }: { student: { id: number; name: string; candidateId: string; dateOfBirth: string }; onLogout: () => void }) {
+  const [assessments, setAssessments] = useState<StudentAssessment[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [currentTime, setCurrentTime] = useState(() => Date.now());
+  const [attendNotice, setAttendNotice] = useState("");
+  const [activeAssessment, setActiveAssessment] = useState<StudentAssessment | null>(null);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => setCurrentTime(Date.now()), 30_000);
+    return () => window.clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    fetch("/api/candidates/student-dashboard", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ candidateId: student.candidateId, dateOfBirth: student.dateOfBirth }),
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        const payload = await response.json() as { assessments?: StudentAssessment[]; error?: string };
+        if (!response.ok) throw new Error(payload.error ?? "Unable to load exam schedule.");
+        setAssessments(payload.assessments ?? []);
+      })
+      .catch((loadError) => {
+        if (loadError instanceof Error && loadError.name === "AbortError") return;
+        setError(loadError instanceof Error ? loadError.message : "Unable to load exam schedule.");
+      })
+      .finally(() => setLoading(false));
+    return () => controller.abort();
+  }, [student.candidateId, student.dateOfBirth]);
+
+  if (activeAssessment) {
+    return <StudentExamFlow student={student} assessment={activeAssessment} onClose={() => setActiveAssessment(null)} />;
+  }
+
+  return (
+    <main className="student-dashboard-shell">
+      <aside className="student-dashboard-sidebar" aria-label="Student navigation">
+        <button className="student-sidebar-icon is-active" type="button" aria-label="Dashboard" title="Dashboard">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1V10Z" /></svg>
+        </button>
+        <button className="student-sidebar-icon" type="button" aria-label="Student portal" title="Student portal">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18" /></svg>
+        </button>
+        <span className="student-sidebar-divider" />
+        <span className="student-sidebar-spacer" />
+        <span className="student-sidebar-status" aria-hidden="true" />
+        <button className="student-sidebar-icon" type="button" aria-label="Settings" title="Settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z" /><path d="m19.4 15 .1.1 1.2.9-1.2 2.1-1.4-.6a8 8 0 0 1-1.7 1l-.2 1.5h-2.4l-.3-1.5a8 8 0 0 1-1.7-1l-1.4.6-1.2-2.1 1.2-.9a7 7 0 0 1 0-2l-1.2-.9 1.2-2.1 1.4.6a8 8 0 0 1 1.7-1l.3-1.5h2.4l.2 1.5a8 8 0 0 1 1.7 1l1.4-.6 1.2 2.1-1.2.9a7 7 0 0 1 0 2Z" /></svg>
+        </button>
+      </aside>
+
+      <div className="student-dashboard-main">
+        <header className="student-dashboard-header">
+          <a className="student-dashboard-brand" href="#" aria-label="ums.exam student dashboard">
+            <span className="portal-crest" aria-hidden="true">
+              <svg viewBox="0 0 48 56" fill="none">
+                <path d="M24 2 44 9v17c0 12-8.5 21-20 28C12.5 47 4 38 4 26V9L24 2Z" fill="#fff" stroke="currentColor" strokeWidth="2.5" />
+                <path d="M15 16v12c0 5.2 3.4 8.5 9 8.5s9-3.3 9-8.5V16" stroke="currentColor" strokeWidth="4" strokeLinecap="round" />
+                <path d="M11 42c3.6 3.3 8 5.8 13 8 5-2.2 9.4-4.7 13-8" stroke="#c68b3c" strokeWidth="2.5" strokeLinecap="round" />
+              </svg>
+            </span>
+            <span className="student-dashboard-brand-copy">
+              <strong>INSTITUTE OF INTEGRATED</strong>
+              <strong>TRAINING &amp; STUDIES</strong>
+            </span>
+          </a>
+          <div className="student-dashboard-header-actions">
+            <span className="student-dashboard-avatar" aria-hidden="true">{student.name.slice(0, 1).toUpperCase()}</span>
+            <div className="student-dashboard-user">
+              <strong>{student.name}</strong>
+              <small>Student</small>
+            </div>
+            <button className="student-dashboard-logout" type="button" onClick={onLogout}>Log out</button>
+          </div>
+        </header>
+
+        <nav className="student-dashboard-tabbar" aria-label="Current page">
+          <span className="student-dashboard-current-tab">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1V10Z" /></svg>
+            Dashboard
+          </span>
+        </nav>
+
+        <section className="student-dashboard-content">
+          <p className="student-dashboard-breadcrumb">Dashboard</p>
+          <section className="student-exam-schedule" aria-labelledby="student-exam-schedule-title">
+            <h1 id="student-exam-schedule-title">Exam Schedule</h1>
+            {error && <p className="student-dashboard-error" role="alert">{error}</p>}
+            <div className="student-exam-table-wrap">
+              <table className="student-exam-table">
+                <thead>
+                  <tr>
+                    <th>Examination</th>
+                    <th>Name</th>
+                    <th>Start Date</th>
+                    <th>End Date</th>
+                    <th>Total Questions</th>
+                    <th>Total Marks</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {loading ? (
+                    <tr><td className="student-exam-empty" colSpan={7}>Loading your exam schedule...</td></tr>
+                  ) : assessments.length === 0 ? (
+                    <tr><td className="student-exam-empty" colSpan={7}>No exams are currently assigned to you.</td></tr>
+                  ) : assessments.map((assessment) => (
+                    <StudentExamScheduleRow
+                      key={assessment.id}
+                      assessment={assessment}
+                      currentTime={currentTime}
+                      onAttend={() => { setAttendNotice(""); setActiveAssessment(assessment); }}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {attendNotice && <p className="student-exam-notice" role="status">{attendNotice}</p>}
+            <p className="student-exam-delivery-note">“Attend Exam” is shown only during the permitted login window. Camera captures and answers remain temporary in this browser and are not submitted.</p>
+          </section>
+        </section>
+      </div>
+    </main>
+  );
+}
+
+function StudentExamScheduleRow({ assessment, currentTime, onAttend }: {
+  assessment: StudentAssessment;
+  currentTime: number;
+  onAttend: () => void;
+}) {
+  const startTime = assessment.start_date ? new Date(assessment.start_date).getTime() : Number.NaN;
+  const endTime = assessment.end_date ? new Date(assessment.end_date).getTime() : Number.NaN;
+  let action: React.ReactNode = "Schedule unavailable";
+
+  if (Number.isFinite(startTime)) {
+    if (currentTime < startTime) {
+      action = <span className="student-exam-status is-upcoming">Upcoming Examination</span>;
+    } else {
+      const lastLoginDeadline = assessment.last_login !== null && assessment.last_login > 0
+        ? startTime + assessment.last_login * 60_000
+        : Number.POSITIVE_INFINITY;
+      const examEnd = Number.isFinite(endTime) ? endTime : Number.POSITIVE_INFINITY;
+      const accessDeadline = Math.min(lastLoginDeadline, examEnd);
+      action = currentTime < accessDeadline
+        ? <a className="student-exam-attend-link" href={`#attend-exam-${assessment.id}`} onClick={(event) => { event.preventDefault(); onAttend(); }}>Attend Exam</a>
+        : <span className="student-exam-status is-missed">Exam is not attend</span>;
+    }
+  }
+
+  return (
+    <tr>
+      <td>{assessment.examination || "-"}</td>
+      <td className="student-exam-name">{assessment.name || "-"}</td>
+      <td>{formatStudentExamDate(assessment.start_date)}</td>
+      <td>{formatStudentExamDate(assessment.end_date)}</td>
+      <td>{assessment.total_questions}</td>
+      <td>{assessment.total_marks}</td>
+      <td>{action}</td>
+    </tr>
   );
 }
 
@@ -5056,7 +6424,7 @@ export default function Home() {
   }, [sessionUser, isReady]);
 
   useEffect(() => {
-    if (!sessionUser) {
+    if (!sessionUser || sessionUser.portalType === "student") {
       setCurrentUser(null);
       setCurrentRole(null);
       return;
@@ -5075,7 +6443,7 @@ export default function Home() {
   }, [sessionUser]);
 
   useEffect(() => {
-    if (!sessionUser) {
+    if (!sessionUser || sessionUser.portalType === "student") {
       setSavedAssessments([]);
       return;
     }
@@ -5225,7 +6593,11 @@ export default function Home() {
   }
 
   if (!sessionUser) {
-    return <LoginPage onLogin={setSessionUser} />;
+    return <LoginPage onLogin={setSessionUser} onStudentLogin={setSessionUser} />;
+  }
+
+  if (sessionUser.portalType === "student") {
+    return <StudentPortalDashboard student={sessionUser} onLogout={() => setSessionUser(null)} />;
   }
 
   return (
@@ -5586,7 +6958,11 @@ export default function Home() {
       {candidateAssignmentAssessment && <CandidateAssignment assessment={candidateAssignmentAssessment} onClose={() => setCandidateAssignmentAssessment(null)} />}
       {evaluatorAssignmentAssessment && <AssessmentStaffAssignment assessment={evaluatorAssignmentAssessment} role="evaluator" onClose={() => setEvaluatorAssignmentAssessment(null)} />}
       {invigilatorAssignmentAssessment && <AssessmentStaffAssignment assessment={invigilatorAssignmentAssessment} role="invigilator" onClose={() => setInvigilatorAssignmentAssessment(null)} />}
-      {invigilatingAssessment && <AssessmentInvigilation assessment={invigilatingAssessment} onClose={() => setInvigilatingAssessment(null)} />}
+      {invigilatingAssessment &&       <AssessmentInvigilation
+        assessment={invigilatingAssessment}
+        accountUserId={Number(currentUser?.id) || null}
+        onClose={() => setInvigilatingAssessment(null)}
+      />}
       {showManualForm && <ManualAssessmentForm
         initialAssessment={editingAssessment ?? undefined}
         onClose={() => { setShowManualForm(false); setEditingAssessment(null); }}

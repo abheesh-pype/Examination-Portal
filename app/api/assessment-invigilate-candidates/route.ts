@@ -63,26 +63,55 @@ async function ensureInvigilationTables() {
   `);
   await databasePool.query('ALTER TABLE "Candidate Information" ADD COLUMN IF NOT EXISTS record_type TEXT NOT NULL DEFAULT \'field\'');
   await databasePool.query('ALTER TABLE "Candidate Information" ADD COLUMN IF NOT EXISTS candidate_data JSONB');
+  await databasePool.query(`
+    CREATE TABLE IF NOT EXISTS candidate_sub_category (
+      id SERIAL PRIMARY KEY,
+      candidate_sub_category TEXT NOT NULL,
+      category TEXT NOT NULL,
+      status BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await databasePool.query(`
+    CREATE TABLE IF NOT EXISTS assessment_candidate_sub_category (
+      assessment_id INTEGER NOT NULL REFERENCES assessment(id) ON DELETE CASCADE,
+      candidate_sub_category_id INTEGER NOT NULL REFERENCES candidate_sub_category(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (assessment_id, candidate_sub_category_id)
+    )
+  `);
 }
 
 export async function GET(request: Request) {
   try {
-    const assessmentId = Number(new URL(request.url).searchParams.get("assessmentId"));
-    if (!Number.isInteger(assessmentId) || assessmentId <= 0) {
-      return NextResponse.json({ error: "A valid assessment id is required" }, { status: 400 });
+    const params = new URL(request.url).searchParams;
+    const assessmentId = Number(params.get("assessmentId"));
+    const accountUserId = Number(params.get("accountUserId") ?? params.get("invigilatorUserId"));
+    if (!Number.isInteger(assessmentId) || assessmentId <= 0
+      || !Number.isInteger(accountUserId) || accountUserId <= 0) {
+      return NextResponse.json({ error: "Valid assessment and account ids are required" }, { status: 400 });
     }
 
     await ensureInvigilationTables();
-    const assessmentResult = await databasePool.query(
-      "SELECT id FROM assessment WHERE id = $1",
-      [assessmentId],
+    const userResult = await databasePool.query(
+      "SELECT id, role FROM users WHERE id = $1 AND status = TRUE",
+      [accountUserId],
     );
-    if (!assessmentResult.rowCount) {
-      return NextResponse.json({ error: "Assessment not found" }, { status: 404 });
+    if (!userResult.rowCount) {
+      return NextResponse.json({ error: "An active account is required to view assessment candidates." }, { status: 403 });
+    }
+    const role = String(userResult.rows[0].role ?? "").trim().toLocaleLowerCase();
+    const isAdmin = role.includes("admin");
+    const isInvigilator = role === "invigilator";
+    if (!isAdmin && !isInvigilator) {
+      return NextResponse.json({ error: "Only administrators and assigned invigilators can view assessment candidates." }, { status: 403 });
     }
 
+    const assessmentResult = await databasePool.query("SELECT id FROM assessment WHERE id = $1", [assessmentId]);
+    if (!assessmentResult.rowCount) return NextResponse.json({ error: "Assessment not found" }, { status: 404 });
+
     const result = await databasePool.query(`
-      SELECT
+      SELECT DISTINCT ON (candidate.id)
         candidate.id AS candidate_id,
         candidate.name AS candidate_name,
         candidate.candidate_data,
@@ -90,15 +119,25 @@ export async function GET(request: Request) {
         BTRIM(COALESCE(candidate.candidate_data->>'sub_category', '')) AS sub_category,
         candidate.status AS candidate_status,
         invigilator.name AS invigilator_name
-      FROM assessment_candidate_invigilator AS assignment
-      JOIN "Candidate Information" AS candidate
-        ON candidate.id = assignment.candidate_id
-        AND candidate.record_type = 'candidate'
-      JOIN users AS invigilator
+      FROM "Candidate Information" AS candidate
+      LEFT JOIN assessment_candidate_invigilator AS assignment
+        ON assignment.assessment_id = $1 AND assignment.candidate_id = candidate.id
+      LEFT JOIN users AS invigilator
         ON invigilator.id = assignment.invigilator_user_id
-      WHERE assignment.assessment_id = $1
+      LEFT JOIN candidate_sub_category AS candidate_group
+        ON candidate_group.status = TRUE
+        AND candidate_group.category = BTRIM(COALESCE(candidate.candidate_data->>'category', ''))
+        AND candidate_group.candidate_sub_category = BTRIM(COALESCE(candidate.candidate_data->>'sub_category', ''))
+      LEFT JOIN assessment_candidate_sub_category AS cohort_assignment
+        ON cohort_assignment.assessment_id = $1
+        AND cohort_assignment.candidate_sub_category_id = candidate_group.id
+      WHERE candidate.record_type = 'candidate'
+        AND (
+          ($3::boolean AND cohort_assignment.assessment_id IS NOT NULL)
+          OR (NOT $3::boolean AND assignment.invigilator_user_id = $2)
+        )
       ORDER BY candidate.id
-    `, [assessmentId]);
+    `, [assessmentId, accountUserId, isAdmin]);
 
     return NextResponse.json(result.rows);
   } catch (error) {

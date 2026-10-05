@@ -7600,12 +7600,6 @@ export default function Home() {
               </div>
             )}
           </div>
-          <span className="header-notification" aria-label="Notifications">
-            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none">
-              <path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9ZM10 21h4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-              <circle cx="18" cy="5" r="2.5" fill="#F472B6" stroke="white" strokeWidth="1.5" />
-            </svg>
-          </span>
           <div className="header-profile-menu" ref={headerProfileRef}>
             <button
               className="header-user"

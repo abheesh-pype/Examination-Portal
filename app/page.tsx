@@ -15,6 +15,7 @@ const navigationItems = [
     label: "Users", 
     icon: "♟"
   },
+  { label: "Results", icon: "▤" },
   {
     label: "Settings",
     icon: "⚙",
@@ -23,7 +24,6 @@ const navigationItems = [
       { label: "Questions", options: ["Categories", "Sub Categories", "Topics", "Difficulty Levels", "Languages"] },
       { label: "Assessments", options: ["Examinations", "Default Settings"] },
       { label: "Candidates", options: ["Categories", "Sub Categories", "Settings", "Candidate Permissions"] },
-      "Results",
     ],
   },
 ];
@@ -7426,7 +7426,6 @@ export default function Home() {
     "Candidate Sub Categories": "Settings:Candidates:Sub-Categories",
     "Candidate Settings": "Settings:Candidates:Settings",
     "Candidate Permissions": "Settings:Candidates:Candidate Permissions",
-    Results: "Settings:Results",
   };
 
   const hasAccess = (sectionId: string) => {

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { databasePool } from "@/lib/db";
+import { matchesAssessmentQuestionType } from "@/lib/question-types";
 
 export const runtime = "nodejs";
 
@@ -237,7 +238,7 @@ export async function POST(request: Request) {
       const wrongMark = Number(section.wrong_mark);
       const selected = matchedQuestions
         .filter((question) => !assignedQuestionIds.has(Number(question.id))
-          && (!questionType || String(question.question_type).toLocaleLowerCase() === questionType.toLocaleLowerCase()))
+          && matchesAssessmentQuestionType(question.question_type, questionType))
         .slice(0, limit);
       for (const question of selected) {
         const id = Number(question.id);

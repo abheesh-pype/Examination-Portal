@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { databasePool } from "@/lib/db";
+import { getExamCamPermission } from "@/lib/candidate-permissions";
 
 export const runtime = "nodejs";
 
@@ -103,12 +104,13 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Student credentials could not be verified." }, { status: 401 });
     }
 
+    const examCamPermissionActive = await getExamCamPermission();
     const candidateData = candidate.candidate_data as {
       category?: string | null;
       sub_category?: string | null;
     } | null;
     if (!candidateData?.category || !candidateData.sub_category) {
-      return NextResponse.json({ assessments: [] });
+      return NextResponse.json({ assessments: [], exam_cam_permission_active: examCamPermissionActive });
     }
 
     const assessments = await databasePool.query(`
@@ -158,6 +160,7 @@ export async function POST(request: Request) {
           has_submitted: Boolean(assessment.has_submitted),
         };
       }),
+      exam_cam_permission_active: examCamPermissionActive,
     });
   } catch (error) {
     console.error("Failed to load student dashboard", error);

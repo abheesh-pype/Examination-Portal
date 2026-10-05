@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useRef, useState, type FormEvent } from 
 import NextImage from "next/image";
 import Papa from "papaparse";
 import readXlsxFile from "read-excel-file/browser";
+import { matchesAssessmentQuestionType } from "@/lib/question-types";
 
 const navigationItems = [
   { label: "Dashboard", icon: "⌂" },
@@ -21,7 +22,8 @@ const navigationItems = [
       "Organization",
       { label: "Questions", options: ["Categories", "Sub Categories", "Topics", "Difficulty Levels", "Languages"] },
       { label: "Assessments", options: ["Examinations", "Default Settings"] },
-      { label: "Candidates", options: ["Categories", "Sub Categories", "Settings"] },
+      { label: "Candidates", options: ["Categories", "Sub Categories", "Settings", "Candidate Permissions"] },
+      "Results",
     ],
   },
 ];
@@ -39,6 +41,8 @@ const navigationOptionIcons: Record<string, string> = {
   "Default Settings": "⚙",
   Candidates: "♙",
   Settings: "⚙",
+  "Candidate Permissions": "◉",
+  Results: "▤",
 };
 
 const dashboardPages = [
@@ -55,9 +59,11 @@ const dashboardPages = [
   { label: "Candidate Categories", icon: "▦", description: "Candidate categories" },
   { label: "Candidate Sub Categories", icon: "☷", description: "Candidate sub-categories" },
   { label: "Candidate Settings", icon: "⚙", description: "Candidate settings" },
+  { label: "Candidate Permissions", icon: "◉", description: "Candidate exam camera permission" },
+  { label: "Results", icon: "▤", description: "Candidate assessment results" },
 ];
 
-const dashboardShortcutTones = [0, 1, 2, 3, 4, 5, 1, 2, 3, 0, 1, 4, 5];
+const dashboardShortcutTones = [0, 1, 2, 3, 4, 5, 1, 2, 3, 0, 1, 4, 5, 2];
 
 type AssessmentCardData = {
   id?: number;
@@ -89,6 +95,205 @@ type AssessmentSection = {
   difficulty_percentages: Array<{ level: string; percentage: string }>;
 };
 
+type AssessmentResultRecord = {
+  assessment_id: number;
+  assessment_name: string;
+  examination: string;
+  assessment_start_date: string | null;
+  assessment_end_date: string | null;
+  candidate_id: number;
+  candidate_code: string;
+  candidate_name: string;
+  candidate_category: string;
+  candidate_sub_category: string;
+  candidate_details: Record<string, unknown>;
+  obtained_mark: number;
+  negative_mark: number;
+  total_mark: number;
+  evaluated_at: string;
+};
+
+function ResultsPanel({ accountUserId }: { accountUserId: number | null }) {
+  const [results, setResults] = useState<AssessmentResultRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [search, setSearch] = useState("");
+  const [showFilters, setShowFilters] = useState(false);
+  const [selectedExamination, setSelectedExamination] = useState("");
+  const [selectedCategory, setSelectedCategory] = useState("");
+  const [selectedSubCategory, setSelectedSubCategory] = useState("");
+  const [retryCount, setRetryCount] = useState(0);
+
+  useEffect(() => {
+    if (!accountUserId) return;
+    const controller = new AbortController();
+    fetch(`/api/assessment-results?accountUserId=${accountUserId}`, { signal: controller.signal })
+      .then(async (response) => {
+        const payload = await response.json() as { results?: AssessmentResultRecord[]; error?: string };
+        if (!response.ok) throw new Error(payload.error ?? "Unable to load assessment results.");
+        if (!Array.isArray(payload.results)) throw new Error("The assessment results could not be read.");
+        setResults(payload.results);
+        setError("");
+      })
+      .catch((loadError) => {
+        if (loadError instanceof Error && loadError.name === "AbortError") return;
+        setError(loadError instanceof Error ? loadError.message : "Unable to load assessment results.");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+
+    return () => controller.abort();
+  }, [accountUserId, retryCount]);
+
+  const examinations = [...new Set(results.map((result) => result.examination).filter(Boolean))].sort();
+  const examinationResults = results.filter((result) =>
+    !selectedExamination || result.examination === selectedExamination
+  );
+  const categories = [...new Set(examinationResults.map((result) => result.candidate_category).filter(Boolean))].sort();
+  const categoryResults = examinationResults.filter((result) =>
+    !selectedCategory || result.candidate_category === selectedCategory
+  );
+  const subCategories = [...new Set(categoryResults.map((result) => result.candidate_sub_category).filter(Boolean))].sort();
+  const hasActiveFilters = Boolean(selectedExamination || selectedCategory || selectedSubCategory);
+  const filteredResults = categoryResults.filter((result) => {
+    if (selectedSubCategory && result.candidate_sub_category !== selectedSubCategory) return false;
+    const candidateDetails = Object.values(result.candidate_details).join(" ");
+    return [
+      result.candidate_name,
+      result.candidate_code,
+      result.candidate_category,
+      result.candidate_sub_category,
+      result.assessment_name,
+      result.examination,
+      candidateDetails,
+    ].join(" ").toLocaleLowerCase().includes(search.trim().toLocaleLowerCase());
+  });
+  const resultsError = accountUserId ? error : "Sign in as an administrator to view assessment results.";
+
+  return (
+    <section className="assessment-results-section">
+      <div className="assessments-toolbar">
+        <div>
+          <p className="section-kicker">Assessment outcomes</p>
+          <h1>Results</h1>
+          <p className="assessment-count">Showing {filteredResults.length} of {results.length} evaluated results</p>
+        </div>
+        <div className="assessment-results-toolbar-actions">
+          <button className="assessment-results-download-button" type="button">
+            <span aria-hidden="true">↓</span> Download
+          </button>
+          <button className={`assessment-results-filter-button${showFilters ? " is-active" : ""}`} type="button" aria-expanded={showFilters} onClick={() => setShowFilters((open) => !open)}>
+            <span aria-hidden="true">☷</span> Filters{hasActiveFilters ? ` (${Number(Boolean(selectedExamination)) + Number(Boolean(selectedCategory)) + Number(Boolean(selectedSubCategory))})` : ""}
+          </button>
+          <label className="assessment-results-search">
+            <span>Search results</span>
+            <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Candidate or assessment" />
+          </label>
+        </div>
+      </div>
+      {showFilters && (
+        <div className="assessment-results-filter-panel" aria-label="Filter results">
+          <label>
+            <span>Examination</span>
+            <select value={selectedExamination} onChange={(event) => {
+              setSelectedExamination(event.target.value);
+              setSelectedCategory("");
+              setSelectedSubCategory("");
+            }}>
+              <option value="">All examinations</option>
+              {examinations.map((examination) => <option key={examination} value={examination}>{examination}</option>)}
+            </select>
+          </label>
+          <label>
+            <span>Candidate category</span>
+            <select value={selectedCategory} onChange={(event) => {
+              setSelectedCategory(event.target.value);
+              setSelectedSubCategory("");
+            }}>
+              <option value="">All categories</option>
+              {categories.map((category) => <option key={category} value={category}>{category}</option>)}
+            </select>
+          </label>
+          <label>
+            <span>Candidate subcategory</span>
+            <select value={selectedSubCategory} onChange={(event) => setSelectedSubCategory(event.target.value)} disabled={!selectedCategory}>
+              <option value="">All subcategories</option>
+              {subCategories.map((subCategory) => <option key={subCategory} value={subCategory}>{subCategory}</option>)}
+            </select>
+          </label>
+          {hasActiveFilters && (
+            <button className="assessment-results-clear-filters" type="button" onClick={() => {
+              setSelectedExamination("");
+              setSelectedCategory("");
+              setSelectedSubCategory("");
+            }}>Clear filters</button>
+          )}
+        </div>
+      )}
+      {resultsError && (
+        <p className="assessment-results-error" role="alert">
+          {resultsError}
+          {accountUserId && <button type="button" onClick={() => {
+            setError("");
+            setLoading(true);
+            setRetryCount((count) => count + 1);
+          }}>Try again</button>}
+        </p>
+      )}
+      <div className="assessment-results-table-wrap">
+        <table className="assessment-results-table">
+          <thead>
+            <tr>
+              <th>Candidate</th>
+              <th>Candidate Details</th>
+              <th>Examination</th>
+              <th>Assessment</th>
+              <th>Assessment Dates</th>
+              <th>Mark Obtained</th>
+              <th>Negative Mark</th>
+              <th>Total Mark</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading ? (
+              <tr><td colSpan={8} className="assessment-results-empty">Loading results…</td></tr>
+            ) : resultsError ? (
+              <tr><td colSpan={8} className="assessment-results-empty">Results are unavailable.</td></tr>
+            ) : filteredResults.length === 0 ? (
+              <tr><td colSpan={8} className="assessment-results-empty">{search || hasActiveFilters ? "No results match your search or filters." : "No evaluated results are available yet."}</td></tr>
+            ) : filteredResults.map((result) => (
+              <tr key={`${result.assessment_id}-${result.candidate_id}`}>
+                <td>
+                  <strong>{result.candidate_name}</strong>
+                  <small>{result.candidate_code || `Candidate ${result.candidate_id}`}</small>
+                  <small>{[result.candidate_category, result.candidate_sub_category].filter(Boolean).join(" · ") || "—"}</small>
+                </td>
+                <td>
+                  {Object.entries(result.candidate_details).length
+                    ? Object.entries(result.candidate_details).map(([name, value]) => (
+                      <small key={name}><strong>{name}:</strong> {String(value)}</small>
+                    ))
+                    : "—"}
+                </td>
+                <td>{result.examination || "—"}</td>
+                <td>{result.assessment_name}</td>
+                <td>
+                  <small>Start: {result.assessment_start_date ? formatStudentExamDate(result.assessment_start_date) : "—"}</small>
+                  <small>End: {result.assessment_end_date ? formatStudentExamDate(result.assessment_end_date) : "—"}</small>
+                </td>
+                <td>{result.obtained_mark}</td>
+                <td>{result.negative_mark}</td>
+                <td>{result.total_mark}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
 function getAssessmentMaxMark(sections: AssessmentSection[] | undefined) {
   return (sections ?? []).reduce((total, section) => {
     const questionCount = Number(section.question_count);
@@ -97,7 +302,7 @@ function getAssessmentMaxMark(sections: AssessmentSection[] | undefined) {
   }, 0);
 }
 
-function AssessmentCard({ assessment, currentRole, canEvaluate, onDeleted, onEdit, onPreview, onAssignCandidates, onAssignEvaluator, onAssignInvigilator, onInvigilate, onEvaluate }: { assessment: AssessmentCardData; currentRole?: any; canEvaluate?: boolean; onDeleted?: (id: number) => void; onEdit?: (assessment: AssessmentCardData) => void; onPreview?: (assessment: AssessmentCardData) => void; onAssignCandidates?: (assessment: AssessmentCardData) => void; onAssignEvaluator?: (assessment: AssessmentCardData) => void; onAssignInvigilator?: (assessment: AssessmentCardData) => void; onInvigilate?: (assessment: AssessmentCardData) => void; onEvaluate?: (assessment: AssessmentCardData) => void }) {
+function AssessmentCard({ assessment, currentRole, canEvaluate, isInvigilator, isEvaluator, onDeleted, onEdit, onPreview, onAssignCandidates, onAssignEvaluator, onAssignInvigilator, onInvigilate, onEvaluate }: { assessment: AssessmentCardData; currentRole?: any; canEvaluate?: boolean; isInvigilator?: boolean; isEvaluator?: boolean; onDeleted?: (id: number) => void; onEdit?: (assessment: AssessmentCardData) => void; onPreview?: (assessment: AssessmentCardData) => void; onAssignCandidates?: (assessment: AssessmentCardData) => void; onAssignEvaluator?: (assessment: AssessmentCardData) => void; onAssignInvigilator?: (assessment: AssessmentCardData) => void; onInvigilate?: (assessment: AssessmentCardData) => void; onEvaluate?: (assessment: AssessmentCardData) => void }) {
   const [showOptions, setShowOptions] = useState(false);
   const [openAssignment, setOpenAssignment] = useState<string | null>(null);
   const cardRef = useRef<HTMLElement>(null);
@@ -159,38 +364,55 @@ function AssessmentCard({ assessment, currentRole, canEvaluate, onDeleted, onEdi
         </button>
         {showOptions && (
           <div className="assessment-options-menu" role="menu">
-            <button type="button" role="menuitem" onClick={() => { onPreview?.(assessment); setShowOptions(false); }}>Preview</button>
-            {canEdit && <button className="option-menu-item" type="button" role="menuitem" onClick={() => { onEdit?.(assessment); setShowOptions(false); }}>Edit</button>}
-            {canDelete && assessment.id && <button className="option-menu-item" type="button" role="menuitem" onClick={deleteAssessment}>Delete</button>}
-            {assignmentOptions.map((item) => (
-              <div className="assignment-option" key={item.key}>
-                <button
-                  className="option-menu-item option-with-arrow"
-                  type="button"
-                  role="menuitem"
-                  aria-expanded={openAssignment === item.key}
-                  onClick={() => setOpenAssignment(openAssignment === item.key ? null : item.key)}
-                >
-                  {item.label}<span aria-hidden="true">›</span>
-                </button>
-                {openAssignment === item.key && (
-                  <div className="assignment-submenu" role="menu">
-                    <button type="button" role="menuitem" onClick={() => {
-                      if (item.key === "candidates") onAssignCandidates?.(assessment);
-                      if (item.key === "evaluator") onAssignEvaluator?.(assessment);
-                      if (item.key === "invigilator") onAssignInvigilator?.(assessment);
-                      setShowOptions(false);
-                      setOpenAssignment(null);
-                    }}>Manual</button>
-                    <button type="button" role="menuitem">Upload</button>
+            {isInvigilator ? (
+              <>
+                <button type="button" role="menuitem" onClick={() => { onPreview?.(assessment); setShowOptions(false); }}>Preview</button>
+                <button className="option-menu-item" type="button" role="menuitem" onClick={() => { onInvigilate?.(assessment); setShowOptions(false); }}>Invigilate</button>
+                <button className="option-menu-item" type="button" role="menuitem">Reports</button>
+              </>
+            ) : isEvaluator ? (
+              <>
+                <button type="button" role="menuitem" onClick={() => { onPreview?.(assessment); setShowOptions(false); }}>Preview</button>
+                <button className="option-menu-item" type="button" role="menuitem" onClick={() => { onInvigilate?.(assessment); setShowOptions(false); }}>Invigilate</button>
+                <button className="option-menu-item" type="button" role="menuitem" onClick={() => { onEvaluate?.(assessment); setShowOptions(false); }}>Evaluate</button>
+                <button className="option-menu-item" type="button" role="menuitem">Reports</button>
+              </>
+            ) : (
+              <>
+                <button type="button" role="menuitem" onClick={() => { onPreview?.(assessment); setShowOptions(false); }}>Preview</button>
+                {canEdit && <button className="option-menu-item" type="button" role="menuitem" onClick={() => { onEdit?.(assessment); setShowOptions(false); }}>Edit</button>}
+                {canDelete && assessment.id && <button className="option-menu-item" type="button" role="menuitem" onClick={deleteAssessment}>Delete</button>}
+                {assignmentOptions.map((item) => (
+                  <div className="assignment-option" key={item.key}>
+                    <button
+                      className="option-menu-item option-with-arrow"
+                      type="button"
+                      role="menuitem"
+                      aria-expanded={openAssignment === item.key}
+                      onClick={() => setOpenAssignment(openAssignment === item.key ? null : item.key)}
+                    >
+                      {item.label}<span aria-hidden="true">›</span>
+                    </button>
+                    {openAssignment === item.key && (
+                      <div className="assignment-submenu" role="menu">
+                        <button type="button" role="menuitem" onClick={() => {
+                          if (item.key === "candidates") onAssignCandidates?.(assessment);
+                          if (item.key === "evaluator") onAssignEvaluator?.(assessment);
+                          if (item.key === "invigilator") onAssignInvigilator?.(assessment);
+                          setShowOptions(false);
+                          setOpenAssignment(null);
+                        }}>Manual</button>
+                        <button type="button" role="menuitem">Upload</button>
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
-            ))}
-            <button className="option-menu-item" type="button" role="menuitem">Settings</button>
-            <button className="option-menu-item" type="button" role="menuitem" onClick={() => { onInvigilate?.(assessment); setShowOptions(false); }}>Invigilate</button>
-            {canEvaluate && <button className="option-menu-item" type="button" role="menuitem" onClick={() => { onEvaluate?.(assessment); setShowOptions(false); }}>Evaluate</button>}
-            <button className="option-menu-item" type="button" role="menuitem">Reports</button>
+                ))}
+                <button className="option-menu-item" type="button" role="menuitem">Settings</button>
+                <button className="option-menu-item" type="button" role="menuitem" onClick={() => { onInvigilate?.(assessment); setShowOptions(false); }}>Invigilate</button>
+                {canEvaluate && <button className="option-menu-item" type="button" role="menuitem" onClick={() => { onEvaluate?.(assessment); setShowOptions(false); }}>Evaluate</button>}
+                <button className="option-menu-item" type="button" role="menuitem">Reports</button>
+              </>
+            )}
           </div>
         )}
       </div>
@@ -266,7 +488,7 @@ function AssessmentPreview({ assessment, onClose }: { assessment: AssessmentCard
   const sectionQuestions = sections.map((section, index) => {
     const sectionQuestions = matchingQuestions.filter((question) =>
       !assignedQuestionIds.has(question.id)
-      && (!section.question_type || question.question_type.toLocaleLowerCase() === section.question_type.toLocaleLowerCase())
+      && matchesAssessmentQuestionType(question.question_type, section.question_type)
     );
     sectionQuestions.forEach((question) => assignedQuestionIds.add(question.id));
     return {
@@ -352,7 +574,7 @@ type EvaluationCandidate = {
   candidate_code: string;
   category: string;
   sub_category: string;
-  status: "Pending" | "Submitted" | "Evaluated";
+  status: "Pending" | "Submitted" | "Evaluated" | "Exam is not attend";
   has_submission: boolean;
   started_at: string | null;
   submitted_at: string | null;
@@ -569,7 +791,7 @@ function AssessmentEvaluation({ assessment, accountUserId, onClose }: {
                       <td>{candidate.candidate_name}</td>
                       <td>{candidate.category || "—"}</td>
                       <td>{candidate.sub_category || "—"}</td>
-                      <td><span className={`assessment-evaluation-status is-${candidate.status.toLocaleLowerCase()}`}>{candidate.status}</span></td>
+                      <td><span className={`assessment-evaluation-status is-${candidate.status.toLocaleLowerCase().replace(/\s+/g, "-")}`}>{candidate.status}</span></td>
                       <td>
                         <button
                           className="assessment-evaluation-open"
@@ -4831,6 +5053,86 @@ function DashboardPanel({ name, shortcuts, onNavigate }: { name: string; shortcu
   );
 }
 
+function CandidatePermissionsPanel({ accountUserId }: { accountUserId: number | null }) {
+  const [examCamPermissionActive, setExamCamPermissionActive] = useState<boolean | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    fetch("/api/candidate-permissions")
+      .then(async (response) => {
+        const data = await response.json() as { exam_cam_permission_active?: boolean; error?: string };
+        if (!response.ok) throw new Error(data.error ?? "Unable to load candidate permissions.");
+        setExamCamPermissionActive(data.exam_cam_permission_active ?? true);
+      })
+      .catch((loadError) => {
+        console.error("Failed to load candidate camera permission", loadError);
+        setError(loadError instanceof Error ? loadError.message : "Unable to load candidate permissions.");
+      });
+  }, []);
+
+  const updatePermission = async (active: boolean) => {
+    if (!accountUserId || saving) return;
+    setSaving(true);
+    setError("");
+    try {
+      const response = await fetch("/api/candidate-permissions", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accountUserId, examCamPermissionActive: active }),
+      });
+      const data = await response.json() as { exam_cam_permission_active?: boolean; error?: string };
+      if (!response.ok) throw new Error(data.error ?? "Unable to save candidate permissions.");
+      setExamCamPermissionActive(data.exam_cam_permission_active ?? active);
+    } catch (saveError) {
+      console.error("Failed to update candidate camera permission", saveError);
+      setError(saveError instanceof Error ? saveError.message : "Unable to save candidate permissions.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="candidate-permissions-section" aria-labelledby="candidate-permissions-title">
+      <header className="candidate-permissions-header">
+        <p className="section-kicker">Settings</p>
+        <h1 id="candidate-permissions-title">Candidate Permissions</h1>
+        <p>Manage permissions available to candidates during examinations.</p>
+      </header>
+      <div className="candidate-permissions-card">
+        <div className="candidate-permissions-copy">
+          <h2>Exam Cam Permission</h2>
+          <p>Allow candidates to use their camera while attending an exam.</p>
+        </div>
+        <div className="candidate-permissions-actions" role="group" aria-label="Exam Cam Permission">
+          <button
+            type="button"
+            className={`candidate-permission-button${examCamPermissionActive ? " is-selected is-active" : ""}`}
+            aria-pressed={examCamPermissionActive === true}
+            disabled={examCamPermissionActive === null || saving}
+            onClick={() => void updatePermission(true)}
+          >
+            Active
+          </button>
+          <button
+            type="button"
+            className={`candidate-permission-button${examCamPermissionActive === false ? " is-selected is-inactive" : ""}`}
+            aria-pressed={examCamPermissionActive === false}
+            disabled={examCamPermissionActive === null || saving}
+            onClick={() => void updatePermission(false)}
+          >
+            Inactive
+          </button>
+        </div>
+      </div>
+      <p className="candidate-permissions-note" role="status">
+        {examCamPermissionActive === null ? "Loading current status…" : `Current status: ${examCamPermissionActive ? "Active" : "Inactive"}${saving ? " · Saving…" : ""}`}
+      </p>
+      {error && <p className="candidate-permissions-error" role="alert">{error}</p>}
+    </section>
+  );
+}
+
 function SectionPlaceholder({ title }: { title: string }) {
   return (
     <section className="section-placeholder" aria-labelledby={`${title.toLowerCase()}-title`}>
@@ -5820,6 +6122,7 @@ type StudentAssessment = {
   total_questions: number;
   total_marks: number;
   has_submitted: boolean;
+  exam_cam_permission_active: boolean;
 };
 
 function formatStudentExamDate(value: string | null) {
@@ -5992,7 +6295,7 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
   }, [submitExam]);
 
   useEffect(() => {
-    if (step !== "exam" || !cameraStream || !liveFeedConsent) return;
+    if (!assessment.exam_cam_permission_active || step !== "exam" || !cameraStream || !liveFeedConsent) return;
     let cancelled = false;
     let polling = false;
     let pollTimer = 0;
@@ -6117,7 +6420,7 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
       window.clearInterval(pollTimer);
       closePeer(true);
     };
-  }, [assessment.id, cameraStream, liveFeedConsent, step, student.candidateId, student.dateOfBirth, student.id]);
+  }, [assessment.exam_cam_permission_active, assessment.id, cameraStream, liveFeedConsent, step, student.candidateId, student.dateOfBirth, student.id]);
 
   useEffect(() => {
     if (videoRef.current && cameraStream) {
@@ -6133,7 +6436,7 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
   }, [cameraStream]);
 
   useEffect(() => {
-    if (step !== "exam" || !cameraStream) return;
+    if (!assessment.exam_cam_permission_active || step !== "exam" || !cameraStream) return;
     const video = videoRef.current;
     const canvas = document.createElement("canvas");
     const context = canvas.getContext("2d", { willReadFrequently: true });
@@ -6198,10 +6501,10 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
         track.removeEventListener("unmute", onCameraRestored);
       });
     };
-  }, [cameraStream, incrementProctorCount, openProctorAlert, step]);
+  }, [assessment.exam_cam_permission_active, cameraStream, incrementProctorCount, openProctorAlert, step]);
 
   useEffect(() => {
-    if (step !== "exam") return;
+    if (!assessment.exam_cam_permission_active || step !== "exam") return;
     const controller = new AbortController();
     const publish = () => void publishProctorCounts(proctorCountsRef.current, controller.signal);
     const interval = window.setInterval(publish, 5000);
@@ -6209,18 +6512,18 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
       controller.abort();
       window.clearInterval(interval);
     };
-  }, [publishProctorCounts, step]);
+  }, [assessment.exam_cam_permission_active, publishProctorCounts, step]);
 
   useEffect(() => {
-    if (step !== "exam") return;
+    if (!assessment.exam_cam_permission_active || step !== "exam") return;
     const timeout = window.setTimeout(() => {
       void publishProctorCounts(proctorCounts);
     }, 0);
     return () => window.clearTimeout(timeout);
-  }, [proctorCounts, publishProctorCounts, step]);
+  }, [assessment.exam_cam_permission_active, proctorCounts, publishProctorCounts, step]);
 
   useEffect(() => {
-    if (step !== "exam" || !cameraStream) return;
+    if (!assessment.exam_cam_permission_active || step !== "exam" || !cameraStream) return;
     let cancelled = false;
     let detector: import("@mediapipe/tasks-vision").FaceDetector | null = null;
     let timeout = 0;
@@ -6410,7 +6713,7 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
       window.clearTimeout(timeout);
       detector?.close();
     };
-  }, [cameraStream, idPhoto, incrementProctorCount, openProctorAlert, photo, step]);
+  }, [assessment.exam_cam_permission_active, cameraStream, idPhoto, incrementProctorCount, openProctorAlert, photo, step]);
 
   useEffect(() => {
     if (step !== "exam") return;
@@ -6545,6 +6848,11 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
         payload.end_at ? new Date(payload.end_at).getTime() : Number.POSITIVE_INFINITY,
       ].filter(Number.isFinite);
       setExamDeadline(deadlineCandidates.length ? Math.min(...deadlineCandidates) : null);
+      if (!assessment.exam_cam_permission_active) {
+        cameraStream?.getTracks().forEach((track) => track.stop());
+        setCameraStream(null);
+        setLiveFeedConsent(false);
+      }
       setStep("exam");
     } catch (error) {
       setCameraError(error instanceof Error ? error.message : "Unable to load this exam.");
@@ -6593,11 +6901,17 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
                   <li>Keep your face clearly visible</li>
                   <li>Have your valid photo ID ready</li>
                 </ul>
-                <label className="student-exam-live-feed-consent">
-                  <input type="checkbox" checked={liveFeedConsent} onChange={(event) => setLiveFeedConsent(event.target.checked)} />
-                  <span>I consent to storing my check-in selfie, ID photo, and submitted answers for review by authorized administrators and assigned evaluators. An authorized administrator or assigned invigilator may also view my live camera; the live stream is not recorded and ends when the exam or feed ends.</span>
-                </label>
-                <button className="student-exam-primary-button" type="button" onClick={enableCamera} disabled={!liveFeedConsent}>Enable camera and continue</button>
+                {assessment.exam_cam_permission_active ? (
+                  <label className="student-exam-live-feed-consent">
+                    <input type="checkbox" checked={liveFeedConsent} onChange={(event) => setLiveFeedConsent(event.target.checked)} />
+                    <span>I consent to storing my check-in selfie, ID photo, and submitted answers for review by authorized administrators and assigned evaluators. An authorized administrator or assigned invigilator may also view my live camera; the live stream is not recorded and ends when the exam or feed ends.</span>
+                  </label>
+                ) : (
+                  <p className="student-exam-camera-off-note">Exam camera monitoring is disabled. Camera access is used only to capture the two required check-in photos and is stopped before the exam begins.</p>
+                )}
+                <button className="student-exam-primary-button" type="button" onClick={enableCamera} disabled={assessment.exam_cam_permission_active && !liveFeedConsent}>
+                  {assessment.exam_cam_permission_active ? "Enable camera and continue" : "Take check-in photos"}
+                </button>
               </>
             ) : step === "loading" ? (
               <div className="student-exam-gate-loading" role="status"><span className="student-exam-spinner" /><h1 id="student-exam-gate-title">Preparing your exam</h1><p>Verifying your exam access and loading assigned questions…</p></div>
@@ -6608,7 +6922,7 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
                 <p className="student-exam-gate-copy">{step === "selfie" ? "Center your face in the frame and take a clear photo." : "Hold your valid photo ID beside your face. Make sure your photo and details are readable."}</p>
                 <div className="student-exam-camera-preview">
                   <video ref={videoRef} autoPlay playsInline muted aria-label="Live camera preview" />
-                  <span className="student-exam-camera-live"><i /> LIVE</span>
+                  {assessment.exam_cam_permission_active && <span className="student-exam-camera-live"><i /> LIVE</span>}
                   {step === "id-proof" && photo && <img className="student-exam-selfie-thumb" src={photo} alt="Selfie captured for this local session" />}
                 </div>
                 {cameraError && <p className="student-exam-camera-error" role="alert">{cameraError}</p>}
@@ -6626,7 +6940,10 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
               </>
             )}
             {step === "camera" && cameraError && <p className="student-exam-camera-error" role="alert">{cameraError}</p>}
-            <p className="student-exam-privacy-note">No microphone is requested. Check-in photos are uploaded with your submitted exam and can be viewed by authorized examination staff. The ID image is not automatically verified.</p>
+            <p className="student-exam-privacy-note">
+              No microphone is requested. Check-in photos are uploaded with your submitted exam and can be viewed by authorized examination staff. The ID image is not automatically verified.
+              {!assessment.exam_cam_permission_active && " Camera access is stopped after the two photos are captured."}
+            </p>
           </div>
           <button className="student-exam-gate-cancel" type="button" onClick={onClose}>Return to schedule</button>
         </section>
@@ -6675,24 +6992,30 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
                   </div>
                 </div>
               ))}
-              <div className="student-exam-camera-status">
-                <video ref={videoRef} autoPlay playsInline muted aria-label="Live camera preview; video is not being recorded" />
-                <span><i /> LIVE</span>
-              </div>
-              <div className="student-exam-proctor-checks" aria-label="Examination monitoring checks">
-                <div className={proctorCounts.noFace ? "has-violations" : ""}><span>No Face Detected</span><strong>{proctorCounts.noFace}</strong></div>
-                <div><span>OK · One Face</span><strong>{proctorCounts.okay}</strong></div>
-                <div className={proctorCounts.multipleFaces ? "has-violations" : ""}><span>Multiple Face Detected</span><strong>{proctorCounts.multipleFaces}</strong></div>
-                <div className={proctorCounts.personChanges ? "has-violations" : ""}><span>Person changed</span><strong>{proctorCounts.personChanges}</strong></div>
-                <div className={proctorCounts.motionEvents ? "has-violations" : ""}><span>Motion detected</span><strong>{proctorCounts.motionEvents}</strong></div>
-                <div className={proctorCounts.cameraBlocked ? "has-violations" : ""}><span>Camera blocked!</span><strong>{proctorCounts.cameraBlocked}</strong></div>
-                <div className={proctorCounts.tabChanges ? "has-violations" : ""}><span>Tab change detected!</span><strong>{proctorCounts.tabChanges}</strong></div>
-                <div className={proctorCounts.fullscreenDisabled ? "has-violations" : ""}><span>Full-Screen Mode disabled!</span><strong>{proctorCounts.fullscreenDisabled}</strong></div>
-              </div>
-              <p className="student-exam-focus-note">Stay on this page and keep one face visible until the exam ends.</p>
-              <p className={`student-exam-telemetry-status${telemetryStatus.startsWith("Unable") || telemetryStatus.includes("no invigilator") ? " has-error" : ""}`} role="status">{telemetryStatus}</p>
-              <p className="student-exam-live-feed-status" role="status">{remoteFeedStatus}</p>
-              <p className="student-exam-motion-disclaimer">{faceDetectionStatus}. Camera frames are analyzed in this browser; no video is recorded or uploaded. Microphone access is not requested.</p>
+              {assessment.exam_cam_permission_active ? (
+                <>
+                  <div className="student-exam-camera-status">
+                    <video ref={videoRef} autoPlay playsInline muted aria-label="Live camera preview; video is not being recorded" />
+                    <span><i /> LIVE</span>
+                  </div>
+                  <div className="student-exam-proctor-checks" aria-label="Examination monitoring checks">
+                    <div className={proctorCounts.noFace ? "has-violations" : ""}><span>No Face Detected</span><strong>{proctorCounts.noFace}</strong></div>
+                    <div><span>OK · One Face</span><strong>{proctorCounts.okay}</strong></div>
+                    <div className={proctorCounts.multipleFaces ? "has-violations" : ""}><span>Multiple Face Detected</span><strong>{proctorCounts.multipleFaces}</strong></div>
+                    <div className={proctorCounts.personChanges ? "has-violations" : ""}><span>Person changed</span><strong>{proctorCounts.personChanges}</strong></div>
+                    <div className={proctorCounts.motionEvents ? "has-violations" : ""}><span>Motion detected</span><strong>{proctorCounts.motionEvents}</strong></div>
+                    <div className={proctorCounts.cameraBlocked ? "has-violations" : ""}><span>Camera blocked!</span><strong>{proctorCounts.cameraBlocked}</strong></div>
+                    <div className={proctorCounts.tabChanges ? "has-violations" : ""}><span>Tab change detected!</span><strong>{proctorCounts.tabChanges}</strong></div>
+                    <div className={proctorCounts.fullscreenDisabled ? "has-violations" : ""}><span>Full-Screen Mode disabled!</span><strong>{proctorCounts.fullscreenDisabled}</strong></div>
+                  </div>
+                  <p className="student-exam-focus-note">Stay on this page and keep one face visible until the exam ends.</p>
+                  <p className={`student-exam-telemetry-status${telemetryStatus.startsWith("Unable") || telemetryStatus.includes("no invigilator") ? " has-error" : ""}`} role="status">{telemetryStatus}</p>
+                  <p className="student-exam-live-feed-status" role="status">{remoteFeedStatus}</p>
+                  <p className="student-exam-motion-disclaimer">{faceDetectionStatus}. Camera frames are analyzed in this browser; no video is recorded or uploaded. Microphone access is not requested.</p>
+                </>
+              ) : (
+                <p className="student-exam-focus-note">Camera access is off. Only the two check-in photos were captured before the exam.</p>
+              )}
             </aside>
             <section className="student-exam-question-area" aria-live="polite">
               <div className="student-exam-session-banner"><span>●</span> Your answers and check-in photos are saved when you submit the exam.</div>
@@ -6792,9 +7115,16 @@ function StudentPortalDashboard({ student, onLogout }: { student: { id: number; 
       signal: controller.signal,
     })
       .then(async (response) => {
-        const payload = await response.json() as { assessments?: StudentAssessment[]; error?: string };
+        const payload = await response.json() as {
+          assessments?: StudentAssessment[];
+          exam_cam_permission_active?: boolean;
+          error?: string;
+        };
         if (!response.ok) throw new Error(payload.error ?? "Unable to load exam schedule.");
-        setAssessments(payload.assessments ?? []);
+        setAssessments((payload.assessments ?? []).map((assessment) => ({
+          ...assessment,
+          exam_cam_permission_active: payload.exam_cam_permission_active ?? true,
+        })));
       })
       .catch((loadError) => {
         if (loadError instanceof Error && loadError.name === "AbortError") return;
@@ -6894,7 +7224,21 @@ function StudentPortalDashboard({ student, onLogout }: { student: { id: number; 
                       key={assessment.id}
                       assessment={assessment}
                       currentTime={currentTime}
-                      onAttend={() => { setAttendNotice(""); setActiveAssessment(assessment); }}
+                      onAttend={async () => {
+                        setAttendNotice("");
+                        try {
+                          const response = await fetch("/api/candidate-permissions");
+                          const payload = await response.json() as { exam_cam_permission_active?: boolean; error?: string };
+                          if (!response.ok) throw new Error(payload.error ?? "Unable to check exam camera permission.");
+                          setActiveAssessment({
+                            ...assessment,
+                            exam_cam_permission_active: payload.exam_cam_permission_active ?? true,
+                          });
+                        } catch (loadError) {
+                          console.error("Unable to refresh exam camera permission before exam", loadError);
+                          setAttendNotice(loadError instanceof Error ? loadError.message : "Unable to check exam camera permission.");
+                        }
+                      }}
                     />
                   ))}
                 </tbody>
@@ -7081,11 +7425,16 @@ export default function Home() {
     "Candidate Categories": "Settings:Candidates:Categories",
     "Candidate Sub Categories": "Settings:Candidates:Sub-Categories",
     "Candidate Settings": "Settings:Candidates:Settings",
+    "Candidate Permissions": "Settings:Candidates:Candidate Permissions",
+    Results: "Settings:Results",
   };
 
   const hasAccess = (sectionId: string) => {
     if (sectionId === "Dashboard") return true;
     if (!currentRole) return false;
+    if (sectionId === "Settings:Results" || sectionId === "Results") {
+      return Boolean(currentRole.administrator_access || String(currentUser?.role ?? "").toLocaleLowerCase().includes("admin"));
+    }
     if (currentRole.administrator_access) return true;
     if (sectionId === "Users") {
       return ["Users:Roles & Permissions", "Users:List"].some((key) => currentRole.permissions?.[key]?.view === 1);
@@ -7413,6 +7762,9 @@ export default function Home() {
                                 if (item.label === "Settings" && option.label === "Candidates" && nestedOption === "Settings") {
                                   setActiveSection("Candidate Settings");
                                 }
+                                if (item.label === "Settings" && option.label === "Candidates" && nestedOption === "Candidate Permissions") {
+                                  setActiveSection("Candidate Permissions");
+                                }
                                 setOpenNavigation(null);
                                 setSidebarExpanded(false);
                               }}
@@ -7469,7 +7821,7 @@ export default function Home() {
 
       <div className="page-body">
         {!hasAccess(activeSection) ? <SectionPlaceholder title="Access restricted" /> : activeSection === "Dashboard" ? <DashboardPanel name={currentUser?.name || "Administrator"} shortcuts={visibleDashboardPages} onNavigate={setActiveSection} /> :
-        activeSection === "Questions" ? <QuestionsPanel currentRole={currentRole} /> : activeSection === "Question Categories" ? <QuestionCategoriesPanel currentRole={currentRole} /> : activeSection === "Question Sub Categories" ? <QuestionSubCategoriesPanel currentRole={currentRole} /> : activeSection === "Question Topics" ? <QuestionTopicsPanel currentRole={currentRole} /> : activeSection === "Difficulty Levels" ? <DifficultyLevelsPanel currentRole={currentRole} /> : activeSection === "Languages" ? <LanguagesPanel currentRole={currentRole} /> : activeSection === "Examinations" ? <AssessmentTypesPanel currentRole={currentRole} /> : activeSection === "Candidate Categories" ? <CandidateCategoriesPanel currentRole={currentRole} /> : activeSection === "Candidate Sub Categories" ? <CandidateSubCategoriesPanel currentRole={currentRole} /> : activeSection === "Candidate Settings" ? <CandidateSettingsPanel currentRole={currentRole} /> : activeSection === "Candidates" ? <CandidatesPanel currentRole={currentRole} /> : activeSection === "Assessments" ? <section className="assessments-section" id="assessments">
+        activeSection === "Questions" ? <QuestionsPanel currentRole={currentRole} /> : activeSection === "Question Categories" ? <QuestionCategoriesPanel currentRole={currentRole} /> : activeSection === "Question Sub Categories" ? <QuestionSubCategoriesPanel currentRole={currentRole} /> : activeSection === "Question Topics" ? <QuestionTopicsPanel currentRole={currentRole} /> : activeSection === "Difficulty Levels" ? <DifficultyLevelsPanel currentRole={currentRole} /> : activeSection === "Languages" ? <LanguagesPanel currentRole={currentRole} /> : activeSection === "Examinations" ? <AssessmentTypesPanel currentRole={currentRole} /> : activeSection === "Candidate Categories" ? <CandidateCategoriesPanel currentRole={currentRole} /> : activeSection === "Candidate Sub Categories" ? <CandidateSubCategoriesPanel currentRole={currentRole} /> : activeSection === "Candidate Settings" ? <CandidateSettingsPanel currentRole={currentRole} /> : activeSection === "Candidate Permissions" ? <CandidatePermissionsPanel accountUserId={Number(currentUser?.id) || null} /> : activeSection === "Results" ? <ResultsPanel accountUserId={Number(currentUser?.id) || null} /> : activeSection === "Candidates" ? <CandidatesPanel currentRole={currentRole} /> : activeSection === "Assessments" ? <section className="assessments-section" id="assessments">
         <div className="assessments-toolbar">
           <div>
             <p className="section-kicker">Examination workspace</p>
@@ -7524,6 +7876,8 @@ export default function Home() {
               assessment={assessment}
               currentRole={currentRole}
               canEvaluate={/admin|evaluator/i.test(String(currentUser?.role ?? ""))}
+              isInvigilator={String(currentUser?.role ?? "").trim().toLocaleLowerCase() === "invigilator"}
+              isEvaluator={/evaluator/i.test(String(currentUser?.role ?? ""))}
               key={assessment.id ?? assessment.title}
               onDeleted={(id) => setSavedAssessments((current) => current.filter((item) => item.id !== id))}
               onEdit={(selectedAssessment) => { setEditingAssessment(selectedAssessment); setShowManualForm(true); }}

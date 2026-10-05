@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { databasePool } from "@/lib/db";
+import { matchesAssessmentQuestionType } from "@/lib/question-types";
 
 export const runtime = "nodejs";
 
@@ -172,7 +173,7 @@ async function getEvaluationAccess(assessmentId: number, accountUserId: number) 
     return { error: "Only administrators and evaluators can evaluate assessments.", status: 403 as const };
   }
   const assessmentResult = await databasePool.query(`
-    SELECT id, examination, name, start_date, sections, question_category,
+    SELECT id, examination, name, start_date, end_date, last_login, sections, question_category,
            sub_category, topic, question_language
     FROM assessment WHERE id = $1
   `, [assessmentId]);
@@ -222,50 +223,49 @@ function getConfiguredMaximumMark(assessment: Record<string, unknown>) {
   return hasConfiguredSection ? maximumMark : null;
 }
 
-function getConfiguredQuestionMark(
+function getConfiguredQuestionMarks(
   assessment: Record<string, unknown>,
   question: Record<string, unknown>,
 ) {
   if (!Array.isArray(assessment.sections)) return null;
   const sections = assessment.sections.filter(isRecord);
   const questionSection = String(question.section ?? "").trim().toLocaleLowerCase();
-  const questionType = String(question.question_type ?? "").trim().toLocaleLowerCase();
   const section = sections.find((candidate) => {
     const name = String(candidate.name ?? "").trim().toLocaleLowerCase();
     return name && (name === questionSection || `section ${name}` === questionSection);
-  }) ?? (() => {
-    const matchingSections = sections.filter((candidate) =>
-      String(candidate.question_type ?? "").trim().toLocaleLowerCase() === questionType
-      && Number.isFinite(Number(candidate.correct_mark))
-      && Number(candidate.correct_mark) > 0,
-    );
-    return matchingSections.length === 1 ? matchingSections[0] : undefined;
-  })();
+  });
 
   if (!section) return null;
   const correctMark = Number(section.correct_mark);
-  return Number.isFinite(correctMark) && correctMark > 0 ? correctMark : null;
+  const wrongMark = Number(section.wrong_mark);
+  return {
+    correctMark: Number.isFinite(correctMark) && correctMark >= 0 ? correctMark : null,
+    wrongMark: Number.isFinite(wrongMark) && wrongMark <= 0 ? wrongMark : null,
+  };
 }
 
 async function loadEvaluationQuestions(assessment: Record<string, unknown>, snapshot?: unknown): Promise<EvaluationQuestion[]> {
   if (Array.isArray(snapshot) && snapshot.length > 0) {
-    return snapshot.filter(isRecord).map((question) => ({
-      id: Number(question.id),
-      question_type: String(question.question_type ?? ""),
-      question: String(question.question ?? ""),
-      section: String(question.section ?? ""),
-      options: Array.isArray(question.options)
-        ? question.options.filter((option: unknown): option is string => typeof option === "string")
-        : [],
-      correct_answer: question.correct_answer ?? null,
-      correct_mark: Number.isFinite(Number(question.correct_mark)) && Number(question.correct_mark) > 0
-        ? Number(question.correct_mark)
-        : getConfiguredQuestionMark(assessment, question) ?? 0,
-      wrong_mark: Number.isFinite(Number(question.wrong_mark)) && Number(question.wrong_mark) <= 0
-        ? Number(question.wrong_mark)
-        : 0,
-      passage: typeof question.passage === "string" ? question.passage : null,
-    }));
+    return snapshot.filter(isRecord).map((question) => {
+      const configuredMarks = getConfiguredQuestionMarks(assessment, question);
+      const snapshotCorrectMark = Number(question.correct_mark);
+      const snapshotWrongMark = Number(question.wrong_mark);
+      return {
+        id: Number(question.id),
+        question_type: String(question.question_type ?? ""),
+        question: String(question.question ?? ""),
+        section: String(question.section ?? ""),
+        options: Array.isArray(question.options)
+          ? question.options.filter((option: unknown): option is string => typeof option === "string")
+          : [],
+        correct_answer: question.correct_answer ?? null,
+        correct_mark: configuredMarks?.correctMark
+          ?? (Number.isFinite(snapshotCorrectMark) && snapshotCorrectMark > 0 ? snapshotCorrectMark : 0),
+        wrong_mark: configuredMarks?.wrongMark
+          ?? (Number.isFinite(snapshotWrongMark) && snapshotWrongMark <= 0 ? snapshotWrongMark : 0),
+        passage: typeof question.passage === "string" ? question.passage : null,
+      };
+    });
   }
   const result = await databasePool.query(`
     SELECT id, question_type, question, category, sub_category, topic, language, details
@@ -295,7 +295,7 @@ async function loadEvaluationQuestions(assessment: Record<string, unknown>, snap
     const wrongMark = Number(section.wrong_mark);
     const selected = questions
       .filter((question) => !assignedQuestionIds.has(Number(question.id))
-        && (!questionType || String(question.question_type).toLocaleLowerCase() === questionType.toLocaleLowerCase()))
+        && matchesAssessmentQuestionType(question.question_type, questionType))
       .slice(0, limit);
 
     for (const question of selected) {
@@ -375,7 +375,11 @@ function scoreSubmission(
       ? answer.some((value) => typeof value === "string" && value.trim())
       : typeof answer === "string" && answer.trim().length > 0;
     const isCorrect = hasAnswer && question.correct_answer !== null && answersEqual(answer, question.correct_answer);
-    const mark = isCorrect ? Math.max(0, question.correct_mark) : 0;
+    const mark = isCorrect
+      ? Math.max(0, question.correct_mark)
+      : hasAnswer
+        ? Math.min(0, question.wrong_mark)
+        : 0;
     obtainedMark += mark;
     return { question_id: question.id, answer, status: !hasAnswer ? "unanswered" : isCorrect ? "correct" : "incorrect", mark };
   });
@@ -486,6 +490,14 @@ export async function GET(request: Request) {
       ORDER BY candidate.id, submission.submitted_at DESC NULLS LAST
     `, [assessmentId, accountUserId, access.isAdmin]);
 
+    const startTime = assessment.start_date ? new Date(String(assessment.start_date)).getTime() : Number.NaN;
+    const endTime = assessment.end_date ? new Date(String(assessment.end_date)).getTime() : Number.POSITIVE_INFINITY;
+    const loginDeadline = Number(assessment.last_login) > 0 && Number.isFinite(startTime)
+      ? startTime + Number(assessment.last_login) * 60_000
+      : Number.POSITIVE_INFINITY;
+    const attendanceDeadline = Math.min(endTime, loginDeadline);
+    const attendanceWindowClosed = Number.isFinite(attendanceDeadline) && Date.now() >= attendanceDeadline;
+
     return NextResponse.json({
       assessment: {
         id: assessmentId,
@@ -501,7 +513,11 @@ export async function GET(request: Request) {
           candidate_code: getCandidateId(fields),
           category: typeof row.category === "string" ? row.category.trim() : "",
           sub_category: typeof row.sub_category === "string" ? row.sub_category.trim() : "",
-          status: row.evaluated_at ? "Evaluated" : row.submitted_at ? "Submitted" : "Pending",
+          status: row.evaluated_at
+            ? "Evaluated"
+            : row.submitted_at
+              ? "Submitted"
+              : attendanceWindowClosed ? "Exam is not attend" : "Pending",
           has_submission: Boolean(row.submitted_at),
           started_at: row.started_at,
           submitted_at: row.submitted_at,

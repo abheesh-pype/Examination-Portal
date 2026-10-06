@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { databasePool } from "@/lib/db";
+import { authorizeApiRequest } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
@@ -87,8 +88,10 @@ async function ensureCandidateInfoTable() {
   }
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     await ensureCandidateInfoTable();
     const result = await databasePool.query(
       "SELECT id, name, column_type, is_dependent, status, is_required, min_value, max_value, options, dependent_on, date FROM \"Candidate Information\" WHERE record_type = 'field' ORDER BY date DESC, id DESC"
@@ -102,6 +105,8 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json() as {
       name?: unknown;
       column_type?: unknown;
@@ -151,6 +156,8 @@ export async function POST(request: Request) {
 
 export async function PATCH(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json() as {
       id?: unknown;
       name?: unknown;
@@ -237,6 +244,8 @@ export async function PATCH(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json() as { id?: unknown };
     const id = Number(body.id);
     if (!Number.isInteger(id)) {

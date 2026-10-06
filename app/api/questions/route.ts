@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { databasePool } from "@/lib/db";
+import { authorizeApiRequest } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
@@ -37,8 +38,10 @@ async function ensureQuestionsTable() {
 
 const optionalText = (value: unknown) => typeof value === "string" && value.trim() ? value.trim() : null;
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     await ensureQuestionsTable();
     const result = await databasePool.query(`
       SELECT id, question_type, question, category, sub_category, topic,
@@ -55,6 +58,8 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json() as QuestionPayload;
     if (Array.isArray(body.rows)) {
       if (body.rows.length === 0 || body.rows.length > 1000) {
@@ -200,6 +205,8 @@ export async function POST(request: Request) {
 
 export async function PATCH(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json() as QuestionPayload;
     const id = Number(body.id);
 
@@ -265,6 +272,8 @@ export async function PATCH(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json() as { id?: unknown };
     const id = Number(body.id);
     if (!Number.isInteger(id) || id <= 0) {

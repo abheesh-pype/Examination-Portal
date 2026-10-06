@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { databasePool } from "@/lib/db";
+import { authorizeApiRequest, createSession, setSessionCookie } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
@@ -36,6 +37,8 @@ function normalizeDate(value: string) {
 
 export async function POST(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json() as { candidateId?: unknown; dateOfBirth?: unknown };
     const candidateId = typeof body.candidateId === "string" ? body.candidateId.trim() : "";
     const dateOfBirth = typeof body.dateOfBirth === "string" ? normalizeDate(body.dateOfBirth) : "";
@@ -74,17 +77,18 @@ export async function POST(request: Request) {
     const studentName = getStringField(fields, (name) => /^candidate name(?:\s*\([^)]*\))?$/i.test(name.trim()))
       || String(candidate.name || "Student");
 
-    return NextResponse.json({
+    const sessionToken = await createSession("candidate", Number(candidate.id));
+    const response = NextResponse.json({
       student: {
         id: candidate.id,
         name: studentName,
-        candidateId,
-        dateOfBirth,
         category: candidateData?.category ?? null,
         subCategory: candidateData?.sub_category ?? null,
         portalType: "student",
       },
     });
+    setSessionCookie(response, sessionToken);
+    return response;
   } catch (error) {
     console.error("Failed to authenticate student candidate", error);
     return NextResponse.json({ error: "Unable to login right now." }, { status: 500 });

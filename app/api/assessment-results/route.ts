@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { databasePool } from "@/lib/db";
+import { authorizeApiRequest } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
@@ -192,19 +193,51 @@ function getCandidateCode(fields: Record<string, unknown>) {
   return getCandidateField(fields, /^candidate id(?:\s*\([^)]*\))?$/i);
 }
 
+function getAssessmentResult(row: Record<string, unknown>) {
+  const candidateData = isRecord(row.candidate_data) ? row.candidate_data : {};
+  const candidateFields = isRecord(candidateData.fields) ? candidateData.fields : {};
+  const candidateDetails = Object.fromEntries(
+    Object.entries(candidateFields).filter(([name, value]) =>
+      !/^candidate id(?:\s*\([^)]*\))?$/i.test(name.trim())
+      && !/^candidate name(?:\s*\([^)]*\))?$/i.test(name.trim())
+      && value !== null
+      && value !== undefined
+      && String(value).trim() !== "",
+    ),
+  );
+  const marks = calculateResult(row.sections, row.questions_snapshot, row.answers, row.manual_marks);
+
+  return {
+    assessment_id: Number(row.assessment_id),
+    assessment_name: String(row.assessment_name ?? ""),
+    examination: String(row.examination ?? ""),
+    assessment_start_date: row.assessment_start_date,
+    assessment_end_date: row.assessment_end_date,
+    candidate_id: Number(row.candidate_id),
+    candidate_code: getCandidateCode(candidateFields),
+    candidate_name: getCandidateField(candidateFields, /^candidate name(?:\s*\([^)]*\))?$/i)
+      || String(row.candidate_name ?? "Candidate"),
+    candidate_category: typeof candidateData.category === "string" ? candidateData.category : "",
+    candidate_sub_category: typeof candidateData.sub_category === "string" ? candidateData.sub_category : "",
+    candidate_details: candidateDetails,
+    obtained_mark: marks.obtainedMark,
+    negative_mark: marks.negativeMark,
+    total_mark: marks.totalMark,
+    evaluated_at: row.evaluated_at,
+  };
+}
+
 export async function GET(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     await ensureAssessmentResultTables();
-    const accountUserId = Number(new URL(request.url).searchParams.get("accountUserId"));
+    const accountUserId = authorization.user?.id ?? 0;
     if (!Number.isInteger(accountUserId) || accountUserId <= 0) {
       return NextResponse.json({ error: "A valid administrator account is required." }, { status: 400 });
     }
 
-    const userResult = await databasePool.query(
-      "SELECT role FROM users WHERE id = $1 AND status = TRUE",
-      [accountUserId],
-    );
-    if (!userResult.rowCount || !String(userResult.rows[0].role ?? "").toLocaleLowerCase().includes("admin")) {
+    if (!authorization.user?.isAdmin) {
       return NextResponse.json({ error: "Only administrators can view assessment results." }, { status: 403 });
     }
 
@@ -232,42 +265,54 @@ export async function GET(request: Request) {
     `);
 
     return NextResponse.json({
-      results: result.rows.map((row) => {
-        const candidateData = isRecord(row.candidate_data) ? row.candidate_data : {};
-        const candidateFields = isRecord(candidateData.fields) ? candidateData.fields : {};
-        const candidateDetails = Object.fromEntries(
-          Object.entries(candidateFields).filter(([name, value]) =>
-            !/^candidate id(?:\s*\([^)]*\))?$/i.test(name.trim())
-            && !/^candidate name(?:\s*\([^)]*\))?$/i.test(name.trim())
-            && value !== null
-            && value !== undefined
-            && String(value).trim() !== "",
-          ),
-        );
-        const marks = calculateResult(row.sections, row.questions_snapshot, row.answers, row.manual_marks);
-
-        return {
-          assessment_id: Number(row.assessment_id),
-          assessment_name: String(row.assessment_name ?? ""),
-          examination: String(row.examination ?? ""),
-          assessment_start_date: row.assessment_start_date,
-          assessment_end_date: row.assessment_end_date,
-          candidate_id: Number(row.candidate_id),
-          candidate_code: getCandidateCode(candidateFields),
-          candidate_name: getCandidateField(candidateFields, /^candidate name(?:\s*\([^)]*\))?$/i)
-            || String(row.candidate_name ?? "Candidate"),
-          candidate_category: typeof candidateData.category === "string" ? candidateData.category : "",
-          candidate_sub_category: typeof candidateData.sub_category === "string" ? candidateData.sub_category : "",
-          candidate_details: candidateDetails,
-          obtained_mark: marks.obtainedMark,
-          negative_mark: marks.negativeMark,
-          total_mark: marks.totalMark,
-          evaluated_at: row.evaluated_at,
-        };
-      }),
+      results: result.rows.map((row) => getAssessmentResult(row)),
     });
   } catch (error) {
     console.error("Failed to load assessment results", error);
     return NextResponse.json({ error: "Unable to load assessment results." }, { status: 500 });
+  }
+}
+
+export async function POST(request: Request) {
+  try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
+    await ensureAssessmentResultTables();
+    const candidateResult = await databasePool.query(`
+      SELECT id, candidate_data
+      FROM "Candidate Information"
+      WHERE id = $1 AND record_type = 'candidate' AND status = TRUE
+    `, [authorization.candidate?.id ?? 0]);
+    const candidate = candidateResult.rows[0];
+    if (!candidate) return NextResponse.json({ error: "The student session is no longer valid." }, { status: 401 });
+
+    const result = await databasePool.query(`
+      SELECT assessment.id AS assessment_id,
+             assessment.name AS assessment_name,
+             assessment.examination,
+             assessment.start_date AS assessment_start_date,
+             assessment.end_date AS assessment_end_date,
+             assessment.sections,
+             candidate.id AS candidate_id,
+             candidate.name AS candidate_name,
+             candidate.candidate_data,
+             submission.answers,
+             submission.questions_snapshot,
+             submission.manual_marks,
+             submission.evaluated_at
+      FROM assessment_candidate_submissions AS submission
+      JOIN assessment ON assessment.id = submission.assessment_id
+      JOIN "Candidate Information" AS candidate
+        ON candidate.id = submission.candidate_id
+       AND candidate.record_type = 'candidate'
+      WHERE submission.candidate_id = $1
+        AND submission.evaluated_at IS NOT NULL
+      ORDER BY submission.evaluated_at DESC, submission.submitted_at DESC, assessment.id DESC
+    `, [candidate.id]);
+
+    return NextResponse.json({ results: result.rows.map((row) => getAssessmentResult(row)) });
+  } catch (error) {
+    console.error("Failed to load student assessment results", error);
+    return NextResponse.json({ error: "Unable to load your results." }, { status: 500 });
   }
 }

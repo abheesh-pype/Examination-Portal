@@ -1,11 +1,14 @@
 import { NextResponse } from "next/server";
 import { databasePool } from "@/lib/db";
 import { getExamCamPermission, setExamCamPermission } from "@/lib/candidate-permissions";
+import { authorizeApiRequest } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const examCamPermissionActive = await getExamCamPermission();
     return NextResponse.json({ exam_cam_permission_active: examCamPermissionActive });
   } catch (error) {
@@ -16,8 +19,10 @@ export async function GET() {
 
 export async function PUT(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json() as { accountUserId?: unknown; examCamPermissionActive?: unknown };
-    const accountUserId = Number(body.accountUserId);
+    const accountUserId = authorization.user?.id ?? 0;
     if (!Number.isInteger(accountUserId) || accountUserId <= 0 || typeof body.examCamPermissionActive !== "boolean") {
       return NextResponse.json({ error: "A valid administrator and permission status are required." }, { status: 400 });
     }

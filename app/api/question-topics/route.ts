@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { databasePool } from "@/lib/db";
+import { authorizeApiRequest } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
@@ -15,8 +16,10 @@ async function ensureQuestionTopicsTable() {
   `);
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     await ensureQuestionTopicsTable();
     const result = await databasePool.query(
       "SELECT id, topic, q_s_category, status, created_at FROM question_topics ORDER BY created_at DESC, id DESC",
@@ -30,6 +33,8 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json() as { topic?: unknown; q_s_category?: unknown };
     const topic = typeof body.topic === "string" ? body.topic.trim() : "";
     const subCategory = typeof body.q_s_category === "string" ? body.q_s_category.trim() : "";
@@ -52,6 +57,8 @@ export async function POST(request: Request) {
 
 export async function PATCH(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json() as { id?: unknown; topic?: unknown; q_s_category?: unknown; status?: unknown };
     const id = Number(body.id);
     if (!Number.isInteger(id)) return NextResponse.json({ error: "A valid id is required" }, { status: 400 });
@@ -87,6 +94,8 @@ export async function PATCH(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json() as { id?: unknown };
     const id = Number(body.id);
     if (!Number.isInteger(id)) return NextResponse.json({ error: "A valid id is required" }, { status: 400 });

@@ -2074,6 +2074,54 @@ function ManualAssessmentForm({ onClose, onSaved, initialAssessment }: { onClose
       difficulty_percentages: Array.from(block.querySelectorAll<HTMLInputElement>("[data-difficulty-field]"))
         .map((input) => ({ level: input.dataset.difficultyField ?? "", percentage: input.value })),
     }));
+    const startDate = String(formData.get("start_date") ?? "").trim();
+    const endDate = String(formData.get("end_date") ?? "").trim();
+    if (startDate && Number.isNaN(new Date(startDate).getTime())) {
+      setError("Enter a valid assessment start date.");
+      setSaving(false);
+      return;
+    }
+    if (endDate && Number.isNaN(new Date(endDate).getTime())) {
+      setError("Enter a valid assessment end date.");
+      setSaving(false);
+      return;
+    }
+    if (startDate && endDate && new Date(endDate) <= new Date(startDate)) {
+      setError("Assessment end date must be later than its start date.");
+      setSaving(false);
+      return;
+    }
+    const totalTime = String(formData.get("total_time") ?? "").trim();
+    const lastLogin = String(formData.get("last_login") ?? "").trim();
+    if ((totalTime && (!Number.isInteger(Number(totalTime)) || Number(totalTime) < 1))
+      || (lastLogin && (!Number.isInteger(Number(lastLogin)) || Number(lastLogin) < 1))) {
+      setError("Duration and last login time must be positive whole numbers.");
+      setSaving(false);
+      return;
+    }
+    for (const [index, section] of sections.entries()) {
+      const questionCount = Number(section.question_count);
+      const correctMark = Number(section.correct_mark);
+      const wrongMark = section.wrong_mark.trim() ? Number(section.wrong_mark) : 0;
+      if (!section.question_type || !Number.isInteger(questionCount) || questionCount < 1
+        || !section.correct_mark.trim() || !Number.isFinite(correctMark) || correctMark < 0
+        || !Number.isFinite(wrongMark) || wrongMark > 0) {
+        setError(`Complete the question type, question count, and valid marks for section ${index + 1}.`);
+        setSaving(false);
+        return;
+      }
+      const percentages = section.difficulty_percentages.filter((item) => item.percentage.trim());
+      if (percentages.length) {
+        const values = percentages.map((item) => Number(item.percentage));
+        if (percentages.length !== section.difficulty_percentages.length
+          || values.some((value) => !Number.isFinite(value) || value < 0 || value > 100)
+          || Math.abs(values.reduce((sum, value) => sum + value, 0) - 100) > 0.0001) {
+          setError(`Difficulty percentages for section ${index + 1} must be filled in and total 100%.`);
+          setSaving(false);
+          return;
+        }
+      }
+    }
 
     try {
       const response = await fetch("/api/assessments", {
@@ -2296,13 +2344,13 @@ function ManualAssessmentForm({ onClose, onSaved, initialAssessment }: { onClose
                 </div>
                 <div className="section-fields">
                   <input data-section-field="name" aria-label={`Section ${index + 1} name`} placeholder="Name" defaultValue={initialAssessment?.sections?.[index]?.name ?? ""} />
-                  <select data-section-field="question-type" aria-label={`Section ${index + 1} question type`} defaultValue={initialAssessment?.sections?.[index]?.question_type ?? ""}>
+                  <select data-section-field="question-type" aria-label={`Section ${index + 1} question type`} defaultValue={initialAssessment?.sections?.[index]?.question_type ?? ""} required>
                     <option value="" disabled>Question Type</option>
                     <option>Objective</option>
                     <option>Subjective</option>
                   </select>
-                  <input data-section-field="question-count" type="number" min="1" aria-label={`Section ${index + 1} question count`} placeholder="Question Count" defaultValue={initialAssessment?.sections?.[index]?.question_count ?? ""} />
-                  <input data-section-field="correct-mark" type="number" min="0" aria-label={`Section ${index + 1} correct mark`} placeholder="Correct Mark" defaultValue={initialAssessment?.sections?.[index]?.correct_mark ?? ""} />
+                  <input data-section-field="question-count" type="number" min="1" step="1" aria-label={`Section ${index + 1} question count`} placeholder="Question Count" defaultValue={initialAssessment?.sections?.[index]?.question_count ?? ""} required />
+                  <input data-section-field="correct-mark" type="number" min="0" step="any" aria-label={`Section ${index + 1} correct mark`} placeholder="Correct Mark" defaultValue={initialAssessment?.sections?.[index]?.correct_mark ?? ""} required />
                   <input data-section-field="wrong-mark" type="number" max="0" step="any" aria-label={`Section ${index + 1} wrong mark`} placeholder="Wrong Mark (0 or negative)" defaultValue={initialAssessment?.sections?.[index]?.wrong_mark ?? ""} />
                 </div>
                 <p className="difficulty-label">% of Questions from Difficulty Levels <span>(total should be 100)</span></p>
@@ -4682,6 +4730,7 @@ function AddUserForm({ roles, user, onClose, onSaved }: { roles: any[]; user?: a
   const [email, setEmail] = useState(user?.email ?? "");
   const [mobile, setMobile] = useState(user?.mobile ?? "");
   const [role, setRole] = useState(user?.role ?? "");
+  const [password, setPassword] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -4693,7 +4742,7 @@ function AddUserForm({ roles, user, onClose, onSaved }: { roles: any[]; user?: a
       const res = await fetch("/api/users", {
         method: user ? "PUT" : "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...(user ? { id: user.id } : {}), name, email, mobile, role }),
+        body: JSON.stringify({ ...(user ? { id: user.id } : { password }), name, email, mobile, role }),
       });
       const result = await res.json() as { error?: string };
       if (!res.ok) throw new Error(result.error ?? `Unable to ${user ? "update" : "create"} user`);
@@ -4725,6 +4774,10 @@ function AddUserForm({ roles, user, onClose, onSaved }: { roles: any[]; user?: a
             <label>Mobile</label>
             <input value={mobile} onChange={(e) => setMobile(e.target.value)} required style={{ width: '100%', padding: '8px' }} />
           </div>
+          {!user && <div className="form-field full-width" style={{ marginBottom: '15px' }}>
+            <label htmlFor="new-user-password">Temporary Password (minimum 12 characters)</label>
+            <input id="new-user-password" type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} minLength={12} required style={{ width: '100%', padding: '8px' }} />
+          </div>}
           <div className="form-field full-width" style={{ marginBottom: '15px' }}>
             <label>Role</label>
             <select value={role} onChange={(e) => setRole(e.target.value)} required style={{ width: '100%', padding: '8px' }}>
@@ -5916,8 +5969,6 @@ function QuestionsPanel({ currentRole }: { currentRole?: any }) {
   );
 }
 
-const AUTH_STORAGE_KEY = "ums_exam_user";
-
 const hasRolePermission = (role: any, sectionId: string, action: "view" | "create" | "edit" | "delete" | "status") => {
   if (!role) return false;
   if (role.administrator_access) return true;
@@ -6122,7 +6173,19 @@ type StudentAssessment = {
   total_questions: number;
   total_marks: number;
   has_submitted: boolean;
+  has_active_attempt: boolean;
+  is_upcoming: boolean;
+  can_start: boolean;
   exam_cam_permission_active: boolean;
+};
+
+type StudentAssessmentResult = {
+  assessment_id: number;
+  assessment_name: string;
+  examination: string;
+  obtained_mark: number;
+  total_mark: number;
+  evaluated_at: string;
 };
 
 function formatStudentExamDate(value: string | null) {
@@ -6154,13 +6217,21 @@ type StudentExamSection = {
 };
 
 type StudentExamPayload = {
+  attempt_id?: number;
   assessment?: { id: number; name: string };
   started_at?: string;
-  duration_seconds?: number | null;
-  end_at?: string | null;
+  deadline_at?: string;
+  server_time?: string;
+  answers?: Record<string, string | string[]>;
   sections?: StudentExamSection[];
   error?: string;
 };
+
+function hasStudentAnswer(answer: string | string[] | undefined) {
+  return Array.isArray(answer)
+    ? answer.some((value) => value.trim().length > 0)
+    : typeof answer === "string" && answer.trim().length > 0;
+}
 
 function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
   student: { id: number; name: string; candidateId: string; dateOfBirth: string };
@@ -6189,8 +6260,9 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
   const [answers, setAnswers] = useState<Record<number, string | string[]>>({});
   const [activeQuestion, setActiveQuestion] = useState(0);
   const [examDeadline, setExamDeadline] = useState<number | null>(null);
-  const [examStartedAt, setExamStartedAt] = useState("");
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
+  const [answerSaveStatus, setAnswerSaveStatus] = useState<"saved" | "saving" | "error">("saved");
+  const [answerSaveMessage, setAnswerSaveMessage] = useState("");
   const [motionWarning, setMotionWarning] = useState("");
   const [switchAlertOpen, setSwitchAlertOpen] = useState(false);
   const [switchAlertMessage, setSwitchAlertMessage] = useState("A change in the browser tab has been identified.");
@@ -6203,7 +6275,9 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
   const [submissionError, setSubmissionError] = useState("");
   const submissionPending = useRef(false);
   const deadlineSubmissionAttempted = useRef(false);
-  const submitExamRef = useRef<() => void>(() => {});
+  const submitExamRef = useRef<(deadlineReached?: boolean) => void>(() => {});
+  const answerSaveQueue = useRef<Promise<void>>(Promise.resolve());
+  const answerSaveTimers = useRef(new Map<number, number>());
   const videoRef = useRef<HTMLVideoElement>(null);
   const focusViolationAt = useRef(0);
   const multipleFaceFrames = useRef(0);
@@ -6237,8 +6311,6 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          candidateId: student.candidateId,
-          dateOfBirth: student.dateOfBirth,
           assessmentId: assessment.id,
           counts,
         }),
@@ -6252,30 +6324,74 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
       console.error("Failed to publish student proctor counts", error);
       setTelemetryStatus(error instanceof Error ? error.message : "Unable to share live counts with your invigilator.");
     }
-  }, [assessment.id, student.candidateId, student.dateOfBirth]);
+  }, [assessment.id]);
 
-  const submitExam = useCallback(async () => {
-    if (submissionPending.current || submittedLocally) return;
-    if (!photo || !idPhoto || !examStartedAt) {
-      setSubmissionError("The check-in photos or exam start time are missing. Contact your administrator before leaving this page.");
-      return;
+  const saveAnswerToServer = useCallback((questionId: number, answer: string | string[]) => {
+    const save = async () => {
+      const response = await fetch("/api/candidates/student-exam", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ assessmentId: assessment.id, questionId, answer }),
+      });
+      const payload = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(payload.error ?? "Unable to save this answer.");
+    };
+    const queuedSave = answerSaveQueue.current.catch(() => {}).then(save);
+    answerSaveQueue.current = queuedSave;
+    return queuedSave;
+  }, [assessment.id]);
+
+  const flushAnswerSaves = useCallback(async (answersToSave: Record<number, string | string[]>) => {
+    for (const timer of answerSaveTimers.current.values()) window.clearTimeout(timer);
+    answerSaveTimers.current.clear();
+    await answerSaveQueue.current.catch(() => {});
+    for (const [questionId, answer] of Object.entries(answersToSave)) {
+      await saveAnswerToServer(Number(questionId), answer);
     }
+    setAnswerSaveStatus("saved");
+    setAnswerSaveMessage("");
+  }, [saveAnswerToServer]);
+
+  function setAnswer(questionId: number, value: string | string[]) {
+    setAnswers((current) => ({ ...current, [questionId]: value }));
+    setAnswerSaveStatus("saving");
+    setAnswerSaveMessage("");
+    const currentTimer = answerSaveTimers.current.get(questionId);
+    if (currentTimer !== undefined) window.clearTimeout(currentTimer);
+    answerSaveTimers.current.set(questionId, window.setTimeout(() => {
+      answerSaveTimers.current.delete(questionId);
+      void saveAnswerToServer(questionId, value)
+        .then(() => {
+          setAnswerSaveStatus("saved");
+          setAnswerSaveMessage("");
+        })
+        .catch((error: unknown) => {
+          setAnswerSaveStatus("error");
+          setAnswerSaveMessage(error instanceof Error ? error.message : "Unable to save your answer. Try again.");
+        });
+    }, 400));
+  }
+
+  useEffect(() => () => {
+    for (const timer of answerSaveTimers.current.values()) window.clearTimeout(timer);
+    answerSaveTimers.current.clear();
+  }, []);
+
+  const submitExam = useCallback(async (deadlineReached = false) => {
+    if (submissionPending.current || submittedLocally) return;
     submissionPending.current = true;
     setIsSubmitting(true);
     setSubmissionError("");
     try {
+      if (!deadlineReached) await flushAnswerSaves(answers);
+      else {
+        for (const timer of answerSaveTimers.current.values()) window.clearTimeout(timer);
+        answerSaveTimers.current.clear();
+      }
       const response = await fetch("/api/candidates/student-exam/submit", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          candidateId: student.candidateId,
-          dateOfBirth: student.dateOfBirth,
-          assessmentId: assessment.id,
-          answers,
-          selfiePhoto: photo,
-          idPhoto,
-          startedAt: examStartedAt,
-        }),
+        body: JSON.stringify({ assessmentId: assessment.id }),
       });
       const payload = await response.json() as { error?: string };
       if (!response.ok) throw new Error(payload.error ?? "Unable to submit this assessment.");
@@ -6289,9 +6405,9 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
       submissionPending.current = false;
       setIsSubmitting(false);
     }
-  }, [answers, assessment.id, examStartedAt, idPhoto, onSubmitted, photo, student.candidateId, student.dateOfBirth, submittedLocally]);
+  }, [answers, assessment.id, flushAnswerSaves, onSubmitted, submittedLocally]);
   useEffect(() => {
-    submitExamRef.current = () => { void submitExam(); };
+    submitExamRef.current = (deadlineReached) => { void submitExam(deadlineReached); };
   }, [submitExam]);
 
   useEffect(() => {
@@ -6304,8 +6420,6 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
       side: "candidate",
       assessmentId: assessment.id,
       candidateRecordId: student.id,
-      candidateId: student.candidateId,
-      dateOfBirth: student.dateOfBirth,
     };
 
     const sendSignal = async (sessionId: string, messageType: "answer" | "ice" | "end", payload: object) => {
@@ -6420,7 +6534,7 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
       window.clearInterval(pollTimer);
       closePeer(true);
     };
-  }, [assessment.exam_cam_permission_active, assessment.id, cameraStream, liveFeedConsent, step, student.candidateId, student.dateOfBirth, student.id]);
+  }, [assessment.exam_cam_permission_active, assessment.id, cameraStream, liveFeedConsent, step, student.id]);
 
   useEffect(() => {
     if (videoRef.current && cameraStream) {
@@ -6752,11 +6866,11 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
   useEffect(() => {
     if (step !== "exam" || examDeadline === null) return;
     const updateRemaining = () => {
-      const remaining = Math.max(0, Math.ceil((examDeadline - Date.now()) / 1000));
+      const remaining = Math.max(0, Math.ceil((examDeadline - performance.now()) / 1000));
       setRemainingSeconds(remaining);
       if (remaining === 0 && !deadlineSubmissionAttempted.current) {
         deadlineSubmissionAttempted.current = true;
-        submitExamRef.current();
+        submitExamRef.current(true);
       }
     };
     updateRemaining();
@@ -6827,27 +6941,35 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
     setStep("loading");
     setCameraError("");
     try {
+      const requestStartedAt = performance.now();
       const response = await fetch("/api/candidates/student-exam", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          candidateId: student.candidateId,
-          dateOfBirth: student.dateOfBirth,
           assessmentId: assessment.id,
+          selfiePhoto: photo,
+          idPhoto: captured,
         }),
       });
       const payload = await response.json() as StudentExamPayload;
       if (!response.ok) throw new Error(payload.error ?? "Unable to load this exam.");
       const sections = payload.sections ?? [];
+      const deadline = payload.deadline_at ? new Date(payload.deadline_at).getTime() : Number.NaN;
+      const serverTime = payload.server_time ? new Date(payload.server_time).getTime() : Number.NaN;
+      const remainingMilliseconds = deadline - serverTime - (performance.now() - requestStartedAt);
+      if (!sections.length || !Number.isFinite(deadline) || !Number.isFinite(serverTime) || remainingMilliseconds <= 0) {
+        throw new Error("The server returned an invalid examination attempt.");
+      }
       setExamSections(sections);
-      setExamStartedAt(payload.started_at ?? new Date().toISOString());
-      const deadlineCandidates = [
-        typeof payload.duration_seconds === "number" && payload.duration_seconds > 0
-          ? Date.now() + payload.duration_seconds * 1000
-          : Number.POSITIVE_INFINITY,
-        payload.end_at ? new Date(payload.end_at).getTime() : Number.POSITIVE_INFINITY,
-      ].filter(Number.isFinite);
-      setExamDeadline(deadlineCandidates.length ? Math.min(...deadlineCandidates) : null);
+      setAnswers(Object.fromEntries(
+        Object.entries(payload.answers ?? {}).map(([questionId, answer]) => [Number(questionId), answer]),
+      ));
+      setActiveQuestion(0);
+      deadlineSubmissionAttempted.current = false;
+      setAnswerSaveStatus("saved");
+      setAnswerSaveMessage("");
+      setExamDeadline(performance.now() + remainingMilliseconds);
+      setRemainingSeconds(Math.ceil(remainingMilliseconds / 1000));
       if (!assessment.exam_cam_permission_active) {
         cameraStream?.getTracks().forEach((track) => track.stop());
         setCameraStream(null);
@@ -6858,10 +6980,6 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
       setCameraError(error instanceof Error ? error.message : "Unable to load this exam.");
       setStep("id-proof");
     }
-  }
-
-  function setAnswer(questionId: number, value: string | string[]) {
-    setAnswers((current) => ({ ...current, [questionId]: value }));
   }
 
   const formattedTime = remainingSeconds === null
@@ -6878,6 +6996,7 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
   };
   const questionOptions = options.length ? options : fallbackOptions[question?.question_type ?? ""] ?? [];
   const selectedAnswer = question ? answers[question.id] : undefined;
+  const answeredCount = questions.filter((item) => hasStudentAnswer(answers[item.id])).length;
 
   return (
     <main className={`student-exam-flow${step === "exam" ? " is-taking-exam" : ""}`}>
@@ -6952,7 +7071,7 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
           <div className="student-exam-finished-icon" aria-hidden="true">✓</div>
           <p className="student-exam-eyebrow">{submittedLocally ? "EXAM COMPLETE" : "ASSESSMENT ENDED"}</p>
           <h1>{submittedLocally ? "Exam complete" : remainingSeconds === 0 ? "Time is up" : "Exam session ended"}</h1>
-          <p>{submittedLocally ? "Your answers and check-in photos were submitted for evaluation." : remainingSeconds === 0 ? "Time expired. Your submission could not be saved; contact your administrator." : "The exam session ended without a successful submission. Contact your administrator."}</p>
+          <p>{submittedLocally ? "Your saved answers and check-in photos were submitted for evaluation." : remainingSeconds === 0 ? "Time expired. Your saved answers are being finalized by the server. Retry submission when your connection is available." : "The exam session ended without a successful submission. Contact your administrator."}</p>
           <button className="student-exam-primary-button" type="button" onClick={onClose}>Return to exam schedule</button>
         </section>
       ) : (
@@ -6978,8 +7097,8 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
               </div>
               <div className="student-exam-progress-summary">
                 <span>Progress</span>
-                <strong>{Object.keys(answers).length} / {questions.length} answered</strong>
-                <div><i style={{ width: `${questions.length ? Object.keys(answers).length / questions.length * 100 : 0}%` }} /></div>
+                <strong>{answeredCount} / {questions.length} answered</strong>
+                <div><i style={{ width: `${questions.length ? answeredCount / questions.length * 100 : 0}%` }} /></div>
               </div>
               {examSections.map((section) => (
                 <div className="student-exam-overview-section" key={section.name}>
@@ -6987,7 +7106,8 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
                   <div className="student-exam-question-grid">
                     {section.questions.map((item) => {
                       const index = questions.findIndex((entry) => entry.id === item.id);
-                      return <button key={item.id} type="button" disabled={index <= activeQuestion} className={`${index === activeQuestion ? "is-current" : ""}${answers[item.id] !== undefined ? " is-answered" : ""}`} onClick={() => setActiveQuestion(index)} aria-label={`Question ${index + 1}${answers[item.id] !== undefined ? ", answered" : ""}${index < activeQuestion ? ", already passed" : ""}`}>{index + 1}</button>;
+                      const answered = hasStudentAnswer(answers[item.id]);
+                      return <button key={item.id} type="button" className={`${index === activeQuestion ? "is-current" : ""}${answered ? " is-answered" : ""}`} onClick={() => setActiveQuestion(index)} aria-label={`Question ${index + 1}${answered ? ", answered" : ""}`}>{index + 1}</button>;
                     })}
                   </div>
                 </div>
@@ -7018,8 +7138,9 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
               )}
             </aside>
             <section className="student-exam-question-area" aria-live="polite">
-              <div className="student-exam-session-banner"><span>●</span> Your answers and check-in photos are saved when you submit the exam.</div>
+              <div className="student-exam-session-banner" role="status"><span>●</span> {answerSaveStatus === "saving" ? "Saving your latest answer…" : answerSaveStatus === "error" ? answerSaveMessage || "An answer could not be saved." : "Your answers are saved to this examination attempt."}</div>
               {motionWarning && <p className="student-exam-motion-warning" role="alert">⚠ {motionWarning}</p>}
+              {answerSaveStatus === "error" && <p className="student-exam-motion-warning" role="alert">{answerSaveMessage}</p>}
               {submissionError && <p className="student-exam-motion-warning" role="alert">{submissionError}</p>}
               {questions.length === 0 ? (
                 <div className="student-exam-no-questions"><h1>No questions are available</h1><p>No active questions match this assessment’s configured sections and classifications.</p><button className="student-exam-secondary-button" type="button" onClick={onClose}>Return to schedule</button></div>
@@ -7067,9 +7188,10 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
                     )}
                   </article>
                   <div className="student-exam-question-controls">
-                    <span>{Object.keys(answers).length} of {questions.length} answered</span>
+                    <span>{answeredCount} of {questions.length} answered</span>
+                    <button className="student-exam-secondary-button" type="button" disabled={activeQuestion === 0} onClick={() => setActiveQuestion((index) => Math.max(0, index - 1))}>← Previous question</button>
                     {activeQuestion === questions.length - 1 || remainingSeconds === 0 || Boolean(submissionError)
-                      ? <button className="student-exam-primary-button" type="button" onClick={() => void submitExam()} disabled={isSubmitting}>{isSubmitting ? "Submitting…" : submissionError ? "Retry submission" : "Submit Exam"}</button>
+                      ? <button className="student-exam-primary-button" type="button" onClick={() => void submitExam(remainingSeconds === 0 || (examDeadline !== null && performance.now() >= examDeadline))} disabled={isSubmitting}>{isSubmitting ? "Submitting…" : submissionError ? "Retry submission" : "Submit Exam"}</button>
                       : <button className="student-exam-primary-button" type="button" onClick={() => setActiveQuestion((index) => Math.min(questions.length - 1, index + 1))}>Next question →</button>}
                   </div>
                 </>
@@ -7096,22 +7218,20 @@ function StudentPortalDashboard({ student, onLogout }: { student: { id: number; 
   const [assessments, setAssessments] = useState<StudentAssessment[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [currentTime, setCurrentTime] = useState(() => Date.now());
+  const [activeTab, setActiveTab] = useState<"dashboard" | "results">("dashboard");
+  const [results, setResults] = useState<StudentAssessmentResult[]>([]);
+  const [resultsLoading, setResultsLoading] = useState(false);
+  const [resultsError, setResultsError] = useState("");
+  const [resultsRetryCount, setResultsRetryCount] = useState(0);
   const [attendNotice, setAttendNotice] = useState("");
   const [activeAssessment, setActiveAssessment] = useState<StudentAssessment | null>(null);
 
   useEffect(() => {
-    const interval = window.setInterval(() => setCurrentTime(Date.now()), 30_000);
-    return () => window.clearInterval(interval);
-  }, []);
-
-  useEffect(() => {
     const controller = new AbortController();
-    setLoading(true);
     fetch("/api/candidates/student-dashboard", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ candidateId: student.candidateId, dateOfBirth: student.dateOfBirth }),
+      body: JSON.stringify({}),
       signal: controller.signal,
     })
       .then(async (response) => {
@@ -7132,7 +7252,32 @@ function StudentPortalDashboard({ student, onLogout }: { student: { id: number; 
       })
       .finally(() => setLoading(false));
     return () => controller.abort();
-  }, [student.candidateId, student.dateOfBirth]);
+  }, []);
+
+  useEffect(() => {
+    if (activeTab !== "results") return;
+    const controller = new AbortController();
+    fetch("/api/assessment-results", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        const payload = await response.json() as { results?: StudentAssessmentResult[]; error?: string };
+        if (!response.ok) throw new Error(payload.error ?? "Unable to load your results.");
+        if (!Array.isArray(payload.results)) throw new Error("Your results could not be read.");
+        setResults(payload.results);
+      })
+      .catch((loadError) => {
+        if (loadError instanceof Error && loadError.name === "AbortError") return;
+        setResultsError(loadError instanceof Error ? loadError.message : "Unable to load your results.");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setResultsLoading(false);
+      });
+    return () => controller.abort();
+  }, [activeTab, resultsRetryCount]);
 
   if (activeAssessment) {
     return <StudentExamFlow
@@ -7190,93 +7335,145 @@ function StudentPortalDashboard({ student, onLogout }: { student: { id: number; 
         </header>
 
         <nav className="student-dashboard-tabbar" aria-label="Current page">
-          <span className="student-dashboard-current-tab">
+          <button
+            className={`student-dashboard-tab-button${activeTab === "dashboard" ? " student-dashboard-current-tab" : ""}`}
+            type="button"
+            aria-current={activeTab === "dashboard" ? "page" : undefined}
+            onClick={() => setActiveTab("dashboard")}
+          >
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1V10Z" /></svg>
             Dashboard
-          </span>
+          </button>
+          <button
+            className={`student-dashboard-tab-button${activeTab === "results" ? " student-dashboard-current-tab" : ""}`}
+            type="button"
+            aria-current={activeTab === "results" ? "page" : undefined}
+            onClick={() => {
+              if (activeTab === "results") return;
+              setResultsError("");
+              setResultsLoading(true);
+              setActiveTab("results");
+            }}
+          >
+            Results
+          </button>
         </nav>
 
         <section className="student-dashboard-content">
-          <p className="student-dashboard-breadcrumb">Dashboard</p>
-          <section className="student-exam-schedule" aria-labelledby="student-exam-schedule-title">
-            <h1 id="student-exam-schedule-title">Exam Schedule</h1>
-            {error && <p className="student-dashboard-error" role="alert">{error}</p>}
-            <div className="student-exam-table-wrap">
-              <table className="student-exam-table">
-                <thead>
-                  <tr>
-                    <th>Examination</th>
-                    <th>Name</th>
-                    <th>Start Date</th>
-                    <th>End Date</th>
-                    <th>Total Questions</th>
-                    <th>Total Marks</th>
-                    <th>Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {loading ? (
-                    <tr><td className="student-exam-empty" colSpan={7}>Loading your exam schedule...</td></tr>
-                  ) : assessments.length === 0 ? (
-                    <tr><td className="student-exam-empty" colSpan={7}>No exams are currently assigned to you.</td></tr>
-                  ) : assessments.map((assessment) => (
-                    <StudentExamScheduleRow
-                      key={assessment.id}
-                      assessment={assessment}
-                      currentTime={currentTime}
-                      onAttend={async () => {
-                        setAttendNotice("");
-                        try {
-                          const response = await fetch("/api/candidate-permissions");
-                          const payload = await response.json() as { exam_cam_permission_active?: boolean; error?: string };
-                          if (!response.ok) throw new Error(payload.error ?? "Unable to check exam camera permission.");
-                          setActiveAssessment({
-                            ...assessment,
-                            exam_cam_permission_active: payload.exam_cam_permission_active ?? true,
-                          });
-                        } catch (loadError) {
-                          console.error("Unable to refresh exam camera permission before exam", loadError);
-                          setAttendNotice(loadError instanceof Error ? loadError.message : "Unable to check exam camera permission.");
-                        }
-                      }}
-                    />
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            {attendNotice && <p className="student-exam-notice" role="status">{attendNotice}</p>}
-            <p className="student-exam-delivery-note">“Attend Exam” is shown only during the permitted login window. Your exam answers and two check-in photos are submitted for authorized evaluation when you finish.</p>
-          </section>
+          <p className="student-dashboard-breadcrumb">{activeTab === "dashboard" ? "Dashboard" : "Results"}</p>
+          {activeTab === "dashboard" ? (
+            <section className="student-exam-schedule" aria-labelledby="student-exam-schedule-title">
+              <h1 id="student-exam-schedule-title">Exam Schedule</h1>
+              {error && <p className="student-dashboard-error" role="alert">{error}</p>}
+              <div className="student-exam-table-wrap">
+                <table className="student-exam-table">
+                  <thead>
+                    <tr>
+                      <th>Examination</th>
+                      <th>Name</th>
+                      <th>Start Date</th>
+                      <th>End Date</th>
+                      <th>Total Questions</th>
+                      <th>Total Marks</th>
+                      <th>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {loading ? (
+                      <tr><td className="student-exam-empty" colSpan={7}>Loading your exam schedule...</td></tr>
+                    ) : assessments.length === 0 ? (
+                      <tr><td className="student-exam-empty" colSpan={7}>No exams are currently assigned to you.</td></tr>
+                    ) : assessments.map((assessment) => (
+                      <StudentExamScheduleRow
+                        key={assessment.id}
+                        assessment={assessment}
+                        onAttend={async () => {
+                          setAttendNotice("");
+                          try {
+                            const response = await fetch("/api/candidate-permissions");
+                            const payload = await response.json() as { exam_cam_permission_active?: boolean; error?: string };
+                            if (!response.ok) throw new Error(payload.error ?? "Unable to check exam camera permission.");
+                            setActiveAssessment({
+                              ...assessment,
+                              exam_cam_permission_active: payload.exam_cam_permission_active ?? true,
+                            });
+                          } catch (loadError) {
+                            console.error("Unable to refresh exam camera permission before exam", loadError);
+                            setAttendNotice(loadError instanceof Error ? loadError.message : "Unable to check exam camera permission.");
+                          }
+                        }}
+                      />
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {attendNotice && <p className="student-exam-notice" role="status">{attendNotice}</p>}
+              <p className="student-exam-delivery-note">“Attend Exam” is shown only during the permitted login window. Your exam answers and two check-in photos are submitted for authorized evaluation when you finish.</p>
+            </section>
+          ) : (
+            <section className="student-exam-schedule" aria-labelledby="student-results-title">
+              <h1 id="student-results-title">Your Results</h1>
+              {resultsError && (
+                <p className="student-dashboard-error" role="alert">
+                  {resultsError}{" "}
+                  <button type="button" onClick={() => {
+                    setResultsError("");
+                    setResultsLoading(true);
+                    setResultsRetryCount((count) => count + 1);
+                  }}>Try again</button>
+                </p>
+              )}
+              <div className="student-exam-table-wrap">
+                <table className="student-exam-table">
+                  <thead>
+                    <tr>
+                      <th>Examination</th>
+                      <th>Assessment</th>
+                      <th>Marks</th>
+                      <th>Evaluated On</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {resultsLoading ? (
+                      <tr><td className="student-exam-empty" colSpan={4}>Loading your results...</td></tr>
+                    ) : resultsError ? (
+                      <tr><td className="student-exam-empty" colSpan={4}>Your results are unavailable.</td></tr>
+                    ) : results.length === 0 ? (
+                      <tr><td className="student-exam-empty" colSpan={4}>No evaluated results have been published yet.</td></tr>
+                    ) : results.map((result) => (
+                      <tr key={`${result.assessment_id}-${result.evaluated_at}`}>
+                        <td>{result.examination || "-"}</td>
+                        <td className="student-exam-name">{result.assessment_name}</td>
+                        <td>{result.obtained_mark} / {result.total_mark}</td>
+                        <td>{formatStudentExamDate(result.evaluated_at)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          )}
         </section>
       </div>
     </main>
   );
 }
 
-function StudentExamScheduleRow({ assessment, currentTime, onAttend }: {
+function StudentExamScheduleRow({ assessment, onAttend }: {
   assessment: StudentAssessment;
-  currentTime: number;
   onAttend: () => void;
 }) {
-  const startTime = assessment.start_date ? new Date(assessment.start_date).getTime() : Number.NaN;
-  const endTime = assessment.end_date ? new Date(assessment.end_date).getTime() : Number.NaN;
   let action: React.ReactNode = "Schedule unavailable";
 
   if (assessment.has_submitted) {
     action = <span className="student-exam-status is-attended">Exam Attended</span>;
-  } else if (Number.isFinite(startTime)) {
-    if (currentTime < startTime) {
-      action = <span className="student-exam-status is-upcoming">Upcoming Examination</span>;
-    } else {
-      const lastLoginDeadline = assessment.last_login !== null && assessment.last_login > 0
-        ? startTime + assessment.last_login * 60_000
-        : Number.POSITIVE_INFINITY;
-      const examEnd = Number.isFinite(endTime) ? endTime : Number.POSITIVE_INFINITY;
-      const accessDeadline = Math.min(lastLoginDeadline, examEnd);
-      action = currentTime < accessDeadline
-        ? <a className="student-exam-attend-link" href={`#attend-exam-${assessment.id}`} onClick={(event) => { event.preventDefault(); onAttend(); }}>Attend Exam</a>
-        : <span className="student-exam-status is-missed">Exam is not attend</span>;
-    }
+  } else if (assessment.has_active_attempt || assessment.can_start) {
+    const actionLabel = assessment.has_active_attempt ? "Resume Exam" : "Attend Exam";
+    action = <a className="student-exam-attend-link" href={`#attend-exam-${assessment.id}`} onClick={(event) => { event.preventDefault(); onAttend(); }}>{actionLabel}</a>;
+  } else if (assessment.is_upcoming) {
+    action = <span className="student-exam-status is-upcoming">Upcoming Examination</span>;
+  } else if (assessment.start_date) {
+    action = <span className="student-exam-status is-missed">Exam is not attend</span>;
   }
 
   return (
@@ -7298,6 +7495,7 @@ export default function Home() {
   const [view, setView] = useState<"grid" | "list">("grid");
   const [activeSection, setActiveSection] = useState("Dashboard");
   const [sidebarExpanded, setSidebarExpanded] = useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [sidebarHovered, setSidebarHovered] = useState(false);
   const [openNavigation, setOpenNavigation] = useState<string | null>(null);
   const navigationRef = useRef<HTMLElement>(null);
@@ -7318,34 +7516,50 @@ export default function Home() {
   const [showModuleSearchResults, setShowModuleSearchResults] = useState(false);
   const [profileMenuAnchor, setProfileMenuAnchor] = useState<"header" | "sidebar" | null>(null);
   const headerProfileRef = useRef<HTMLDivElement>(null);
+  const mobileNavToggleRef = useRef<HTMLButtonElement>(null);
   const sidebarProfileRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    const savedUser = window.localStorage.getItem(AUTH_STORAGE_KEY);
-    if (savedUser) {
-      try {
-        const parsedUser = JSON.parse(savedUser);
-        setSessionUser(parsedUser);
-        setCurrentUser(parsedUser);
-      } catch {
-        window.localStorage.removeItem(AUTH_STORAGE_KEY);
-      }
+  const handleLogout = async () => {
+    try {
+      const response = await fetch("/api/auth/logout", { method: "POST" });
+      const payload = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(payload.error ?? "Unable to log out.");
+      setSessionUser(null);
+      setCurrentUser(null);
+      setCurrentRole(null);
+    } catch (error) {
+      console.error("Unable to end the authenticated session", error);
     }
-    setIsReady(true);
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetch("/api/auth/session")
+      .then(async (response) => {
+        const payload = await response.json() as {
+          user?: Record<string, unknown> & { portalType?: string };
+          student?: Record<string, unknown> & { portalType?: string };
+          error?: string;
+        };
+        if (!response.ok) throw new Error(payload.error ?? "No active session.");
+        const user = payload.user ?? payload.student ?? null;
+        if (!cancelled) {
+          setSessionUser(user);
+          setCurrentUser(user?.portalType === "student" ? null : user);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setSessionUser(null);
+          setCurrentUser(null);
+        }
+      })
+      .finally(() => {
+        window.localStorage.removeItem("ums_exam_user");
+        if (!cancelled) setIsReady(true);
+      });
+    return () => { cancelled = true; };
   }, []);
-
-  useEffect(() => {
-    if (!isReady) {
-      return;
-    }
-
-    if (sessionUser) {
-      window.localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(sessionUser));
-      return;
-    }
-
-    window.localStorage.removeItem(AUTH_STORAGE_KEY);
-  }, [sessionUser, isReady]);
 
   useEffect(() => {
     if (!sessionUser || sessionUser.portalType === "student") {
@@ -7477,20 +7691,35 @@ export default function Home() {
   const assessmentCards = savedAssessments;
 
   useEffect(() => {
-    if (!sidebarExpanded && !openNavigation) {
+    if (!sidebarExpanded && !openNavigation && !mobileNavOpen) {
       return;
     }
 
     const closeNavigationOutside = (event: PointerEvent) => {
+      if (mobileNavToggleRef.current?.contains(event.target as Node)) return;
       if (navigationRef.current && !navigationRef.current.contains(event.target as Node)) {
         setOpenNavigation(null);
         setSidebarExpanded(false);
+        setMobileNavOpen(false);
       }
     };
 
     document.addEventListener("pointerdown", closeNavigationOutside);
     return () => document.removeEventListener("pointerdown", closeNavigationOutside);
-  }, [openNavigation, sidebarExpanded]);
+  }, [mobileNavOpen, openNavigation, sidebarExpanded]);
+
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setMobileNavOpen(false);
+        setSidebarExpanded(false);
+        setOpenNavigation(null);
+      }
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [mobileNavOpen]);
 
   useEffect(() => {
     if (!profileMenuAnchor) return;
@@ -7510,13 +7739,13 @@ export default function Home() {
   }, [profileMenuAnchor]);
 
   useEffect(() => {
-    if (!sidebarExpanded || sidebarHovered) return;
+    if (!sidebarExpanded || sidebarHovered || mobileNavOpen) return;
     const timeout = window.setTimeout(() => {
       setSidebarExpanded(false);
       setOpenNavigation(null);
     }, 2000);
     return () => window.clearTimeout(timeout);
-  }, [sidebarExpanded, sidebarHovered]);
+  }, [mobileNavOpen, sidebarExpanded, sidebarHovered]);
 
   if (!isReady) {
     return <main className="login-shell"><div className="login-card"><p>Loading...</p></div></main>;
@@ -7527,29 +7756,33 @@ export default function Home() {
   }
 
   if (sessionUser.portalType === "student") {
-    return <StudentPortalDashboard student={sessionUser} onLogout={() => setSessionUser(null)} />;
+    return <StudentPortalDashboard student={sessionUser} onLogout={() => { void handleLogout(); }} />;
   }
 
   return (
     <main className={`dashboard-shell${sidebarExpanded ? " sidebar-expanded" : ""}`}>
       <header className="site-header">
         <div className="header-top-row">
+          <button
+            ref={mobileNavToggleRef}
+            className="mobile-navigation-toggle"
+            type="button"
+            aria-label={mobileNavOpen ? "Close navigation menu" : "Open navigation menu"}
+            aria-controls="application-sidebar"
+            aria-expanded={mobileNavOpen}
+            onClick={() => {
+              const nextOpen = !mobileNavOpen;
+              setMobileNavOpen(nextOpen);
+              setSidebarExpanded(nextOpen);
+              if (!nextOpen) setOpenNavigation(null);
+            }}
+          >
+            <span aria-hidden="true">⋮</span>
+          </button>
           <a className="brand" href="#assessments" aria-label="Examination dashboard home">
             <span className="brand-mark">U</span>
             <span className="brand-name">ums<span>.</span>exam</span>
           </a>
-          <button
-            className="header-sidebar-toggle"
-            type="button"
-            aria-label={sidebarExpanded ? "Collapse navigation" : "Expand navigation"}
-            aria-expanded={sidebarExpanded}
-            onClick={() => {
-              setSidebarExpanded((expanded) => !expanded);
-              setOpenNavigation(null);
-            }}
-          >
-            <span aria-hidden="true">☰</span>
-          </button>
           <div className="header-module-search">
             <svg aria-hidden="true" viewBox="0 0 24 24" fill="none">
               <circle cx="10.8" cy="10.8" r="6.8" stroke="currentColor" strokeWidth="1.8" />
@@ -7625,7 +7858,7 @@ export default function Home() {
                   className="profile-menu-logout"
                   type="button"
                   role="menuitem"
-                  onClick={() => { setProfileMenuAnchor(null); setSessionUser(null); }}
+                  onClick={() => { setProfileMenuAnchor(null); void handleLogout(); }}
                 >
                   <span aria-hidden="true">↪</span> Logout
                 </button>
@@ -7638,7 +7871,8 @@ export default function Home() {
 
       <aside
         ref={navigationRef}
-        className={`app-sidebar${sidebarExpanded ? " is-expanded" : ""}`}
+        id="application-sidebar"
+        className={`app-sidebar${sidebarExpanded ? " is-expanded" : ""}${mobileNavOpen ? " is-mobile-open" : ""}`}
         aria-label="Application sidebar"
         onMouseEnter={() => { setSidebarHovered(true); setSidebarExpanded(true); }}
         onMouseLeave={() => {
@@ -7670,7 +7904,7 @@ export default function Home() {
             setOpenNavigation(null);
           }}
         >
-          <span aria-hidden="true">☰</span>
+          <span aria-hidden="true">⋮</span>
           <span className="sidebar-toggle-label">Navigation</span>
         </button>
         <nav className="header-navigation" aria-label="Main navigation">
@@ -7691,6 +7925,7 @@ export default function Home() {
                     setActiveSection(item.label);
                     setOpenNavigation(null);
                     setSidebarExpanded(false);
+                    setMobileNavOpen(false);
                   }
                 }}
               >
@@ -7705,7 +7940,7 @@ export default function Home() {
                     const nestedKey = `${item.label}:${optionLabel}`;
 
                     return typeof option === "string" ? (
-                      <button key={option} type="button" role="menuitem" onClick={() => { setActiveSection(option); setOpenNavigation(null); setSidebarExpanded(false); }}>
+                      <button key={option} type="button" role="menuitem" onClick={() => { setActiveSection(option); setOpenNavigation(null); setSidebarExpanded(false); setMobileNavOpen(false); }}>
                         <span className="dropdown-option-icon" aria-hidden="true">{navigationOptionIcons[option]}</span>
                         {option}
                       </button>
@@ -7760,6 +7995,7 @@ export default function Home() {
                                 }
                                 setOpenNavigation(null);
                                 setSidebarExpanded(false);
+                                setMobileNavOpen(false);
                               }}
                             >
                                 <span className="dropdown-option-icon" aria-hidden="true">{navigationOptionIcons[nestedOption]}</span>
@@ -7802,7 +8038,7 @@ export default function Home() {
                   className="profile-menu-logout"
                   type="button"
                   role="menuitem"
-                  onClick={() => { setProfileMenuAnchor(null); setSessionUser(null); }}
+                  onClick={() => { setProfileMenuAnchor(null); void handleLogout(); }}
                 >
                   <span aria-hidden="true">↪</span> Logout
                 </button>

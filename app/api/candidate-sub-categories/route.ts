@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { databasePool } from "@/lib/db";
+import { authorizeApiRequest } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
@@ -15,8 +16,10 @@ async function ensureCandidateSubCategoryTable() {
   `);
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     await ensureCandidateSubCategoryTable();
     const result = await databasePool.query("SELECT id, candidate_sub_category, category, status, created_at FROM candidate_sub_category ORDER BY created_at DESC, id DESC");
     return NextResponse.json(result.rows);
@@ -28,6 +31,8 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json() as { candidate_sub_category?: unknown; category?: unknown };
     const subCategory = typeof body.candidate_sub_category === "string" ? body.candidate_sub_category.trim() : "";
     const category = typeof body.category === "string" ? body.category.trim() : "";
@@ -44,6 +49,8 @@ export async function POST(request: Request) {
 
 export async function PATCH(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json() as { id?: unknown; candidate_sub_category?: unknown; category?: unknown; status?: unknown };
     const id = Number(body.id);
     if (!Number.isInteger(id)) return NextResponse.json({ error: "A valid id is required" }, { status: 400 });
@@ -76,6 +83,8 @@ export async function PATCH(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json() as { id?: unknown };
     const id = Number(body.id);
     if (!Number.isInteger(id)) return NextResponse.json({ error: "A valid id is required" }, { status: 400 });

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { databasePool } from "@/lib/db";
+import { authorizeApiRequest } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
@@ -77,7 +78,7 @@ async function ensureAssessmentTable() {
 
 const optionalText = (value: unknown) => typeof value === "string" && value.trim() ? value.trim() : null;
 const optionalInteger = (value: unknown) => {
-  if (typeof value !== "string" || !value.trim()) return null;
+  if ((typeof value !== "string" && typeof value !== "number") || !String(value).trim()) return null;
   const parsed = Number(value);
   return Number.isInteger(parsed) ? parsed : null;
 };
@@ -94,8 +95,83 @@ const hasInvalidWrongMark = (sections: unknown) => Array.isArray(sections) && se
   return !Number.isFinite(parsed) || parsed > 0;
 });
 
-export async function GET() {
+function validateAssessmentConfiguration(body: AssessmentPayload) {
+  const errors: string[] = [];
+  const startDateText = optionalText(body.start_date);
+  const endDateText = optionalText(body.end_date);
+  const startDate = optionalDate(startDateText);
+  const endDate = optionalDate(endDateText);
+  const totalTimeText = optionalText(body.total_time);
+  const lastLoginText = optionalText(body.last_login);
+  const totalTime = optionalInteger(body.total_time);
+  const lastLogin = optionalInteger(body.last_login);
+
+  if (startDateText && !startDate) errors.push("Start Date is invalid.");
+  if (endDateText && !endDate) errors.push("End Date is invalid.");
+  if (startDate && endDate && new Date(endDate) <= new Date(startDate)) {
+    errors.push("End Date must be later than Start Date.");
+  }
+  if (totalTimeText && (totalTime === null || totalTime < 1)) {
+    errors.push("Total Time must be a positive whole number.");
+  }
+  if (lastLoginText && (lastLogin === null || lastLogin < 1)) {
+    errors.push("Last Login Time must be a positive whole number.");
+  }
+
+  if (body.sections !== undefined && !Array.isArray(body.sections)) {
+    errors.push("Sections must be an array.");
+  }
+  const sections = Array.isArray(body.sections) ? body.sections : [];
+  const names = new Set<string>();
+  for (const [index, section] of sections.entries()) {
+    if (!section || typeof section !== "object" || Array.isArray(section)) {
+      errors.push(`Section ${index + 1} is invalid.`);
+      continue;
+    }
+    const value = section as Record<string, unknown>;
+    const name = optionalText(value.name);
+    const questionType = optionalText(value.question_type);
+    const count = optionalInteger(value.question_count);
+    const correctMark = Number(value.correct_mark);
+    const wrongMark = value.wrong_mark === undefined || value.wrong_mark === "" ? 0 : Number(value.wrong_mark);
+    if (!questionType) errors.push(`Section ${index + 1} must specify a question type.`);
+    if (count === null || count < 1) errors.push(`Section ${index + 1} question count must be a positive whole number.`);
+    if (value.correct_mark === undefined || value.correct_mark === "" || !Number.isFinite(correctMark) || correctMark < 0) {
+      errors.push(`Section ${index + 1} correct mark must be zero or a positive number.`);
+    }
+    if (!Number.isFinite(wrongMark) || wrongMark > 0) {
+      errors.push(`Section ${index + 1} wrong mark must be zero or a negative number.`);
+    }
+    if (name) {
+      const normalizedName = name.toLocaleLowerCase();
+      if (names.has(normalizedName)) errors.push(`Section name "${name}" is duplicated.`);
+      names.add(normalizedName);
+    }
+    const difficultyPercentages = Array.isArray(value.difficulty_percentages)
+      ? value.difficulty_percentages.filter((entry): entry is Record<string, unknown> =>
+        Boolean(entry && typeof entry === "object" && !Array.isArray(entry)))
+      : [];
+    const populatedPercentages = difficultyPercentages.filter((entry) => String(entry.percentage ?? "").trim() !== "");
+    if (populatedPercentages.length) {
+      const percentages = populatedPercentages.map((entry) => ({
+        level: optionalText(entry.level),
+        value: Number(entry.percentage),
+      }));
+      if (percentages.some((entry) => !entry.level || !Number.isFinite(entry.value) || entry.value < 0 || entry.value > 100)
+        || Math.abs(percentages.reduce((sum, entry) => sum + entry.value, 0) - 100) > 0.0001
+        || new Set(percentages.map((entry) => entry.level?.toLocaleLowerCase())).size !== percentages.length) {
+        errors.push(`Section ${index + 1} difficulty percentages must use unique levels and total 100%.`);
+      }
+    }
+  }
+
+  return errors;
+}
+
+export async function GET(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     await ensureAssessmentTable();
     const result = await databasePool.query(`
       SELECT id, examination, name, start_date, end_date, total_time, last_login,
@@ -140,6 +216,8 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json() as AssessmentPayload;
 
     if (Array.isArray((body as AssessmentPayload & { rows?: unknown }).rows)) {
@@ -184,11 +262,6 @@ export async function POST(request: Request) {
 
         if (!examination) rowErrors.push(`Row ${rowNumber}: Examination is required.`);
         if (!name) rowErrors.push(`Row ${rowNumber}: Name is required.`);
-        if (startDateText && !startDate) rowErrors.push(`Row ${rowNumber}: Start Date is invalid.`);
-        if (endDateText && !endDate) rowErrors.push(`Row ${rowNumber}: End Date is invalid.`);
-        if (totalTimeText && (totalTime === null || totalTime < 1)) rowErrors.push(`Row ${rowNumber}: Total Time must be a positive whole number.`);
-        if (lastLoginText && (lastLogin === null || lastLogin < 1)) rowErrors.push(`Row ${rowNumber}: Last Login Time must be a positive whole number.`);
-
         if (Array.isArray(row.sections)) {
           sections = row.sections;
         } else if (typeof row.sections === "string" && row.sections.trim()) {
@@ -202,6 +275,16 @@ export async function POST(request: Request) {
         }
         if (hasInvalidWrongMark(sections)) {
           rowErrors.push(`Row ${rowNumber}: Wrong Mark must be zero or a negative number.`);
+        }
+        for (const error of validateAssessmentConfiguration({
+          ...row,
+          start_date: startDateText,
+          end_date: endDateText,
+          total_time: totalTimeText,
+          last_login: lastLoginText,
+          sections,
+        })) {
+          rowErrors.push(`Row ${rowNumber}: ${error}`);
         }
 
         preparedRows.push({
@@ -273,6 +356,10 @@ export async function POST(request: Request) {
     }
 
     const sections = Array.isArray(body.sections) ? body.sections : [];
+    const configurationErrors = validateAssessmentConfiguration({ ...body, sections });
+    if (configurationErrors.length) {
+      return NextResponse.json({ error: configurationErrors.join(" ") }, { status: 400 });
+    }
     if (hasInvalidWrongMark(sections)) {
       return NextResponse.json({ error: "Wrong Mark must be zero or a negative number." }, { status: 400 });
     }
@@ -309,6 +396,8 @@ export async function POST(request: Request) {
 
 export async function PATCH(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json() as AssessmentPayload;
     const id = Number(body.id);
     const examination = optionalText(body.examination);
@@ -318,6 +407,10 @@ export async function PATCH(request: Request) {
     }
 
     const sections = Array.isArray(body.sections) ? body.sections : [];
+    const configurationErrors = validateAssessmentConfiguration({ ...body, sections });
+    if (configurationErrors.length) {
+      return NextResponse.json({ error: configurationErrors.join(" ") }, { status: 400 });
+    }
     if (hasInvalidWrongMark(sections)) {
       return NextResponse.json({ error: "Wrong Mark must be zero or a negative number." }, { status: 400 });
     }
@@ -358,6 +451,8 @@ export async function PATCH(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json() as { id?: unknown };
     const id = Number(body.id);
     if (!Number.isInteger(id)) {

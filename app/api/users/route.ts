@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { databasePool } from "@/lib/db";
 import { hashPassword } from "@/lib/password";
+import { authorizeApiRequest } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
@@ -23,8 +24,10 @@ async function ensureUsersTable() {
   await databasePool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS password TEXT`);
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     await ensureUsersTable();
     const result = await databasePool.query(
       `
@@ -42,9 +45,21 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json();
-    const { name, email, mobile, role } = body;
-    const password = await hashPassword("123456");
+    const name = typeof body.name === "string" ? body.name.trim() : "";
+    const email = typeof body.email === "string" ? body.email.trim() : "";
+    const mobile = typeof body.mobile === "string" ? body.mobile.trim() : "";
+    const role = typeof body.role === "string" ? body.role.trim() : "";
+    const plainPassword = typeof body.password === "string" ? body.password : "";
+    if (!name || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !mobile || !role) {
+      return NextResponse.json({ error: "Valid name, email, mobile, and role are required" }, { status: 400 });
+    }
+    if (plainPassword.length < 12) {
+      return NextResponse.json({ error: "A password of at least 12 characters is required" }, { status: 400 });
+    }
+    const password = await hashPassword(plainPassword);
 
     await ensureUsersTable();
     const result = await databasePool.query(
@@ -58,6 +73,9 @@ export async function POST(request: Request) {
 
     return NextResponse.json(result.rows[0], { status: 201 });
   } catch (error) {
+    if (typeof error === "object" && error !== null && "code" in error && error.code === "23505") {
+      return NextResponse.json({ error: "A user with this email already exists" }, { status: 409 });
+    }
     console.error("Failed to create user", error);
     return NextResponse.json({ error: "Unable to create user" }, { status: 500 });
   }
@@ -65,6 +83,8 @@ export async function POST(request: Request) {
 
 export async function PATCH(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json() as { id?: unknown; password?: unknown };
     const userId = Number(body.id);
     const password = typeof body.password === "string" ? body.password : "";
@@ -99,6 +119,8 @@ export async function PATCH(request: Request) {
 
 export async function PUT(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json() as {
       id?: unknown;
       name?: unknown;
@@ -145,6 +167,8 @@ export async function PUT(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json();
     const userId = Number(body?.id);
 

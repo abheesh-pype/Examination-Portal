@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { databasePool } from "@/lib/db";
+import { authorizeApiRequest } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
@@ -14,8 +15,10 @@ async function ensureDifficultyLevelTable() {
   `);
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     await ensureDifficultyLevelTable();
     const result = await databasePool.query('SELECT id, "Difficulty_level", status, created_at FROM "Difficulty_level" ORDER BY created_at DESC, id DESC');
     return NextResponse.json(result.rows);
@@ -27,6 +30,8 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json() as { Difficulty_level?: unknown };
     const difficultyLevel = typeof body.Difficulty_level === "string" ? body.Difficulty_level.trim() : "";
     if (!difficultyLevel) return NextResponse.json({ error: "Difficulty level is required" }, { status: 400 });
@@ -42,6 +47,8 @@ export async function POST(request: Request) {
 
 export async function PATCH(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json() as { id?: unknown; Difficulty_level?: unknown; status?: unknown };
     const id = Number(body.id);
     if (!Number.isInteger(id)) return NextResponse.json({ error: "A valid id is required" }, { status: 400 });
@@ -70,6 +77,8 @@ export async function PATCH(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json() as { id?: unknown };
     const id = Number(body.id);
     if (!Number.isInteger(id)) return NextResponse.json({ error: "A valid id is required" }, { status: 400 });

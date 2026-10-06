@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { databasePool } from "@/lib/db";
+import { authorizeApiRequest } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
@@ -43,6 +44,8 @@ async function ensureAssignmentTables() {
 
 export async function GET(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     await ensureAssignmentTables();
     const assessmentId = Number(new URL(request.url).searchParams.get("assessmentId"));
     if (!Number.isInteger(assessmentId) || assessmentId <= 0) {
@@ -62,6 +65,8 @@ export async function GET(request: Request) {
 
 export async function PUT(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json() as { assessment_id?: unknown; candidate_sub_category_ids?: unknown };
     const assessmentId = Number(body.assessment_id);
     if (!Number.isInteger(assessmentId) || assessmentId <= 0) {

@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { databasePool } from "@/lib/db";
 import { matchesAssessmentQuestionType } from "@/lib/question-types";
+import { authorizeApiRequest } from "@/lib/auth";
+import { ensureExamAttemptTable, finalizeExpiredAttemptsForAssessment } from "@/lib/exam-attempts";
 
 export const runtime = "nodejs";
 
@@ -163,12 +165,16 @@ function matches(value: unknown, selected: unknown) {
 
 async function getEvaluationAccess(assessmentId: number, accountUserId: number) {
   const userResult = await databasePool.query(
-    "SELECT id, role FROM users WHERE id = $1 AND status = TRUE",
+    `SELECT users.id, users.role,
+            COALESCE(roles.administrator_access, FALSE) AS administrator_access
+     FROM users
+     LEFT JOIN roles ON LOWER(BTRIM(roles.role_name)) = LOWER(BTRIM(users.role)) AND roles.status = TRUE
+     WHERE users.id = $1 AND users.status = TRUE`,
     [accountUserId],
   );
   if (!userResult.rowCount) return { error: "An active staff account is required.", status: 403 as const };
   const role = String(userResult.rows[0].role ?? "").trim().toLocaleLowerCase();
-  const isAdmin = role.includes("admin");
+  const isAdmin = role.includes("admin") || Boolean(userResult.rows[0].administrator_access);
   if (!isAdmin && role !== "evaluator") {
     return { error: "Only administrators and evaluators can evaluate assessments.", status: 403 as const };
   }
@@ -388,10 +394,16 @@ function scoreSubmission(
 
 export async function GET(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     await ensureEvaluationTables();
     const params = new URL(request.url).searchParams;
     const assessmentId = Number(params.get("assessmentId"));
-    const accountUserId = Number(params.get("accountUserId"));
+    if (Number.isInteger(assessmentId) && assessmentId > 0) {
+      await ensureExamAttemptTable();
+      await finalizeExpiredAttemptsForAssessment(assessmentId);
+    }
+    const accountUserId = authorization.user?.id ?? 0;
     const candidateId = Number(params.get("candidateId"));
     if (!Number.isInteger(assessmentId) || assessmentId <= 0
       || !Number.isInteger(accountUserId) || accountUserId <= 0) {
@@ -534,6 +546,8 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     await ensureEvaluationTables();
     const body = await request.json() as {
       assessmentId?: unknown;
@@ -542,7 +556,7 @@ export async function POST(request: Request) {
       manualMarks?: unknown;
     };
     const assessmentId = Number(body.assessmentId);
-    const accountUserId = Number(body.accountUserId);
+    const accountUserId = authorization.user?.id ?? 0;
     const candidateId = Number(body.candidateId);
     const manualMarks = body.manualMarks;
     if (!Number.isInteger(assessmentId) || assessmentId <= 0

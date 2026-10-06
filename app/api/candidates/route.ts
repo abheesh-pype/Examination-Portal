@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { randomInt } from "node:crypto";
 import type { PoolClient } from "pg";
 import { databasePool } from "@/lib/db";
+import { authorizeApiRequest } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
@@ -160,6 +161,8 @@ async function backfillCandidateIds(client: PoolClient, candidateIdFieldName: st
 
 export async function POST(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json() as {
       category?: unknown;
       sub_category?: unknown;
@@ -349,10 +352,12 @@ export async function POST(request: Request) {
   }
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   let client: PoolClient | undefined;
   let transactionStarted = false;
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     await ensureCandidateInformationTable();
     client = await databasePool.connect();
     await client.query("BEGIN");

@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { databasePool } from "@/lib/db";
 import { getExamCamPermission } from "@/lib/candidate-permissions";
+import { authorizeApiRequest } from "@/lib/auth";
+import { ensureExamAttemptTable, finalizeExpiredAttemptsForCandidate } from "@/lib/exam-attempts";
 
 export const runtime = "nodejs";
 
@@ -62,43 +64,19 @@ async function ensureStudentScheduleTables() {
   `);
 }
 
-function isCandidateIdFieldName(name: string) {
-  return /^candidate id(?:\s*\([^)]*\))?$/i.test(name.trim());
-}
-
-function getCandidateId(fields: Record<string, unknown>) {
-  const entry = Object.entries(fields).find(([name, value]) =>
-    isCandidateIdFieldName(name) && typeof value === "string" && /^\d{6}$/.test(value.trim()),
-  );
-  return entry ? String(entry[1]).trim() : "";
-}
-
 export async function POST(request: Request) {
   try {
-    const body = await request.json() as { candidateId?: unknown; dateOfBirth?: unknown };
-    const candidateId = typeof body.candidateId === "string" ? body.candidateId.trim() : "";
-    const dateOfBirth = typeof body.dateOfBirth === "string" ? body.dateOfBirth.trim() : "";
-    if (!/^\d{6}$/.test(candidateId) || !/^\d{4}-\d{2}-\d{2}$/.test(dateOfBirth)) {
-      return NextResponse.json({ error: "Valid student credentials are required." }, { status: 401 });
-    }
-
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     await ensureStudentScheduleTables();
+    await ensureExamAttemptTable();
+    await finalizeExpiredAttemptsForCandidate(authorization.candidate?.id ?? 0);
     const candidateResult = await databasePool.query(`
       SELECT id, candidate_data
       FROM "Candidate Information"
-      WHERE record_type = 'candidate' AND status = TRUE
-      ORDER BY id ASC
-    `);
-    const candidate = candidateResult.rows.find((row) => {
-      const data = row.candidate_data as { fields?: Record<string, unknown> } | null;
-      if (!data?.fields || getCandidateId(data.fields) !== candidateId) return false;
-      const dobField = Object.entries(data.fields).find(([name, value]) =>
-        /^(dob|date of birth|birth date)(\s*\([^)]*\))?$/i.test(name.trim())
-        && typeof value === "string"
-        && value.trim(),
-      );
-      return dobField ? String(dobField[1]).slice(0, 10) === dateOfBirth : false;
-    });
+      WHERE id = $1 AND record_type = 'candidate' AND status = TRUE
+    `, [authorization.candidate?.id ?? 0]);
+    const candidate = candidateResult.rows[0];
 
     if (!candidate) {
       return NextResponse.json({ error: "Student credentials could not be verified." }, { status: 401 });
@@ -117,7 +95,20 @@ export async function POST(request: Request) {
       SELECT assessment.id, assessment.examination, assessment.name,
              assessment.start_date, assessment.end_date, assessment.total_time,
              assessment.last_login, assessment.sections,
-             (submission.submitted_at IS NOT NULL) AS has_submitted
+             (submission.submitted_at IS NOT NULL) AS has_submitted,
+             (attempt.status = 'in_progress' AND attempt.deadline_at > NOW()) AS has_active_attempt,
+             (assessment.start_date > NOW()) AS is_upcoming,
+             (
+               assessment.start_date IS NOT NULL
+               AND assessment.start_date <= NOW()
+               AND (assessment.end_date IS NULL OR assessment.end_date > NOW())
+               AND (
+                 assessment.last_login IS NULL
+                 OR assessment.last_login <= 0
+                 OR assessment.start_date + assessment.last_login * INTERVAL '1 minute' > NOW()
+               )
+               AND (assessment.total_time > 0 OR assessment.end_date IS NOT NULL)
+             ) AS can_start
       FROM assessment
       JOIN assessment_candidate_sub_category AS assignment
         ON assignment.assessment_id = assessment.id
@@ -126,6 +117,9 @@ export async function POST(request: Request) {
       LEFT JOIN assessment_candidate_submissions AS submission
         ON submission.assessment_id = assessment.id
        AND submission.candidate_id = $3
+      LEFT JOIN assessment_candidate_attempts AS attempt
+        ON attempt.assessment_id = assessment.id
+       AND attempt.candidate_id = $3
       WHERE assessment.status = TRUE
         AND sub_category.status = TRUE
         AND sub_category.category = $1
@@ -158,6 +152,9 @@ export async function POST(request: Request) {
           total_questions: totalQuestions,
           total_marks: totalMarks,
           has_submitted: Boolean(assessment.has_submitted),
+          has_active_attempt: Boolean(assessment.has_active_attempt),
+          is_upcoming: Boolean(assessment.is_upcoming),
+          can_start: Boolean(assessment.can_start),
         };
       }),
       exam_cam_permission_active: examCamPermissionActive,

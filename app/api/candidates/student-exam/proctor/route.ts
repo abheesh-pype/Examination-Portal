@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { databasePool } from "@/lib/db";
+import { authorizeApiRequest } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
@@ -66,15 +67,6 @@ async function ensureProctorTables() {
   }
 }
 
-function getCandidateId(fields: Record<string, unknown>) {
-  const entry = Object.entries(fields).find(([name, value]) =>
-    /^candidate id(?:\s*\([^)]*\))?$/i.test(name.trim())
-    && typeof value === "string"
-    && /^\d{6}$/.test(value.trim()),
-  );
-  return entry ? String(entry[1]).trim() : "";
-}
-
 function isValidCounts(value: unknown): value is ProctorCounts {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const counts = value as Record<string, unknown>;
@@ -87,39 +79,26 @@ function isValidCounts(value: unknown): value is ProctorCounts {
 
 export async function PUT(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json() as {
-      candidateId?: unknown;
-      dateOfBirth?: unknown;
       assessmentId?: unknown;
       counts?: unknown;
     };
-    const candidateId = typeof body.candidateId === "string" ? body.candidateId.trim() : "";
-    const dateOfBirth = typeof body.dateOfBirth === "string" ? body.dateOfBirth.trim() : "";
     const assessmentId = Number(body.assessmentId);
-    if (!/^\d{6}$/.test(candidateId)
-      || !/^\d{4}-\d{2}-\d{2}$/.test(dateOfBirth)
-      || !Number.isInteger(assessmentId)
+    if (!Number.isInteger(assessmentId)
       || assessmentId <= 0
       || !isValidCounts(body.counts)) {
-      return NextResponse.json({ error: "Valid student credentials, assessment, and monitoring counts are required." }, { status: 400 });
+      return NextResponse.json({ error: "A valid assessment and monitoring counts are required." }, { status: 400 });
     }
 
     await ensureProctorTables();
     const candidateResult = await databasePool.query(`
       SELECT id, candidate_data
       FROM "Candidate Information"
-      WHERE record_type = 'candidate' AND status = TRUE
-    `);
-    const candidate = candidateResult.rows.find((row) => {
-      const data = row.candidate_data as { fields?: Record<string, unknown> } | null;
-      if (!data?.fields || getCandidateId(data.fields) !== candidateId) return false;
-      const dobField = Object.entries(data.fields).find(([name, value]) =>
-        /^(dob|date of birth|birth date)(\s*\([^)]*\))?$/i.test(name.trim())
-        && typeof value === "string"
-        && value.trim(),
-      );
-      return dobField ? String(dobField[1]).slice(0, 10) === dateOfBirth : false;
-    });
+      WHERE id = $1 AND record_type = 'candidate' AND status = TRUE
+    `, [authorization.candidate?.id ?? 0]);
+    const candidate = candidateResult.rows[0];
     if (!candidate) {
       return NextResponse.json({ error: "Student credentials could not be verified." }, { status: 401 });
     }

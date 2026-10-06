@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { databasePool } from "@/lib/db";
+import { authorizeApiRequest } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
@@ -84,9 +85,11 @@ async function ensureInvigilationTables() {
 
 export async function GET(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const params = new URL(request.url).searchParams;
     const assessmentId = Number(params.get("assessmentId"));
-    const accountUserId = Number(params.get("accountUserId") ?? params.get("invigilatorUserId"));
+    const accountUserId = authorization.user?.id ?? 0;
     if (!Number.isInteger(assessmentId) || assessmentId <= 0
       || !Number.isInteger(accountUserId) || accountUserId <= 0) {
       return NextResponse.json({ error: "Valid assessment and account ids are required" }, { status: 400 });
@@ -94,14 +97,18 @@ export async function GET(request: Request) {
 
     await ensureInvigilationTables();
     const userResult = await databasePool.query(
-      "SELECT id, role FROM users WHERE id = $1 AND status = TRUE",
+      `SELECT users.id, users.role,
+              COALESCE(roles.administrator_access, FALSE) AS administrator_access
+       FROM users
+       LEFT JOIN roles ON LOWER(BTRIM(roles.role_name)) = LOWER(BTRIM(users.role)) AND roles.status = TRUE
+       WHERE users.id = $1 AND users.status = TRUE`,
       [accountUserId],
     );
     if (!userResult.rowCount) {
       return NextResponse.json({ error: "An active account is required to view assessment candidates." }, { status: 403 });
     }
     const role = String(userResult.rows[0].role ?? "").trim().toLocaleLowerCase();
-    const isAdmin = role.includes("admin");
+    const isAdmin = role.includes("admin") || Boolean(userResult.rows[0].administrator_access);
     const isInvigilator = role === "invigilator";
     if (!isAdmin && !isInvigilator) {
       return NextResponse.json({ error: "Only administrators and assigned invigilators can view assessment candidates." }, { status: 403 });

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { databasePool } from "@/lib/db";
-import { hashPassword, verifyPassword } from "@/lib/password";
+import { authorizeApiRequest, createSession, setSessionCookie } from "@/lib/auth";
+import { verifyPassword } from "@/lib/password";
 
 export const runtime = "nodejs";
 
@@ -25,6 +26,8 @@ async function ensureUsersTable() {
 
 export async function POST(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json();
     const email = String(body?.email || "").trim();
     const password = String(body?.password || "");
@@ -44,7 +47,7 @@ export async function POST(request: Request) {
     );
 
     const existingUser = userCheck.rows[0] as ({ password: string } & Record<string, unknown>) | undefined;
-    if (existingUser && await verifyPassword(password, existingUser.password)) {
+    if (existingUser?.status === true && await verifyPassword(password, existingUser.password)) {
       const user = {
         id: existingUser.id,
         name: existingUser.name,
@@ -55,42 +58,10 @@ export async function POST(request: Request) {
         verified: existingUser.verified,
         created_on: existingUser.created_on,
       };
-      return NextResponse.json({ user }, { status: 200 });
-    }
-
-    if (!existingUser) {
-      const existingUserCount = await databasePool.query(`SELECT COUNT(*)::int AS count FROM users`);
-      if (existingUserCount.rows[0].count === 0) {
-        const seededPassword = await hashPassword("123456");
-        await databasePool.query(
-          `INSERT INTO users (name, email, password, role, mobile)
-           VALUES ($1, $2, $3, $4, $5)`,
-          ["Administrator", "admin@eduexpoits.in", seededPassword, "Administrator", "9999999999"],
-        );
-
-        const seededUser = await databasePool.query(
-          `SELECT id, name, email, password, role, mobile, status, verified, created_on
-           FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1`,
-          [email],
-        );
-
-        const user = seededUser.rows[0] as ({ password: string } & Record<string, unknown>) | undefined;
-        if (user && await verifyPassword(password, user.password)) {
-          const safeUser = {
-            id: user.id,
-            name: user.name,
-            email: user.email,
-            role: user.role,
-            mobile: user.mobile,
-            status: user.status,
-            verified: user.verified,
-            created_on: user.created_on,
-          };
-          return NextResponse.json({ user: safeUser }, { status: 200 });
-        }
-      }
-
-      return NextResponse.json({ error: "Invalid email or password." }, { status: 401 });
+      const sessionToken = await createSession("user", Number(existingUser.id));
+      const response = NextResponse.json({ user }, { status: 200 });
+      setSessionCookie(response, sessionToken);
+      return response;
     }
 
     return NextResponse.json({ error: "Invalid email or password." }, { status: 401 });

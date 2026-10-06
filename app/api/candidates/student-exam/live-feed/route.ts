@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { databasePool } from "@/lib/db";
+import { authorizeApiRequest } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
@@ -128,31 +129,13 @@ async function ensureLiveFeedTables() {
   liveFeedTablesReady = true;
 }
 
-function getCandidateId(fields: Record<string, unknown>) {
-  const entry = Object.entries(fields).find(([name, value]) =>
-    /^candidate id(?:\s*\([^)]*\))?$/i.test(name.trim())
-    && typeof value === "string"
-    && /^\d{6}$/.test(value.trim()),
-  );
-  return entry ? String(entry[1]).trim() : "";
-}
-
-async function findCandidate(candidateId: string, dateOfBirth: string) {
+async function findCandidate(candidateRecordId: number) {
   const result = await databasePool.query(`
     SELECT id, candidate_data
     FROM "Candidate Information"
-    WHERE record_type = 'candidate' AND status = TRUE
-  `);
-  return result.rows.find((row) => {
-    const data = row.candidate_data as { fields?: Record<string, unknown> } | null;
-    if (!data?.fields || getCandidateId(data.fields) !== candidateId) return false;
-    const dobField = Object.entries(data.fields).find(([name, value]) =>
-      /^(dob|date of birth|birth date)(\s*\([^)]*\))?$/i.test(name.trim())
-      && typeof value === "string"
-      && value.trim(),
-    );
-    return dobField ? String(dobField[1]).slice(0, 10) === dateOfBirth : false;
-  });
+    WHERE id = $1 AND record_type = 'candidate' AND status = TRUE
+  `, [candidateRecordId]);
+  return result.rows[0];
 }
 
 function isValidSignalPayload(messageType: SignalMessageType, value: unknown): value is LiveFeedPayload {
@@ -179,11 +162,15 @@ function isValidSignalPayload(messageType: SignalMessageType, value: unknown): v
 
 export async function POST(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json() as LiveFeedRequest;
     const side = body.side;
     const action = body.action;
     const assessmentId = Number(body.assessmentId);
-    const candidateRecordId = Number(body.candidateRecordId);
+    const candidateRecordId = side === "candidate"
+      ? authorization.candidate?.id ?? 0
+      : Number(body.candidateRecordId);
     const requestedSessionId = typeof body.sessionId === "string" ? body.sessionId : "";
     const isCandidateDiscoveryPoll = side === "candidate" && action === "poll";
 
@@ -191,8 +178,7 @@ export async function POST(request: Request) {
       || (action !== "start" && action !== "poll" && action !== "send")
       || !Number.isInteger(assessmentId)
       || assessmentId <= 0
-      || !Number.isInteger(candidateRecordId)
-      || candidateRecordId <= 0
+      || (side === "staff" && (!Number.isInteger(candidateRecordId) || candidateRecordId <= 0))
       || (!isCandidateDiscoveryPoll && !sessionIdPattern.test(requestedSessionId))
       || (isCandidateDiscoveryPoll && requestedSessionId && !sessionIdPattern.test(requestedSessionId))) {
       return NextResponse.json({ error: "Valid live-feed session details are required." }, { status: 400 });
@@ -208,12 +194,7 @@ export async function POST(request: Request) {
     }
 
     if (side === "candidate") {
-      const candidateId = typeof body.candidateId === "string" ? body.candidateId.trim() : "";
-      const dateOfBirth = typeof body.dateOfBirth === "string" ? body.dateOfBirth.trim() : "";
-      if (!/^\d{6}$/.test(candidateId) || !/^\d{4}-\d{2}-\d{2}$/.test(dateOfBirth)) {
-        return NextResponse.json({ error: "Valid candidate credentials are required." }, { status: 400 });
-      }
-      const candidate = await findCandidate(candidateId, dateOfBirth);
+      const candidate = await findCandidate(authorization.candidate?.id ?? 0);
       if (!candidate || Number(candidate.id) !== candidateRecordId) {
         return NextResponse.json({ error: "Candidate credentials could not be verified." }, { status: 401 });
       }
@@ -239,19 +220,23 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: "Candidate is not assigned to this assessment." }, { status: 403 });
       }
     } else {
-      const viewerUserId = Number(body.viewerUserId);
+      const viewerUserId = authorization.user?.id ?? 0;
       if (!Number.isInteger(viewerUserId) || viewerUserId <= 0) {
         return NextResponse.json({ error: "A valid staff account is required." }, { status: 400 });
       }
       const userResult = await databasePool.query(
-        "SELECT id, role FROM users WHERE id = $1 AND status = TRUE",
+        `SELECT users.id, users.role,
+                COALESCE(roles.administrator_access, FALSE) AS administrator_access
+         FROM users
+         LEFT JOIN roles ON LOWER(BTRIM(roles.role_name)) = LOWER(BTRIM(users.role)) AND roles.status = TRUE
+         WHERE users.id = $1 AND users.status = TRUE`,
         [viewerUserId],
       );
       if (!userResult.rowCount) {
         return NextResponse.json({ error: "An active account is required." }, { status: 403 });
       }
       const role = String(userResult.rows[0].role ?? "").trim().toLocaleLowerCase();
-      const isAdmin = role.includes("admin");
+      const isAdmin = role.includes("admin") || Boolean(userResult.rows[0].administrator_access);
       if (!isAdmin && role !== "invigilator") {
         return NextResponse.json({ error: "Only admins and assigned invigilators can view a live feed." }, { status: 403 });
       }

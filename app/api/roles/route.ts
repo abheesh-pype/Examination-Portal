@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { databasePool } from "@/lib/db";
+import { authorizeApiRequest } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
@@ -17,16 +18,23 @@ async function ensureRolesTable() {
   `);
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     await ensureRolesTable();
-    const result = await databasePool.query(
-      `
+    const result = authorization.user?.isAdmin
+      ? await databasePool.query(`
         SELECT id, role_name, administrator_access, dashboard, permissions, status, created_on
         FROM roles
         ORDER BY id DESC
-      `
-    );
+      `)
+      : await databasePool.query(`
+        SELECT id, role_name, administrator_access, dashboard, permissions, status, created_on
+        FROM roles
+        WHERE LOWER(BTRIM(role_name)) = LOWER(BTRIM($1)) AND status = TRUE
+        ORDER BY id DESC
+      `, [authorization.user?.role ?? ""]);
     return NextResponse.json(result.rows);
   } catch (error) {
     console.error("Failed to fetch roles", error);
@@ -36,6 +44,8 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json();
     const { role_name, administrator_access, dashboard, permissions } = body;
 
@@ -58,6 +68,8 @@ export async function POST(request: Request) {
 
 export async function PUT(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json();
     const { id, role_name, administrator_access, dashboard, permissions } = body;
 

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { databasePool } from "@/lib/db";
+import { authorizeApiRequest } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
@@ -15,8 +16,10 @@ async function ensureQuestionSubCategoryTable() {
   `);
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     await ensureQuestionSubCategoryTable();
     const result = await databasePool.query(
       "SELECT id, q_s_category, category, status, created_at FROM question_sub_category ORDER BY created_at DESC, id DESC",
@@ -30,6 +33,8 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json() as { q_s_category?: unknown; category?: unknown };
     const subCategory = typeof body.q_s_category === "string" ? body.q_s_category.trim() : "";
     const category = typeof body.category === "string" ? body.category.trim() : "";
@@ -52,6 +57,8 @@ export async function POST(request: Request) {
 
 export async function PATCH(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json() as { id?: unknown; status?: unknown; q_s_category?: unknown; category?: unknown };
     const id = Number(body.id);
 
@@ -96,6 +103,8 @@ export async function PATCH(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
     const body = await request.json() as { id?: unknown };
     const id = Number(body.id);
     if (!Number.isInteger(id)) {

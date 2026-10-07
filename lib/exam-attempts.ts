@@ -172,26 +172,7 @@ export function buildAttemptQuestionSet(
         String(row.difficulty_level ?? "").trim().toLocaleLowerCase() === configuredDifficulty.toLocaleLowerCase(),
       )
       : available;
-    if (difficultyQuestions.length < requestedCount) {
-      if (!questionRows.length) {
-        throw new Error(`Section "${name}" has no active questions matching this assessment's category, sub-category, topic, and language filters.`);
-      }
-      if (!sectionTypeQuestions.length) {
-        const sectionType = typeof section.question_type === "string" && section.question_type.trim()
-          ? section.question_type.trim()
-          : "configured";
-        throw new Error(`Section "${name}" requires ${requestedCount} ${sectionType} questions, but no active questions match this section type. Check the question types and assessment filters.`);
-      }
-      if (!available.length) {
-        throw new Error(`Section "${name}" requires ${requestedCount} questions, but all matching questions have already been assigned to earlier sections.`);
-      }
-      const difficultyDescription = configuredDifficulty ? ` at difficulty level "${configuredDifficulty}"` : "";
-      throw new Error(`Section "${name}" requires ${requestedCount} matching questions${difficultyDescription}, but only ${difficultyQuestions.length} are available. Check the assessment filters and that enough active questions are configured.`);
-    }
     const selected = difficultyQuestions.slice(0, requestedCount);
-    if (selected.length !== requestedCount) {
-      throw new Error(`Section "${name}" requires ${requestedCount} questions, but only ${selected.length} matching questions are available.`);
-    }
 
     const sectionQuestions = selected.map((row) => {
       const id = Number(row.id);
@@ -206,7 +187,7 @@ export function buildAttemptQuestionSet(
   return { sections: result, snapshot };
 }
 
-export function validateAttemptAnswer(question: AttemptQuestion, answer: unknown) {
+export function validateAttemptAnswer(question: AttemptQuestion, answer: unknown, requireMinimumWords = false) {
   const multipleChoice = question.question_type.trim().toLocaleLowerCase() === "multiple choice";
   if (multipleChoice ? !Array.isArray(answer) : typeof answer !== "string") {
     return multipleChoice
@@ -229,7 +210,7 @@ export function validateAttemptAnswer(question: AttemptQuestion, answer: unknown
   const minimumWords = Number(question.details.min_words);
   const maximumWords = Number(question.details.max_words);
   const wordCount = text.trim() ? text.trim().split(/\s+/).length : 0;
-  if (text.trim() && Number.isFinite(minimumWords) && minimumWords > 0 && wordCount < minimumWords) {
+  if (requireMinimumWords && text.trim() && Number.isFinite(minimumWords) && minimumWords > 0 && wordCount < minimumWords) {
     return `The answer must contain at least ${minimumWords} words.`;
   }
   if (text.trim() && Number.isFinite(maximumWords) && maximumWords > 0 && wordCount > maximumWords) {
@@ -245,13 +226,14 @@ export async function finalizeAttempt(
   client: PoolClient,
   attempt: AttemptRow,
   status: "submitted" | "expired",
+  answers: Record<string, unknown> = attempt.answers,
 ) {
   const saved = await client.query(
     `UPDATE assessment_candidate_attempts
-     SET status = $2, submitted_at = NOW()
+     SET status = $2, answers = $3::jsonb, submitted_at = NOW()
      WHERE id = $1 AND status = 'in_progress'
      RETURNING submitted_at`,
-    [attempt.id, status],
+    [attempt.id, status, JSON.stringify(answers)],
   );
   if (!saved.rowCount) return null;
   const submission = await client.query(`
@@ -265,7 +247,7 @@ export async function finalizeAttempt(
   `, [
     attempt.assessment_id,
     attempt.candidate_id,
-    JSON.stringify(attempt.answers),
+    JSON.stringify(answers),
     JSON.stringify(attempt.questions_snapshot),
     attempt.selfie_photo,
     attempt.id_photo,

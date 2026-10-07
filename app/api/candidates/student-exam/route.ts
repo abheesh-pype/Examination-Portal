@@ -14,7 +14,7 @@ export const runtime = "nodejs";
 
 const photoPattern = /^data:image\/jpeg;base64,[A-Za-z0-9+/]+={0,2}$/;
 
-async function ensureStudentExamTables() {
+async function createStudentExamTables() {
   await databasePool.query(`
     CREATE TABLE IF NOT EXISTS assessment (
       id SERIAL PRIMARY KEY,
@@ -107,9 +107,16 @@ async function ensureStudentExamTables() {
   await ensureExamAttemptTable();
 }
 
-function matches(value: unknown, selected: unknown) {
-  if (typeof selected !== "string" || !selected.trim()) return true;
-  return typeof value === "string" && value.trim().toLocaleLowerCase() === selected.trim().toLocaleLowerCase();
+let studentExamTablesPromise: Promise<void> | undefined;
+
+function ensureStudentExamTables() {
+  if (!studentExamTablesPromise) {
+    studentExamTablesPromise = createStudentExamTables().catch((error: unknown) => {
+      studentExamTablesPromise = undefined;
+      throw error;
+    });
+  }
+  return studentExamTablesPromise;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -285,20 +292,23 @@ export async function POST(request: Request) {
       }
 
       const questionResult = await client.query(`
-        SELECT id, question_type, question, category, sub_category, topic, language, difficulty_level, details
+        SELECT id, question_type, question, difficulty_level, details
         FROM questions
         WHERE status = TRUE
+          AND ($1::text IS NULL OR BTRIM($1::text) = '' OR LOWER(BTRIM(COALESCE(category, ''))) = LOWER(BTRIM($1::text)))
+          AND ($2::text IS NULL OR BTRIM($2::text) = '' OR LOWER(BTRIM(COALESCE(sub_category, ''))) = LOWER(BTRIM($2::text)))
+          AND ($3::text IS NULL OR BTRIM($3::text) = '' OR LOWER(BTRIM(COALESCE(topic, ''))) = LOWER(BTRIM($3::text)))
+          AND ($4::text IS NULL OR BTRIM($4::text) = '' OR LOWER(BTRIM(COALESCE(language, ''))) = LOWER(BTRIM($4::text)))
         ORDER BY created_at DESC, id DESC
-      `);
-      const matchedQuestions = questionResult.rows.filter((question) =>
-        matches(question.category, assessment.question_category)
-        && matches(question.sub_category, assessment.sub_category)
-        && matches(question.topic, assessment.topic)
-        && matches(question.language, assessment.question_language),
-      );
+      `, [
+        assessment.question_category,
+        assessment.sub_category,
+        assessment.topic,
+        assessment.question_language,
+      ]);
       let questionSet: ReturnType<typeof buildAttemptQuestionSet>;
       try {
-        questionSet = buildAttemptQuestionSet(assessment.sections, matchedQuestions);
+        questionSet = buildAttemptQuestionSet(assessment.sections, questionResult.rows);
       } catch (error) {
         await client.query("ROLLBACK");
         transactionStarted = false;

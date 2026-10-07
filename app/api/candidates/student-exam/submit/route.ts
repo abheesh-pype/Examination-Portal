@@ -5,11 +5,12 @@ import {
   ensureExamAttemptTable,
   finalizeAttempt,
   type AttemptRow,
+  validateAttemptAnswer,
 } from "@/lib/exam-attempts";
 
 export const runtime = "nodejs";
 
-async function ensureSubmissionTables() {
+async function createSubmissionTables() {
   await databasePool.query(`
     CREATE TABLE IF NOT EXISTS assessment (
       id SERIAL PRIMARY KEY,
@@ -70,11 +71,27 @@ async function ensureSubmissionTables() {
   await ensureExamAttemptTable();
 }
 
+let submissionTablesPromise: Promise<void> | undefined;
+
+function ensureSubmissionTables() {
+  if (!submissionTablesPromise) {
+    submissionTablesPromise = createSubmissionTables().catch((error: unknown) => {
+      submissionTablesPromise = undefined;
+      throw error;
+    });
+  }
+  return submissionTablesPromise;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
 export async function POST(request: Request) {
   try {
     const authorization = await authorizeApiRequest(request);
     if (!authorization.ok) return authorization.response;
-    const body = await request.json() as { assessmentId?: unknown };
+    const body = await request.json() as { assessmentId?: unknown; answers?: unknown };
     const assessmentId = Number(body.assessmentId);
     if (!Number.isInteger(assessmentId) || assessmentId <= 0) {
       return NextResponse.json({ error: "A valid assessment is required." }, { status: 400 });
@@ -113,8 +130,39 @@ export async function POST(request: Request) {
         });
       }
 
+      const finalAnswers = { ...attempt.answers };
+      if (body.answers !== undefined) {
+        if (!isRecord(body.answers)) {
+          await client.query("ROLLBACK");
+          transactionStarted = false;
+          return NextResponse.json({ error: "Submitted answers must be an object." }, { status: 400 });
+        }
+        const attemptQuestions = new Map(attempt.questions_snapshot.map((question) => [question.id, question]));
+        for (const [questionIdText, answer] of Object.entries(body.answers)) {
+          const questionId = Number(questionIdText);
+          if (!/^[1-9]\d*$/.test(questionIdText) || !Number.isSafeInteger(questionId)) {
+            await client.query("ROLLBACK");
+            transactionStarted = false;
+            return NextResponse.json({ error: "A submitted answer has an invalid question ID." }, { status: 400 });
+          }
+          const question = attemptQuestions.get(questionId);
+          if (!question) {
+            await client.query("ROLLBACK");
+            transactionStarted = false;
+            return NextResponse.json({ error: "A submitted answer does not belong to this attempt." }, { status: 400 });
+          }
+          const answerError = validateAttemptAnswer(question, answer);
+          if (answerError) {
+            await client.query("ROLLBACK");
+            transactionStarted = false;
+            return NextResponse.json({ error: answerError }, { status: 400 });
+          }
+          finalAnswers[questionIdText] = answer;
+        }
+      }
+
       const status = attempt.deadline_passed ? "expired" : "submitted";
-      const submittedAt = await finalizeAttempt(client, attempt, status);
+      const submittedAt = await finalizeAttempt(client, attempt, status, finalAnswers);
       if (!submittedAt) {
         await client.query("ROLLBACK");
         transactionStarted = false;

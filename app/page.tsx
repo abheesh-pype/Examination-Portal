@@ -211,6 +211,7 @@ function ResultsPanel({ accountUserId }: { accountUserId: number | null }) {
   const [search, setSearch] = useState("");
   const [showDownloadDialog, setShowDownloadDialog] = useState(false);
   const [downloadMode, setDownloadMode] = useState<"all" | "assessment" | "candidate">("all");
+  const [downloadFormat, setDownloadFormat] = useState<"excel" | "pdf">("excel");
   const [downloadAssessmentId, setDownloadAssessmentId] = useState("");
   const [candidateSearch, setCandidateSearch] = useState("");
   const [downloadCandidateId, setDownloadCandidateId] = useState("");
@@ -292,7 +293,7 @@ function ResultsPanel({ accountUserId }: { accountUserId: number | null }) {
     ))
     : downloadAssessments;
 
-  const downloadResults = () => {
+  const downloadResults = async () => {
     let selectedResults = results;
     if (downloadMode === "assessment") {
       selectedResults = results.filter((result) => result.assessment_id === Number(downloadAssessmentId));
@@ -306,33 +307,132 @@ function ResultsPanel({ accountUserId }: { accountUserId: number | null }) {
       return;
     }
 
-    const rows = selectedResults.map((result) => ({
-      "Candidate ID": result.candidate_code || result.candidate_id,
-      "Candidate Name": result.candidate_name,
-      Examination: result.examination || "-",
-      Assessment: result.assessment_name,
-      Marks: `${result.obtained_mark} / ${result.total_mark}`,
-      Result: result.passed === true ? "Passed" : result.passed === false ? "Failed" : "Pass mark not set",
-      "Pass Mark": result.pass_mark ?? "Not set",
-      "Evaluated On": formatStudentExamDate(result.evaluated_at),
-    }));
-    const workbook = createResultsWorkbook(rows);
-    const blob = new Blob([new Uint8Array(workbook).buffer], {
-      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
     const candidate = selectedResults[0];
     const fileBase = downloadMode === "candidate"
       ? `${candidate.candidate_code || candidate.candidate_id}-results`
       : downloadMode === "assessment"
         ? `${candidate.assessment_name}-results`
         : "all-assessment-results";
-    link.href = url;
-    link.download = `${fileBase.replace(/[<>:"/\\|?*\x00-\x1F]/g, "-")}.xlsx`;
-    link.click();
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-    setShowDownloadDialog(false);
+    const safeFileBase = fileBase.replace(/[<>:"/\\|?*\x00-\x1F]/g, "-");
+    try {
+      if (downloadFormat === "pdf") {
+        const [{ default: JsPDF }, { default: autoTable }] = await Promise.all([
+          import("jspdf"),
+          import("jspdf-autotable"),
+        ]);
+        const pdf = new JsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
+        const pageWidth = pdf.internal.pageSize.getWidth();
+        const isSingleCandidate = downloadMode === "candidate";
+        const columns = isSingleCandidate
+          ? ["Examination", "Assessment", "Marks", "Result", "Evaluated On"]
+          : ["Candidate", "Examination", "Assessment", "Marks", "Result", "Evaluated On"];
+        const rows = selectedResults.map((result) => {
+          const values = [
+            result.examination || "-",
+            result.assessment_name,
+            `${result.obtained_mark} / ${result.total_mark}`,
+            [
+              result.passed === true ? "Passed" : result.passed === false ? "Failed" : "Pass mark not set",
+              result.pass_mark !== null ? `Pass mark: ${result.pass_mark}` : "",
+            ].filter(Boolean).join("\n"),
+            formatStudentExamDate(result.evaluated_at),
+          ];
+          return isSingleCandidate
+            ? values
+            : [[result.candidate_name, result.candidate_code || `ID ${result.candidate_id}`].join("\n"), ...values];
+        });
+
+        pdf.setFillColor(35, 43, 77);
+        pdf.rect(0, 0, pageWidth, 36, "F");
+        pdf.setTextColor(255, 255, 255);
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(19);
+        pdf.text(isSingleCandidate ? "Your Results" : "Assessment Results", 14, 17);
+        pdf.setFont("helvetica", "normal");
+        pdf.setFontSize(9);
+        pdf.text(
+          isSingleCandidate
+            ? `${candidate.candidate_name}  |  ${candidate.candidate_code || `ID ${candidate.candidate_id}`}`
+            : `${selectedResults.length} evaluated results`,
+          14,
+          26,
+        );
+        pdf.setTextColor(35, 43, 77);
+        autoTable(pdf, {
+          head: [columns],
+          body: rows,
+          startY: 44,
+          margin: { left: 14, right: 14, bottom: 16 },
+          theme: "grid",
+          styles: {
+            font: "helvetica",
+            fontSize: 9,
+            cellPadding: 4,
+            textColor: [48, 56, 83],
+            lineColor: [226, 230, 239],
+            lineWidth: 0.2,
+            overflow: "linebreak",
+            valign: "middle",
+          },
+          headStyles: {
+            fillColor: [239, 237, 255],
+            textColor: [49, 41, 143],
+            fontStyle: "bold",
+          },
+          alternateRowStyles: { fillColor: [248, 249, 252] },
+          columnStyles: isSingleCandidate
+            ? { 2: { halign: "center" }, 4: { cellWidth: 39 } }
+            : { 3: { halign: "center" }, 5: { cellWidth: 39 } },
+          didParseCell: (data) => {
+            if (data.section !== "body") return;
+            const resultColumn = isSingleCandidate ? 3 : 4;
+            if (data.column.index !== resultColumn) return;
+            const resultText = String(data.cell.raw ?? "");
+            if (resultText.startsWith("Passed")) {
+              data.cell.styles.textColor = [23, 118, 75];
+              data.cell.styles.fontStyle = "bold";
+            } else if (resultText.startsWith("Failed")) {
+              data.cell.styles.textColor = [170, 53, 64];
+              data.cell.styles.fontStyle = "bold";
+            }
+          },
+          didDrawPage: () => {
+            const pageHeight = pdf.internal.pageSize.getHeight();
+            pdf.setFont("helvetica", "normal");
+            pdf.setFontSize(8);
+            pdf.setTextColor(117, 128, 154);
+            pdf.text(`Generated ${formatStudentExamDate(new Date().toISOString())}`, 14, pageHeight - 8);
+            pdf.text(`Page ${pdf.getNumberOfPages()}`, pageWidth - 14, pageHeight - 8, { align: "right" });
+          },
+        });
+        pdf.save(`${safeFileBase}.pdf`);
+      } else {
+        const rows = selectedResults.map((result) => ({
+          "Candidate ID": result.candidate_code || result.candidate_id,
+          "Candidate Name": result.candidate_name,
+          Examination: result.examination || "-",
+          Assessment: result.assessment_name,
+          Marks: `${result.obtained_mark} / ${result.total_mark}`,
+          Result: result.passed === true ? "Passed" : result.passed === false ? "Failed" : "Pass mark not set",
+          "Pass Mark": result.pass_mark ?? "Not set",
+          "Evaluated On": formatStudentExamDate(result.evaluated_at),
+        }));
+        const workbook = createResultsWorkbook(rows);
+        const blob = new Blob([new Uint8Array(workbook).buffer], {
+          type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `${safeFileBase}.xlsx`;
+        link.click();
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+      setShowDownloadDialog(false);
+    } catch (downloadError) {
+      console.error("Failed to download assessment results", downloadError);
+      setError(downloadError instanceof Error ? downloadError.message : "Unable to download assessment results.");
+    }
   };
 
   const resultsError = accountUserId ? error : "Sign in as an administrator to view assessment results.";
@@ -543,6 +643,17 @@ function ResultsPanel({ accountUserId }: { accountUserId: number | null }) {
                 </div>
               )}
             </div>
+            <fieldset className="assessment-results-download-format">
+              <legend>Download format</legend>
+              <label>
+                <input type="radio" name="result-download-format" checked={downloadFormat === "excel"} onChange={() => setDownloadFormat("excel")} />
+                <span><strong>Excel</strong><small>.xlsx spreadsheet</small></span>
+              </label>
+              <label>
+                <input type="radio" name="result-download-format" checked={downloadFormat === "pdf"} onChange={() => setDownloadFormat("pdf")} />
+                <span><strong>PDF</strong><small>Student-style result summary</small></span>
+              </label>
+            </fieldset>
             <footer>
               <button type="button" className="form-cancel-button" onClick={() => setShowDownloadDialog(false)}>Cancel</button>
               <button
@@ -553,7 +664,9 @@ function ResultsPanel({ accountUserId }: { accountUserId: number | null }) {
                   || (downloadMode === "assessment" && !downloadAssessmentId)
                   || (downloadMode === "candidate" && !downloadCandidateId)}
               >
-                {downloadMode === "candidate" && !downloadAssessmentId ? "Download candidate’s all results" : "Download Excel"}
+                {downloadMode === "candidate" && !downloadAssessmentId
+                  ? `Download candidate’s all results (${downloadFormat === "pdf" ? "PDF" : "Excel"})`
+                  : `Download ${downloadFormat === "pdf" ? "PDF" : "Excel"}`}
               </button>
             </footer>
           </section>
@@ -574,7 +687,17 @@ function getAssessmentMaxMark(sections: AssessmentSection[] | undefined) {
   }, 0);
 }
 
-function AssessmentCard({ assessment, currentRole, canEvaluate, isInvigilator, isEvaluator, onDeleted, onEdit, onPreview, onAssignCandidates, onAssignEvaluator, onAssignInvigilator, onInvigilate, onEvaluate }: { assessment: AssessmentCardData; currentRole?: any; canEvaluate?: boolean; isInvigilator?: boolean; isEvaluator?: boolean; onDeleted?: (id: number) => void; onEdit?: (assessment: AssessmentCardData) => void; onPreview?: (assessment: AssessmentCardData) => void; onAssignCandidates?: (assessment: AssessmentCardData) => void; onAssignEvaluator?: (assessment: AssessmentCardData) => void; onAssignInvigilator?: (assessment: AssessmentCardData) => void; onInvigilate?: (assessment: AssessmentCardData) => void; onEvaluate?: (assessment: AssessmentCardData) => void }) {
+function getAssessmentEndTime(assessment: AssessmentCardData) {
+  const configuredEnd = assessment.end_date ? new Date(assessment.end_date).getTime() : Number.NaN;
+  if (Number.isFinite(configuredEnd)) return configuredEnd;
+  const start = assessment.start_date ? new Date(assessment.start_date).getTime() : Number.NaN;
+  const duration = Number(assessment.total_time);
+  return Number.isFinite(start) && Number.isFinite(duration) && duration > 0
+    ? start + duration * 60_000
+    : null;
+}
+
+function AssessmentCard({ assessment, currentRole, canEvaluate, isInvigilator, isEvaluator, currentTime, onDeleted, onEdit, onPreview, onAssignCandidates, onAssignEvaluator, onAssignInvigilator, onInvigilate, onEvaluate }: { assessment: AssessmentCardData; currentRole?: any; canEvaluate?: boolean; isInvigilator?: boolean; isEvaluator?: boolean; currentTime?: number | null; onDeleted?: (id: number) => void; onEdit?: (assessment: AssessmentCardData) => void; onPreview?: (assessment: AssessmentCardData) => void; onAssignCandidates?: (assessment: AssessmentCardData) => void; onAssignEvaluator?: (assessment: AssessmentCardData) => void; onAssignInvigilator?: (assessment: AssessmentCardData) => void; onInvigilate?: (assessment: AssessmentCardData) => void; onEvaluate?: (assessment: AssessmentCardData) => void }) {
   const [showOptions, setShowOptions] = useState(false);
   const [openAssignment, setOpenAssignment] = useState<string | null>(null);
   const cardRef = useRef<HTMLElement>(null);
@@ -602,6 +725,16 @@ function AssessmentCard({ assessment, currentRole, canEvaluate, isInvigilator, i
   ];
   const canEdit = hasRolePermission(currentRole, "Assessments", "edit");
   const canDelete = hasRolePermission(currentRole, "Assessments", "delete");
+  const startTime = assessment.start_date ? new Date(assessment.start_date).getTime() : Number.NaN;
+  const endTime = getAssessmentEndTime(assessment);
+  const hasStarted = currentTime !== null && currentTime !== undefined
+    && Number.isFinite(startTime)
+    && startTime <= currentTime
+    && (endTime === null || endTime > currentTime);
+  const isStartingSoon = currentTime !== null && currentTime !== undefined
+    && Number.isFinite(startTime)
+    && startTime >= currentTime
+    && startTime - currentTime <= 15 * 60_000;
 
   const deleteAssessment = async () => {
     if (!assessment.id || !window.confirm("Delete this assessment?")) return;
@@ -622,18 +755,25 @@ function AssessmentCard({ assessment, currentRole, canEvaluate, isInvigilator, i
           <h2>{assessment.title}</h2>
           <p>{assessment.subtitle}</p>
         </div>
-        <button
-          className="more-button"
-          type="button"
-          aria-expanded={showOptions}
-          aria-haspopup="menu"
-          aria-label={`More options for ${assessment.title}`}
-          onClick={() => { setShowOptions(!showOptions); setOpenAssignment(null); }}
-        >
-          <span />
-          <span />
-          <span />
-        </button>
+        <div className="assessment-card-heading-actions">
+          {(hasStarted || isStartingSoon) && (
+            <span className="assessment-upcoming-indicator">
+              {hasStarted ? "Exam Started" : "Upcoming"}
+            </span>
+          )}
+          <button
+            className="more-button"
+            type="button"
+            aria-expanded={showOptions}
+            aria-haspopup="menu"
+            aria-label={`More options for ${assessment.title}`}
+            onClick={() => { setShowOptions(!showOptions); setOpenAssignment(null); }}
+          >
+            <span />
+            <span />
+            <span />
+          </button>
+        </div>
         {showOptions && (
           <div className="assessment-options-menu" role="menu">
             {isInvigilator ? (
@@ -1196,7 +1336,7 @@ function AssessmentEvaluation({ assessment, accountUserId, onClose }: {
                                 </ul>
                               ) : (
                                 <div className="assessment-evaluation-written-answer">
-                                  <div><span>Candidate answer</span><p>{Array.isArray(response) ? response.join(", ") : response || "No answer provided"}</p></div>
+                                  <div><span>Candidate answer</span><p className="is-handwritten-answer">{Array.isArray(response) ? response.join(", ") : response || "No answer provided"}</p></div>
                                   {!question.is_manual && <div><span>Correct answer</span><p>{Array.isArray(question.correct_answer) ? question.correct_answer.join(", ") : String(question.correct_answer ?? "Not configured")}</p></div>}
                                 </div>
                               )}
@@ -5596,10 +5736,10 @@ function AddQuestionForm({ onClose, onSaved, initialQuestion }: { onClose: () =>
     : []);
   const [selectedOptionAnswer, setSelectedOptionAnswer] = useState(typeof initialDetails.answer === "string" ? initialDetails.answer : "");
   const [longAnswer, setLongAnswer] = useState(typeof initialDetails.answer === "string" && ["Manual Evaluation", "Passage Type"].includes(initialQuestion?.question_type ?? "") ? initialDetails.answer : "");
-  const [minWords, setMinWords] = useState(typeof initialDetails.min_words === "number" ? String(initialDetails.min_words) : "0");
+  const [minWords, setMinWords] = useState(typeof initialDetails.min_words === "number" ? String(initialDetails.min_words) : "40");
   const [maxWords, setMaxWords] = useState(typeof initialDetails.max_words === "number"
     ? String(initialDetails.max_words)
-    : initialQuestion?.question_type === "Passage Type" ? "200" : "2000");
+    : "1000");
   const [answerLimitError, setAnswerLimitError] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
@@ -5665,7 +5805,7 @@ function AddQuestionForm({ onClose, onSaved, initialQuestion }: { onClose: () =>
               setAnswerLimitError("Enter valid word limits, with Max Words greater than or equal to Min Words.");
               return;
             }
-            if (answerWordCount < minLimit) {
+            if (answerWordCount > 0 && answerWordCount < minLimit) {
               setAnswerLimitError(`Answer must contain at least ${minLimit} words.`);
               return;
             }
@@ -5741,8 +5881,8 @@ function AddQuestionForm({ onClose, onSaved, initialQuestion }: { onClose: () =>
               setMultipleAnswers([]);
               setSelectedOptionAnswer("");
               setLongAnswer("");
-              setMinWords("0");
-              setMaxWords(nextType === "Passage Type" ? "200" : "2000");
+              setMinWords("40");
+              setMaxWords("1000");
               setAnswerLimitError("");
             }}>
               <option value="" disabled>Choose</option>
@@ -6596,6 +6736,26 @@ function hasStudentAnswer(answer: string | string[] | undefined) {
     : typeof answer === "string" && answer.trim().length > 0;
 }
 
+function getWrittenAnswerWordCount(answer: string) {
+  return answer.trim() ? answer.trim().split(/\s+/).length : 0;
+}
+
+function validateStudentWrittenAnswer(question: StudentExamQuestion, answer: string | string[], requireMinimumWords = true) {
+  if (!["Manual Evaluation", "Passage Type"].includes(question.question_type) || typeof answer !== "string" || !answer.trim()) {
+    return null;
+  }
+  const minimumWords = Number(question.details.min_words);
+  const maximumWords = Number(question.details.max_words);
+  const wordCount = getWrittenAnswerWordCount(answer);
+  if (requireMinimumWords && Number.isFinite(minimumWords) && minimumWords > 0 && wordCount < minimumWords) {
+    return `Enter at least ${minimumWords} words before continuing.`;
+  }
+  if (Number.isFinite(maximumWords) && maximumWords > 0 && wordCount > maximumWords) {
+    return `Your answer cannot exceed ${maximumWords} words.`;
+  }
+  return null;
+}
+
 function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
   student: { id: number; name: string; candidateId: string; dateOfBirth: string };
   assessment: StudentAssessment;
@@ -6636,9 +6796,10 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
   const [submittedLocally, setSubmittedLocally] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submissionError, setSubmissionError] = useState("");
+  const [answerLimitMessage, setAnswerLimitMessage] = useState("");
   const submissionPending = useRef(false);
   const deadlineSubmissionAttempted = useRef(false);
-  const submitExamRef = useRef<(deadlineReached?: boolean) => void>(() => {});
+  const submitExamRef = useRef<() => void>(() => {});
   const answerSaveQueue = useRef<Promise<void>>(Promise.resolve());
   const answerSaveTimers = useRef(new Map<number, number>());
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -6691,6 +6852,7 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
 
   const saveAnswerToServer = useCallback((questionId: number, answer: string | string[]) => {
     const save = async () => {
+      if (submissionPending.current) return;
       const response = await fetch("/api/candidates/student-exam", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -6704,21 +6866,16 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
     return queuedSave;
   }, [assessment.id]);
 
-  const flushAnswerSaves = useCallback(async (answersToSave: Record<number, string | string[]>) => {
+  const clearAnswerSaveTimers = useCallback(() => {
     for (const timer of answerSaveTimers.current.values()) window.clearTimeout(timer);
     answerSaveTimers.current.clear();
-    await answerSaveQueue.current.catch(() => {});
-    for (const [questionId, answer] of Object.entries(answersToSave)) {
-      await saveAnswerToServer(Number(questionId), answer);
-    }
-    setAnswerSaveStatus("saved");
-    setAnswerSaveMessage("");
-  }, [saveAnswerToServer]);
+  }, []);
 
   function setAnswer(questionId: number, value: string | string[]) {
     setAnswers((current) => ({ ...current, [questionId]: value }));
     setAnswerSaveStatus("saving");
     setAnswerSaveMessage("");
+    setAnswerLimitMessage("");
     const currentTimer = answerSaveTimers.current.get(questionId);
     if (currentTimer !== undefined) window.clearTimeout(currentTimer);
     answerSaveTimers.current.set(questionId, window.setTimeout(() => {
@@ -6735,26 +6892,51 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
     }, 400));
   }
 
+  function advanceToNextQuestion() {
+    if (question) {
+      const message = validateStudentWrittenAnswer(question, answers[question.id] ?? "", false);
+      if (message) {
+        setAnswerLimitMessage(message);
+        return;
+      }
+    }
+    setAnswerLimitMessage("");
+    setActiveQuestion((index) => Math.min(questions.length - 1, index + 1));
+  }
+
   useEffect(() => () => {
     for (const timer of answerSaveTimers.current.values()) window.clearTimeout(timer);
     answerSaveTimers.current.clear();
   }, []);
 
-  const submitExam = useCallback(async (deadlineReached = false) => {
+  const submitExam = useCallback(async () => {
     if (submissionPending.current || submittedLocally) return;
+    const deadlineReached = remainingSeconds === 0
+      || (examDeadline !== null && performance.now() >= examDeadline);
+    if (!deadlineReached) {
+      const invalidAnswer = questions
+        .map((item) => ({ question: item, answer: answers[item.id] }))
+        .find(({ question: item, answer }) =>
+          answer !== undefined && validateStudentWrittenAnswer(item, answer, false),
+        );
+      if (invalidAnswer) {
+        const index = questions.findIndex((item) => item.id === invalidAnswer.question.id);
+        setActiveQuestion(index);
+        setAnswerLimitMessage(validateStudentWrittenAnswer(invalidAnswer.question, invalidAnswer.answer ?? "") ?? "");
+        setSubmissionError("");
+        return;
+      }
+    }
     submissionPending.current = true;
     setIsSubmitting(true);
+    setAnswerLimitMessage("");
     setSubmissionError("");
+    clearAnswerSaveTimers();
     try {
-      if (!deadlineReached) await flushAnswerSaves(answers);
-      else {
-        for (const timer of answerSaveTimers.current.values()) window.clearTimeout(timer);
-        answerSaveTimers.current.clear();
-      }
       const response = await fetch("/api/candidates/student-exam/submit", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ assessmentId: assessment.id }),
+        body: JSON.stringify({ assessmentId: assessment.id, answers }),
       });
       const payload = await response.json() as { error?: string };
       if (!response.ok) throw new Error(payload.error ?? "Unable to submit this assessment.");
@@ -6768,9 +6950,9 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
       submissionPending.current = false;
       setIsSubmitting(false);
     }
-  }, [answers, assessment.id, flushAnswerSaves, onSubmitted, submittedLocally]);
+  }, [answers, assessment.id, clearAnswerSaveTimers, examDeadline, onSubmitted, questions, remainingSeconds, submittedLocally]);
   useEffect(() => {
-    submitExamRef.current = (deadlineReached) => { void submitExam(deadlineReached); };
+    submitExamRef.current = () => { void submitExam(); };
   }, [submitExam]);
 
   useEffect(() => {
@@ -7233,7 +7415,7 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
       setRemainingSeconds(remaining);
       if (remaining === 0 && !deadlineSubmissionAttempted.current) {
         deadlineSubmissionAttempted.current = true;
-        submitExamRef.current(true);
+        submitExamRef.current();
       }
     };
     updateRemaining();
@@ -7359,6 +7541,12 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
   };
   const questionOptions = options.length ? options : fallbackOptions[question?.question_type ?? ""] ?? [];
   const selectedAnswer = question ? answers[question.id] : undefined;
+  const currentWrittenAnswer = typeof selectedAnswer === "string" ? selectedAnswer : "";
+  const currentWordCount = getWrittenAnswerWordCount(currentWrittenAnswer);
+  const minimumWords = Number(question?.details.min_words);
+  const maximumWords = Number(question?.details.max_words);
+  const hasWrittenAnswerLimits = question
+    && ["Manual Evaluation", "Passage Type"].includes(question.question_type);
   const answeredCount = questions.filter((item) => hasStudentAnswer(answers[item.id])).length;
 
   return (
@@ -7505,6 +7693,7 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
               {motionWarning && <p className="student-exam-motion-warning" role="alert">⚠ {motionWarning}</p>}
               {answerSaveStatus === "error" && <p className="student-exam-motion-warning" role="alert">{answerSaveMessage}</p>}
               {submissionError && <p className="student-exam-motion-warning" role="alert">{submissionError}</p>}
+              {answerLimitMessage && <p className="student-exam-word-limit-error" role="alert">{answerLimitMessage}</p>}
               {questions.length === 0 ? (
                 <div className="student-exam-no-questions"><h1>No questions are available</h1><p>No active questions match this assessment’s configured sections and classifications.</p><button className="student-exam-secondary-button" type="button" onClick={onClose}>Return to schedule</button></div>
               ) : question ? (
@@ -7541,12 +7730,32 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
                       </div>
                     ) : (
                       <div className="student-exam-written-answer">
+                        {hasWrittenAnswerLimits && (
+                          <div className={`student-exam-word-count${currentWordCount > maximumWords && maximumWords > 0 ? " is-over-limit" : ""}`} aria-live="polite">
+                            <strong>{currentWordCount}</strong> words
+                            <span>Required: {Number.isFinite(minimumWords) ? minimumWords : 0}–{Number.isFinite(maximumWords) ? maximumWords : 0} words</span>
+                          </div>
+                        )}
                         <label htmlFor={`answer-${question.id}`}>{question.question_type === "Fill in the Blank" ? "Your answer" : "Write your response"}</label>
                         {question.question_type === "Fill in the Blank" ? (
                           <input id={`answer-${question.id}`} value={typeof selectedAnswer === "string" ? selectedAnswer : ""} onChange={(event) => setAnswer(question.id, event.target.value)} />
                         ) : (
-                          <textarea id={`answer-${question.id}`} value={typeof selectedAnswer === "string" ? selectedAnswer : ""} onChange={(event) => setAnswer(question.id, event.target.value)} rows={7} />
+                          <textarea
+                            id={`answer-${question.id}`}
+                            value={currentWrittenAnswer}
+                            onChange={(event) => {
+                              const nextValue = event.target.value;
+                              const wordCount = getWrittenAnswerWordCount(nextValue);
+                              if (hasWrittenAnswerLimits && Number.isFinite(maximumWords) && maximumWords > 0 && wordCount > maximumWords) {
+                                setAnswerLimitMessage(`Your answer cannot exceed ${maximumWords} words.`);
+                                return;
+                              }
+                              setAnswer(question.id, nextValue);
+                            }}
+                            rows={7}
+                          />
                         )}
+                        {answerLimitMessage && <span className="student-exam-word-limit-inline" role="status">{answerLimitMessage}</span>}
                       </div>
                     )}
                   </article>
@@ -7554,8 +7763,8 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
                     <span>{answeredCount} of {questions.length} answered</span>
                     <button className="student-exam-secondary-button" type="button" disabled={activeQuestion === 0} onClick={() => setActiveQuestion((index) => Math.max(0, index - 1))}>← Previous question</button>
                     {activeQuestion === questions.length - 1 || remainingSeconds === 0 || Boolean(submissionError)
-                      ? <button className="student-exam-primary-button" type="button" onClick={() => void submitExam(remainingSeconds === 0 || (examDeadline !== null && performance.now() >= examDeadline))} disabled={isSubmitting}>{isSubmitting ? "Submitting…" : submissionError ? "Retry submission" : "Submit Exam"}</button>
-                      : <button className="student-exam-primary-button" type="button" onClick={() => setActiveQuestion((index) => Math.min(questions.length - 1, index + 1))}>Next question →</button>}
+                      ? <button className="student-exam-primary-button" type="button" onClick={() => void submitExam()} disabled={isSubmitting}>{isSubmitting ? "Submitting…" : submissionError ? "Retry submission" : "Submit Exam"}</button>
+                      : <button className="student-exam-primary-button" type="button" onClick={advanceToNextQuestion}>Next question →</button>}
                   </div>
                 </>
               ) : null}
@@ -7882,6 +8091,8 @@ export default function Home() {
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [currentRole, setCurrentRole] = useState<any>(null);
   const [savedAssessments, setSavedAssessments] = useState<AssessmentCardData[]>([]);
+  const [assessmentClock, setAssessmentClock] = useState<number | null>(null);
+  const [assessmentFilter, setAssessmentFilter] = useState<"all" | "started" | "upcoming" | "balance" | "previous">("started");
   const [moduleSearch, setModuleSearch] = useState("");
   const [showModuleSearchResults, setShowModuleSearchResults] = useState(false);
   const [profileMenuAnchor, setProfileMenuAnchor] = useState<"header" | "sidebar" | null>(null);
@@ -8061,6 +8272,85 @@ export default function Home() {
     ).slice(0, 6)
     : [];
   const assessmentCards = savedAssessments;
+  const startedAssessments = assessmentClock === null ? [] : assessmentCards
+    .filter((assessment) => {
+      const startTime = assessment.start_date ? new Date(assessment.start_date).getTime() : Number.NaN;
+      const endTime = getAssessmentEndTime(assessment);
+      return Number.isFinite(startTime)
+        && startTime <= assessmentClock
+        && (endTime === null || endTime > assessmentClock);
+    })
+    .sort((first, second) => (getAssessmentEndTime(first) ?? Number.POSITIVE_INFINITY)
+      - (getAssessmentEndTime(second) ?? Number.POSITIVE_INFINITY));
+  const upcomingAssessments = assessmentClock === null ? [] : assessmentCards
+    .filter((assessment) => {
+      const startTime = assessment.start_date ? new Date(assessment.start_date).getTime() : Number.NaN;
+      const endTime = getAssessmentEndTime(assessment);
+      return Number.isFinite(startTime)
+        && startTime >= assessmentClock
+        && startTime - assessmentClock <= 15 * 60_000
+        && (endTime === null || endTime > assessmentClock);
+    })
+    .sort((first, second) => new Date(first.start_date ?? "").getTime()
+      - new Date(second.start_date ?? "").getTime());
+  const previousAssessments = assessmentClock === null ? [] : assessmentCards
+    .filter((assessment) => {
+      const endTime = getAssessmentEndTime(assessment);
+      return endTime !== null && endTime <= assessmentClock;
+    })
+    .sort((first, second) => (getAssessmentEndTime(second) ?? 0)
+      - (getAssessmentEndTime(first) ?? 0));
+  const balanceAssessments = assessmentClock === null ? [] : assessmentCards
+    .filter((assessment) => !startedAssessments.includes(assessment)
+      && !upcomingAssessments.includes(assessment)
+      && !previousAssessments.includes(assessment))
+    .sort((first, second) => {
+      const firstStart = first.start_date ? new Date(first.start_date).getTime() : Number.POSITIVE_INFINITY;
+      const secondStart = second.start_date ? new Date(second.start_date).getTime() : Number.POSITIVE_INFINITY;
+      return firstStart - secondStart;
+    });
+  const assessmentGroups = {
+    all: {
+      label: "All",
+      assessments: [
+        ...startedAssessments,
+        ...upcomingAssessments,
+        ...balanceAssessments,
+        ...previousAssessments,
+      ],
+    },
+    started: { label: "Started Examinations", assessments: startedAssessments },
+    upcoming: { label: "Upcoming Examinations", assessments: upcomingAssessments },
+    balance: { label: "Balance Examinations", assessments: balanceAssessments },
+    previous: { label: "Previous Examinations", assessments: previousAssessments },
+  };
+  const selectedAssessmentGroup = assessmentGroups[assessmentFilter];
+  const renderAssessmentCards = (assessments: AssessmentCardData[]) => assessments.map((assessment) => (
+    <AssessmentCard
+      assessment={assessment}
+      currentRole={currentRole}
+      canEvaluate={/admin|evaluator/i.test(String(currentUser?.role ?? ""))}
+      isInvigilator={String(currentUser?.role ?? "").trim().toLocaleLowerCase() === "invigilator"}
+      isEvaluator={/evaluator/i.test(String(currentUser?.role ?? ""))}
+      currentTime={assessmentClock}
+      key={assessment.id ?? assessment.title}
+      onDeleted={(id) => setSavedAssessments((current) => current.filter((item) => item.id !== id))}
+      onEdit={(selectedAssessment) => { setEditingAssessment(selectedAssessment); setShowManualForm(true); }}
+      onPreview={setPreviewAssessment}
+      onAssignCandidates={setCandidateAssignmentAssessment}
+      onAssignEvaluator={setEvaluatorAssignmentAssessment}
+      onAssignInvigilator={setInvigilatorAssignmentAssessment}
+      onInvigilate={setInvigilatingAssessment}
+      onEvaluate={setEvaluatingAssessment}
+    />
+  ));
+
+  useEffect(() => {
+    const updateClock = () => setAssessmentClock(Date.now());
+    updateClock();
+    const interval = window.setInterval(updateClock, 15_000);
+    return () => window.clearInterval(interval);
+  }, []);
 
   useEffect(() => {
     if (!sidebarExpanded && !openNavigation && !mobileNavOpen) {
@@ -8442,55 +8732,125 @@ export default function Home() {
           </div>
         </div>
 
-        <div className={`assessment-grid${view === "list" ? " list-view" : ""}`}>
-          {hasRolePermission(currentRole, "Assessments", "create") && <div className="create-assessment-card">
-            <span className="assessment-card-icon create-card-icon" aria-hidden="true">
-              <span className="icon-page" />
-              <span className="icon-plus">+</span>
-            </span>
-            <span className="create-card-copy">
+        <div className="assessment-filter-bar" role="group" aria-label="Filter assessments">
+          {(Object.entries(assessmentGroups) as Array<[keyof typeof assessmentGroups, typeof assessmentGroups[keyof typeof assessmentGroups]]>)
+            .map(([key, group]) => (
               <button
-                aria-expanded={showCreateOptions}
-                aria-haspopup="menu"
-                className="create-assessment-button"
+                className={`assessment-filter-button${assessmentFilter === key ? " is-active" : ""}`}
                 type="button"
-                onClick={() => setShowCreateOptions(!showCreateOptions)}
+                aria-pressed={assessmentFilter === key}
+                key={key}
+                onClick={() => setAssessmentFilter(key)}
               >
-                <span aria-hidden="true">+</span> Add assessment
+                {group.label}
+                <span>{group.assessments.length}</span>
               </button>
-              {showCreateOptions && (
-                <div className="create-options-menu" role="menu" aria-label="Create assessment options">
-                  <button type="button" role="menuitem" onClick={() => { setEditingAssessment(null); setShowManualForm(true); setShowCreateOptions(false); }}>
-                    <span aria-hidden="true">✎</span>
-                    Add manually
-                  </button>
-                  <button type="button" role="menuitem" onClick={() => { setShowBulkUpload(true); setShowCreateOptions(false); }}>
-                    <span aria-hidden="true">↑</span> Upload bulk
-                  </button>
-                </div>
-              )}
-              <span>Add Assessment, if it does not exist</span>
-            </span>
-          </div>}
-          {assessmentCards.map((assessment) => (
-            <AssessmentCard
-              assessment={assessment}
-              currentRole={currentRole}
-              canEvaluate={/admin|evaluator/i.test(String(currentUser?.role ?? ""))}
-              isInvigilator={String(currentUser?.role ?? "").trim().toLocaleLowerCase() === "invigilator"}
-              isEvaluator={/evaluator/i.test(String(currentUser?.role ?? ""))}
-              key={assessment.id ?? assessment.title}
-              onDeleted={(id) => setSavedAssessments((current) => current.filter((item) => item.id !== id))}
-              onEdit={(selectedAssessment) => { setEditingAssessment(selectedAssessment); setShowManualForm(true); }}
-              onPreview={setPreviewAssessment}
-              onAssignCandidates={setCandidateAssignmentAssessment}
-              onAssignEvaluator={setEvaluatorAssignmentAssessment}
-              onAssignInvigilator={setInvigilatorAssignmentAssessment}
-              onInvigilate={setInvigilatingAssessment}
-              onEvaluate={setEvaluatingAssessment}
-            />
-          ))}
+            ))}
         </div>
+
+        {assessmentFilter === "all" ? (
+          <>
+            <section className="assessment-group" aria-labelledby="all-live-assessments-title">
+              <div className="assessment-group-heading">
+                <h2 id="all-live-assessments-title">Live Examination</h2>
+                <span>{startedAssessments.length + upcomingAssessments.length + balanceAssessments.length}</span>
+              </div>
+              <div className={`assessment-grid${view === "list" ? " list-view" : ""}`}>
+                {hasRolePermission(currentRole, "Assessments", "create") && <div className="create-assessment-card">
+                  <span className="assessment-card-icon create-card-icon" aria-hidden="true">
+                    <span className="icon-page" />
+                    <span className="icon-plus">+</span>
+                  </span>
+                  <span className="create-card-copy">
+                    <button
+                      aria-expanded={showCreateOptions}
+                      aria-haspopup="menu"
+                      className="create-assessment-button"
+                      type="button"
+                      onClick={() => setShowCreateOptions(!showCreateOptions)}
+                    >
+                      <span aria-hidden="true">+</span> Add assessment
+                    </button>
+                    {showCreateOptions && (
+                      <div className="create-options-menu" role="menu" aria-label="Create assessment options">
+                        <button type="button" role="menuitem" onClick={() => { setEditingAssessment(null); setShowManualForm(true); setShowCreateOptions(false); }}>
+                          <span aria-hidden="true">✎</span>
+                          Add manually
+                        </button>
+                        <button type="button" role="menuitem" onClick={() => { setShowBulkUpload(true); setShowCreateOptions(false); }}>
+                          <span aria-hidden="true">↑</span> Upload bulk
+                        </button>
+                      </div>
+                    )}
+                    <span>Add Assessment, if it does not exist</span>
+                  </span>
+                </div>}
+                {renderAssessmentCards([
+                  ...startedAssessments,
+                  ...upcomingAssessments,
+                  ...balanceAssessments,
+                ])}
+                {!startedAssessments.length && !upcomingAssessments.length && !balanceAssessments.length && (
+                  <p className="assessment-group-empty">No live examinations.</p>
+                )}
+              </div>
+            </section>
+            <section className="assessment-group" aria-labelledby="all-previous-assessments-title">
+              <div className="assessment-group-heading">
+                <h2 id="all-previous-assessments-title">Previous Examination</h2>
+                <span>{previousAssessments.length}</span>
+              </div>
+              {previousAssessments.length ? (
+                <div className={`assessment-grid${view === "list" ? " list-view" : ""}`}>
+                  {renderAssessmentCards(previousAssessments)}
+                </div>
+              ) : (
+                <p className="assessment-group-empty">No previous examinations.</p>
+              )}
+            </section>
+          </>
+        ) : (
+          <section className="assessment-group" aria-labelledby="selected-assessment-group-title">
+            <div className="assessment-group-heading">
+              <h2 id="selected-assessment-group-title">{selectedAssessmentGroup.label}</h2>
+            </div>
+            <div className={`assessment-grid${view === "list" ? " list-view" : ""}`}>
+              {hasRolePermission(currentRole, "Assessments", "create") && <div className="create-assessment-card">
+                <span className="assessment-card-icon create-card-icon" aria-hidden="true">
+                  <span className="icon-page" />
+                  <span className="icon-plus">+</span>
+                </span>
+                <span className="create-card-copy">
+                  <button
+                    aria-expanded={showCreateOptions}
+                    aria-haspopup="menu"
+                    className="create-assessment-button"
+                    type="button"
+                    onClick={() => setShowCreateOptions(!showCreateOptions)}
+                  >
+                    <span aria-hidden="true">+</span> Add assessment
+                  </button>
+                  {showCreateOptions && (
+                    <div className="create-options-menu" role="menu" aria-label="Create assessment options">
+                      <button type="button" role="menuitem" onClick={() => { setEditingAssessment(null); setShowManualForm(true); setShowCreateOptions(false); }}>
+                        <span aria-hidden="true">✎</span>
+                        Add manually
+                      </button>
+                      <button type="button" role="menuitem" onClick={() => { setShowBulkUpload(true); setShowCreateOptions(false); }}>
+                        <span aria-hidden="true">↑</span> Upload bulk
+                      </button>
+                    </div>
+                  )}
+                  <span>Add Assessment, if it does not exist</span>
+                </span>
+              </div>}
+              {renderAssessmentCards(selectedAssessmentGroup.assessments)}
+              {!selectedAssessmentGroup.assessments.length && !hasRolePermission(currentRole, "Assessments", "create") && (
+                <p className="assessment-group-empty">No {selectedAssessmentGroup.label.toLocaleLowerCase()} found.</p>
+              )}
+            </div>
+          </section>
+        )}
         </section> : activeSection === "Users" ? <UsersPanel currentRole={currentRole} /> : <SectionPlaceholder title={activeSection} />}
       </div>
       {previewAssessment && <AssessmentPreview assessment={previewAssessment} onClose={() => setPreviewAssessment(null)} />}

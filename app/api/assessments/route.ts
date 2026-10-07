@@ -12,6 +12,7 @@ type AssessmentPayload = {
   end_date?: unknown;
   total_time?: unknown;
   last_login?: unknown;
+  pass_mark?: unknown;
   question_category?: unknown;
   sub_category?: unknown;
   topic?: unknown;
@@ -38,6 +39,18 @@ async function ensureAssessmentTable() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+  await databasePool.query("ALTER TABLE assessment ADD COLUMN IF NOT EXISTS start_date TIMESTAMPTZ");
+  await databasePool.query("ALTER TABLE assessment ADD COLUMN IF NOT EXISTS end_date TIMESTAMPTZ");
+  await databasePool.query("ALTER TABLE assessment ADD COLUMN IF NOT EXISTS total_time INTEGER");
+  await databasePool.query("ALTER TABLE assessment ADD COLUMN IF NOT EXISTS last_login INTEGER");
+  await databasePool.query("ALTER TABLE assessment ADD COLUMN IF NOT EXISTS question_category TEXT");
+  await databasePool.query("ALTER TABLE assessment ADD COLUMN IF NOT EXISTS sub_category TEXT");
+  await databasePool.query("ALTER TABLE assessment ADD COLUMN IF NOT EXISTS topic TEXT");
+  await databasePool.query("ALTER TABLE assessment ADD COLUMN IF NOT EXISTS question_language TEXT");
+  await databasePool.query("ALTER TABLE assessment ADD COLUMN IF NOT EXISTS sections JSONB NOT NULL DEFAULT '[]'::jsonb");
+  await databasePool.query("ALTER TABLE assessment ADD COLUMN IF NOT EXISTS status BOOLEAN NOT NULL DEFAULT TRUE");
+  await databasePool.query("ALTER TABLE assessment ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()");
+  await databasePool.query("ALTER TABLE assessment ADD COLUMN IF NOT EXISTS pass_mark NUMERIC");
   await databasePool.query(`
     CREATE TABLE IF NOT EXISTS "Candidate Information" (
       id SERIAL PRIMARY KEY,
@@ -82,11 +95,30 @@ const optionalInteger = (value: unknown) => {
   const parsed = Number(value);
   return Number.isInteger(parsed) ? parsed : null;
 };
+const optionalMark = (value: unknown) => {
+  if (value === undefined || value === null || (typeof value === "string" && !value.trim())) return null;
+  if (typeof value !== "string" && typeof value !== "number") return Number.NaN;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
+};
 const optionalDate = (value: unknown) => {
   if (typeof value !== "string" || !value.trim()) return null;
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 };
+function getTotalMark(sections: unknown) {
+  if (!Array.isArray(sections)) return 0;
+  return sections.reduce((total, section) => {
+    if (!section || typeof section !== "object" || Array.isArray(section)) return total;
+    const value = section as Record<string, unknown>;
+    const questionCount = Number(value.question_count);
+    const correctMark = Number(value.correct_mark);
+    return Number.isFinite(questionCount) && questionCount > 0
+      && Number.isFinite(correctMark) && correctMark >= 0
+      ? total + questionCount * correctMark
+      : total;
+  }, 0);
+}
 const hasInvalidWrongMark = (sections: unknown) => Array.isArray(sections) && sections.some((section) => {
   if (!section || typeof section !== "object" || Array.isArray(section)) return false;
   const wrongMark = (section as { wrong_mark?: unknown }).wrong_mark;
@@ -103,6 +135,7 @@ function validateAssessmentConfiguration(body: AssessmentPayload) {
   const endDate = optionalDate(endDateText);
   const totalTimeText = optionalText(body.total_time);
   const lastLoginText = optionalText(body.last_login);
+  const passMark = optionalMark(body.pass_mark);
   const totalTime = optionalInteger(body.total_time);
   const lastLogin = optionalInteger(body.last_login);
 
@@ -116,6 +149,11 @@ function validateAssessmentConfiguration(body: AssessmentPayload) {
   }
   if (lastLoginText && (lastLogin === null || lastLogin < 1)) {
     errors.push("Last Login Time must be a positive whole number.");
+  }
+  if (Number.isNaN(passMark) || (passMark !== null && passMark < 0)) {
+    errors.push("Pass Mark must be zero or a positive number.");
+  } else if (passMark !== null && passMark > getTotalMark(body.sections)) {
+    errors.push("Pass Mark cannot be greater than Total Mark.");
   }
 
   if (body.sections !== undefined && !Array.isArray(body.sections)) {
@@ -147,21 +185,9 @@ function validateAssessmentConfiguration(body: AssessmentPayload) {
       if (names.has(normalizedName)) errors.push(`Section name "${name}" is duplicated.`);
       names.add(normalizedName);
     }
-    const difficultyPercentages = Array.isArray(value.difficulty_percentages)
-      ? value.difficulty_percentages.filter((entry): entry is Record<string, unknown> =>
-        Boolean(entry && typeof entry === "object" && !Array.isArray(entry)))
-      : [];
-    const populatedPercentages = difficultyPercentages.filter((entry) => String(entry.percentage ?? "").trim() !== "");
-    if (populatedPercentages.length) {
-      const percentages = populatedPercentages.map((entry) => ({
-        level: optionalText(entry.level),
-        value: Number(entry.percentage),
-      }));
-      if (percentages.some((entry) => !entry.level || !Number.isFinite(entry.value) || entry.value < 0 || entry.value > 100)
-        || Math.abs(percentages.reduce((sum, entry) => sum + entry.value, 0) - 100) > 0.0001
-        || new Set(percentages.map((entry) => entry.level?.toLocaleLowerCase())).size !== percentages.length) {
-        errors.push(`Section ${index + 1} difficulty percentages must use unique levels and total 100%.`);
-      }
+    if (value.difficulty_level !== undefined && value.difficulty_level !== null
+      && (typeof value.difficulty_level !== "string" || value.difficulty_level.trim().length > 100)) {
+      errors.push(`Section ${index + 1} difficulty level is invalid.`);
     }
   }
 
@@ -175,6 +201,7 @@ export async function GET(request: Request) {
     await ensureAssessmentTable();
     const result = await databasePool.query(`
       SELECT id, examination, name, start_date, end_date, total_time, last_login,
+             pass_mark,
              question_category, sub_category, topic, question_language, sections,
              status, created_at,
              COALESCE((
@@ -234,6 +261,7 @@ export async function POST(request: Request) {
         endDate: string | null;
         totalTime: number | null;
         lastLogin: number | null;
+        passMark: number | null;
         questionCategory: string | null;
         subCategory: string | null;
         topic: string | null;
@@ -282,6 +310,7 @@ export async function POST(request: Request) {
           end_date: endDateText,
           total_time: totalTimeText,
           last_login: lastLoginText,
+          pass_mark: row.pass_mark,
           sections,
         })) {
           rowErrors.push(`Row ${rowNumber}: ${error}`);
@@ -294,6 +323,7 @@ export async function POST(request: Request) {
           endDate,
           totalTime,
           lastLogin,
+          passMark: optionalMark(row.pass_mark),
           questionCategory: optionalText(row.question_category),
           subCategory: optionalText(row.sub_category),
           topic: optionalText(row.topic),
@@ -317,10 +347,11 @@ export async function POST(request: Request) {
           const result = await client.query(`
             INSERT INTO assessment (
               examination, name, start_date, end_date, total_time, last_login,
-              question_category, sub_category, topic, question_language, sections
+              question_category, sub_category, topic, question_language, sections, pass_mark
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12)
             RETURNING id, examination, name, start_date, end_date, total_time, last_login,
+                      pass_mark,
                       question_category, sub_category, topic, question_language, sections,
                       status, created_at
           `, [
@@ -335,6 +366,7 @@ export async function POST(request: Request) {
             row.topic,
             row.questionLanguage,
             JSON.stringify(row.sections),
+            row.passMark,
           ]);
           insertedRows.push(result.rows[0]);
         }
@@ -367,10 +399,11 @@ export async function POST(request: Request) {
     const result = await databasePool.query(`
       INSERT INTO assessment (
         examination, name, start_date, end_date, total_time, last_login,
-        question_category, sub_category, topic, question_language, sections
+        question_category, sub_category, topic, question_language, sections, pass_mark
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12)
       RETURNING id, examination, name, start_date, end_date, total_time, last_login,
+                pass_mark,
                 question_category, sub_category, topic, question_language, sections,
                 status, created_at
     `, [
@@ -385,6 +418,7 @@ export async function POST(request: Request) {
       optionalText(body.topic),
       optionalText(body.question_language),
       JSON.stringify(sections),
+      optionalMark(body.pass_mark),
     ]);
 
     return NextResponse.json(result.rows[0], { status: 201 });
@@ -419,9 +453,11 @@ export async function PATCH(request: Request) {
       UPDATE assessment
       SET examination = $1, name = $2, start_date = $3, end_date = $4,
           total_time = $5, last_login = $6, question_category = $7,
-          sub_category = $8, topic = $9, question_language = $10, sections = $11::jsonb
-      WHERE id = $12
+          sub_category = $8, topic = $9, question_language = $10, sections = $11::jsonb,
+          pass_mark = $12
+      WHERE id = $13
       RETURNING id, examination, name, start_date, end_date, total_time, last_login,
+                pass_mark,
                 question_category, sub_category, topic, question_language, sections,
                 status, created_at
     `, [
@@ -436,6 +472,7 @@ export async function PATCH(request: Request) {
       optionalText(body.topic),
       optionalText(body.question_language),
       JSON.stringify(sections),
+      optionalMark(body.pass_mark),
       id,
     ]);
 

@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useRef, useState, type FormEvent } from 
 import NextImage from "next/image";
 import Papa from "papaparse";
 import readXlsxFile from "read-excel-file/browser";
+import { strToU8, zipSync } from "fflate";
 import { matchesAssessmentQuestionType } from "@/lib/question-types";
 
 const navigationItems = [
@@ -74,6 +75,7 @@ type AssessmentCardData = {
   end_date?: string | null;
   total_time?: number | null;
   last_login?: number | null;
+  pass_mark?: number | string | null;
   question_category?: string | null;
   sub_category?: string | null;
   topic?: string | null;
@@ -92,7 +94,7 @@ type AssessmentSection = {
   question_count: string;
   correct_mark: string;
   wrong_mark: string;
-  difficulty_percentages: Array<{ level: string; percentage: string }>;
+  difficulty_level?: string;
 };
 
 type AssessmentResultRecord = {
@@ -110,14 +112,108 @@ type AssessmentResultRecord = {
   obtained_mark: number;
   negative_mark: number;
   total_mark: number;
+  pass_mark: number | null;
+  passed: boolean | null;
   evaluated_at: string;
 };
+
+function excelColumnName(index: number) {
+  let value = index + 1;
+  let name = "";
+  while (value > 0) {
+    const remainder = (value - 1) % 26;
+    name = String.fromCharCode(65 + remainder) + name;
+    value = Math.floor((value - 1) / 26);
+  }
+  return name;
+}
+
+function escapeExcelXml(value: string) {
+  return value
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function createResultsWorkbook(rows: Array<Record<string, string | number>>, sheetName = "Results") {
+  const headers = Object.keys(rows[0] ?? {});
+  const worksheetRows = [headers, ...rows.map((row) => headers.map((header) => row[header] ?? ""))];
+  const sheetData = worksheetRows.map((values, rowIndex) => {
+    const rowNumber = rowIndex + 1;
+    const cells = values.map((value, columnIndex) => {
+      const cellReference = `${excelColumnName(columnIndex)}${rowNumber}`;
+      const text = escapeExcelXml(String(value));
+      return `<c r="${cellReference}" t="inlineStr"><is><t xml:space="preserve">${text}</t></is></c>`;
+    }).join("");
+    return `<row r="${rowNumber}">${cells}</row>`;
+  }).join("");
+  const worksheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${sheetData}</sheetData></worksheet>`;
+  const files = {
+    "[Content_Types].xml": strToU8(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`),
+    "_rels/.rels": strToU8(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`),
+    "xl/workbook.xml": strToU8(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="${escapeExcelXml(sheetName.slice(0, 31))}" sheetId="1" r:id="rId1"/></sheets></workbook>`),
+    "xl/_rels/workbook.xml.rels": strToU8(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`),
+    "xl/worksheets/sheet1.xml": strToU8(worksheet),
+  };
+  return zipSync(files);
+}
+
+function downloadUploadTemplate(fileName: string, sheetName: string, headers: string[], sampleValues: string[]) {
+  const sampleRow = Object.fromEntries(headers.map((header, index) => [header, sampleValues[index] ?? ""]));
+  const workbook = createResultsWorkbook([sampleRow], sheetName);
+  const blob = new Blob([workbook], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+async function readUploadFile(file: File) {
+  if (file.name.toLowerCase().endsWith(".csv")) {
+    const parsed = Papa.parse<Record<string, string>>(await file.text(), {
+      header: true,
+      skipEmptyLines: "greedy",
+      transformHeader: (header) => header.replace(/^\uFEFF/, "").trim(),
+    });
+    if (parsed.errors.length > 0) throw new Error(parsed.errors[0].message);
+    return {
+      headers: parsed.meta.fields ?? [],
+      rows: parsed.data.filter((row) => Object.values(row).some((value) => String(value ?? "").trim())),
+    };
+  }
+  if (!file.name.toLowerCase().endsWith(".xlsx")) {
+    throw new Error("Choose an Excel workbook (.xlsx). Legacy .xls files are not supported.");
+  }
+
+  const workbookSheets = await readXlsxFile(file);
+  const sheetRows = workbookSheets[0]?.data;
+  if (!sheetRows?.length) throw new Error("The selected workbook has no worksheet data.");
+  const [headerRow = [], ...dataRows] = sheetRows;
+  const toCellString = (value: unknown) => value instanceof Date ? value.toISOString().slice(0, 10) : String(value ?? "").trim();
+  const headers = headerRow.map(toCellString);
+  const rows = dataRows
+    .filter((row) => row.some((value) => String(value ?? "").trim()))
+    .map((row) => Object.fromEntries(headers.flatMap((header, index) =>
+      header ? [[header, toCellString(row[index])]] : [],
+    )));
+  return { headers: headers.filter(Boolean), rows };
+}
 
 function ResultsPanel({ accountUserId }: { accountUserId: number | null }) {
   const [results, setResults] = useState<AssessmentResultRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
+  const [showDownloadDialog, setShowDownloadDialog] = useState(false);
+  const [downloadMode, setDownloadMode] = useState<"all" | "assessment" | "candidate">("all");
+  const [downloadAssessmentId, setDownloadAssessmentId] = useState("");
+  const [candidateSearch, setCandidateSearch] = useState("");
+  const [downloadCandidateId, setDownloadCandidateId] = useState("");
   const [showFilters, setShowFilters] = useState(false);
   const [selectedExamination, setSelectedExamination] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("");
@@ -146,6 +242,15 @@ function ResultsPanel({ accountUserId }: { accountUserId: number | null }) {
     return () => controller.abort();
   }, [accountUserId, retryCount]);
 
+  useEffect(() => {
+    if (!showDownloadDialog) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setShowDownloadDialog(false);
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [showDownloadDialog]);
+
   const examinations = [...new Set(results.map((result) => result.examination).filter(Boolean))].sort();
   const examinationResults = results.filter((result) =>
     !selectedExamination || result.examination === selectedExamination
@@ -169,6 +274,67 @@ function ResultsPanel({ accountUserId }: { accountUserId: number | null }) {
       candidateDetails,
     ].join(" ").toLocaleLowerCase().includes(search.trim().toLocaleLowerCase());
   });
+  const downloadAssessments = [...new Map(results.map((result) => [
+    result.assessment_id,
+    { id: result.assessment_id, title: result.assessment_name, examination: result.examination },
+  ])).values()].sort((first, second) => first.title.localeCompare(second.title));
+  const downloadCandidates = [...new Map(results.map((result) => [
+    result.candidate_id,
+    { id: result.candidate_id, code: result.candidate_code, name: result.candidate_name },
+  ])).values()].filter((candidate) => {
+    const query = candidateSearch.trim().toLocaleLowerCase();
+    return !query || [candidate.code, candidate.name, String(candidate.id)]
+      .some((value) => value.toLocaleLowerCase().includes(query));
+  }).sort((first, second) => first.name.localeCompare(second.name));
+  const candidateAssessments = downloadCandidateId
+    ? downloadAssessments.filter((assessment) => results.some((result) =>
+      result.candidate_id === Number(downloadCandidateId) && result.assessment_id === assessment.id,
+    ))
+    : downloadAssessments;
+
+  const downloadResults = () => {
+    let selectedResults = results;
+    if (downloadMode === "assessment") {
+      selectedResults = results.filter((result) => result.assessment_id === Number(downloadAssessmentId));
+    } else if (downloadMode === "candidate") {
+      selectedResults = results.filter((result) => result.candidate_id === Number(downloadCandidateId)
+        && (!downloadAssessmentId || result.assessment_id === Number(downloadAssessmentId)));
+    }
+
+    if (!selectedResults.length) {
+      setError("No evaluated results are available for that selection.");
+      return;
+    }
+
+    const rows = selectedResults.map((result) => ({
+      "Candidate ID": result.candidate_code || result.candidate_id,
+      "Candidate Name": result.candidate_name,
+      Examination: result.examination || "-",
+      Assessment: result.assessment_name,
+      Marks: `${result.obtained_mark} / ${result.total_mark}`,
+      Result: result.passed === true ? "Passed" : result.passed === false ? "Failed" : "Pass mark not set",
+      "Pass Mark": result.pass_mark ?? "Not set",
+      "Evaluated On": formatStudentExamDate(result.evaluated_at),
+    }));
+    const workbook = createResultsWorkbook(rows);
+    const blob = new Blob([new Uint8Array(workbook).buffer], {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    const candidate = selectedResults[0];
+    const fileBase = downloadMode === "candidate"
+      ? `${candidate.candidate_code || candidate.candidate_id}-results`
+      : downloadMode === "assessment"
+        ? `${candidate.assessment_name}-results`
+        : "all-assessment-results";
+    link.href = url;
+    link.download = `${fileBase.replace(/[<>:"/\\|?*\x00-\x1F]/g, "-")}.xlsx`;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setShowDownloadDialog(false);
+  };
+
   const resultsError = accountUserId ? error : "Sign in as an administrator to view assessment results.";
 
   return (
@@ -180,7 +346,7 @@ function ResultsPanel({ accountUserId }: { accountUserId: number | null }) {
           <p className="assessment-count">Showing {filteredResults.length} of {results.length} evaluated results</p>
         </div>
         <div className="assessment-results-toolbar-actions">
-          <button className="assessment-results-download-button" type="button">
+          <button className="assessment-results-download-button" type="button" onClick={() => setShowDownloadDialog(true)}>
             <span aria-hidden="true">↓</span> Download
           </button>
           <button className={`assessment-results-filter-button${showFilters ? " is-active" : ""}`} type="button" aria-expanded={showFilters} onClick={() => setShowFilters((open) => !open)}>
@@ -253,15 +419,16 @@ function ResultsPanel({ accountUserId }: { accountUserId: number | null }) {
               <th>Mark Obtained</th>
               <th>Negative Mark</th>
               <th>Total Mark</th>
+              <th>Result</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={8} className="assessment-results-empty">Loading results…</td></tr>
+              <tr><td colSpan={9} className="assessment-results-empty">Loading results…</td></tr>
             ) : resultsError ? (
-              <tr><td colSpan={8} className="assessment-results-empty">Results are unavailable.</td></tr>
+              <tr><td colSpan={9} className="assessment-results-empty">Results are unavailable.</td></tr>
             ) : filteredResults.length === 0 ? (
-              <tr><td colSpan={8} className="assessment-results-empty">{search || hasActiveFilters ? "No results match your search or filters." : "No evaluated results are available yet."}</td></tr>
+              <tr><td colSpan={9} className="assessment-results-empty">{search || hasActiveFilters ? "No results match your search or filters." : "No evaluated results are available yet."}</td></tr>
             ) : filteredResults.map((result) => (
               <tr key={`${result.assessment_id}-${result.candidate_id}`}>
                 <td>
@@ -285,11 +452,113 @@ function ResultsPanel({ accountUserId }: { accountUserId: number | null }) {
                 <td>{result.obtained_mark}</td>
                 <td>{result.negative_mark}</td>
                 <td>{result.total_mark}</td>
+                <td>
+                  <span className={`assessment-result-outcome${result.passed === true ? " is-pass" : result.passed === false ? " is-fail" : " is-unset"}`}>
+                    {result.passed === true ? "Passed" : result.passed === false ? "Failed" : "Pass mark not set"}
+                  </span>
+                  {result.pass_mark !== null && <small>Pass mark: {result.pass_mark}</small>}
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+      {showDownloadDialog && (
+        <div
+          className="assessment-results-download-overlay"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setShowDownloadDialog(false);
+          }}
+        >
+          <section className="assessment-results-download-dialog" role="dialog" aria-modal="true" aria-labelledby="results-download-title">
+            <header>
+              <div>
+                <p className="section-kicker">Export results</p>
+                <h2 id="results-download-title">Choose what to download</h2>
+              </div>
+              <button type="button" className="form-close-icon" onClick={() => setShowDownloadDialog(false)} aria-label="Close download options">×</button>
+            </header>
+            <div className="assessment-results-download-options">
+              <label>
+                <input type="radio" name="result-download-mode" checked={downloadMode === "all"} onChange={() => setDownloadMode("all")} />
+                <span><strong>All results</strong><small>Download every evaluated student result.</small></span>
+              </label>
+              <label>
+                <input type="radio" name="result-download-mode" checked={downloadMode === "assessment"} onChange={() => setDownloadMode("assessment")} />
+                <span><strong>Filter by assessment</strong><small>Download all evaluated results for one assessment.</small></span>
+              </label>
+              {downloadMode === "assessment" && (
+                <label className="assessment-results-download-field">
+                  <span>Assessment</span>
+                  <select value={downloadAssessmentId} onChange={(event) => setDownloadAssessmentId(event.target.value)}>
+                    <option value="">Choose an assessment</option>
+                    {downloadAssessments.map((assessment) => (
+                      <option key={assessment.id} value={assessment.id}>{assessment.examination} — {assessment.title}</option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              <label>
+                <input type="radio" name="result-download-mode" checked={downloadMode === "candidate"} onChange={() => setDownloadMode("candidate")} />
+                <span><strong>Filter by candidate</strong><small>Search by student ID and download all their results, or choose one assessment.</small></span>
+              </label>
+              {downloadMode === "candidate" && (
+                <div className="assessment-results-download-candidate-fields">
+                  <label className="assessment-results-download-field">
+                    <span>Search student ID or name</span>
+                    <input
+                      type="search"
+                      value={candidateSearch}
+                      onChange={(event) => {
+                        setCandidateSearch(event.target.value);
+                        setDownloadCandidateId("");
+                      }}
+                      placeholder="Enter student ID"
+                    />
+                  </label>
+                  <label className="assessment-results-download-field">
+                    <span>Student</span>
+                    <select value={downloadCandidateId} onChange={(event) => {
+                      setDownloadCandidateId(event.target.value);
+                      setDownloadAssessmentId("");
+                    }} disabled={!downloadCandidates.length}>
+                      <option value="">Choose a student</option>
+                      {downloadCandidates.map((candidate) => (
+                        <option key={candidate.id} value={candidate.id}>
+                          {candidate.code || `ID ${candidate.id}`} — {candidate.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="assessment-results-download-field">
+                    <span>Assessment (optional)</span>
+                    <select value={downloadAssessmentId} onChange={(event) => setDownloadAssessmentId(event.target.value)}>
+                      <option value="">All attended assessments</option>
+                      {candidateAssessments.map((assessment) => (
+                        <option key={assessment.id} value={assessment.id}>{assessment.examination} — {assessment.title}</option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+              )}
+            </div>
+            <footer>
+              <button type="button" className="form-cancel-button" onClick={() => setShowDownloadDialog(false)}>Cancel</button>
+              <button
+                type="button"
+                className="form-save-button"
+                onClick={downloadResults}
+                disabled={loading || results.length === 0
+                  || (downloadMode === "assessment" && !downloadAssessmentId)
+                  || (downloadMode === "candidate" && !downloadCandidateId)}
+              >
+                {downloadMode === "candidate" && !downloadAssessmentId ? "Download candidate’s all results" : "Download Excel"}
+              </button>
+            </footer>
+          </section>
+        </div>
+      )}
     </section>
   );
 }
@@ -298,7 +567,10 @@ function getAssessmentMaxMark(sections: AssessmentSection[] | undefined) {
   return (sections ?? []).reduce((total, section) => {
     const questionCount = Number(section.question_count);
     const correctMark = Number(section.correct_mark);
-    return total + (Number.isFinite(questionCount) && Number.isFinite(correctMark) ? questionCount * correctMark : 0);
+    return total + (Number.isFinite(questionCount) && questionCount > 0
+      && Number.isFinite(correctMark) && correctMark >= 0
+      ? questionCount * correctMark
+      : 0);
   }, 0);
 }
 
@@ -477,29 +749,33 @@ function AssessmentPreview({ assessment, onClose }: { assessment: AssessmentCard
   const matchesSelection = (questionValue: string | null, selectedValue: string | null | undefined) =>
     !selectedValue?.trim() || questionValue?.trim().toLocaleLowerCase() === selectedValue.trim().toLocaleLowerCase();
   const matchingQuestions = questions.filter((question) =>
-    matchesSelection(question.category, assessment.question_category)
+    question.status
+    && matchesSelection(question.category, assessment.question_category)
     && matchesSelection(question.sub_category, assessment.sub_category)
     && matchesSelection(question.topic, assessment.topic)
     && (!assessment.question_language?.trim() || question.language?.trim().toLocaleLowerCase() === assessment.question_language.trim().toLocaleLowerCase())
   );
 
-  const sections = assessment.sections?.length ? assessment.sections : [{ name: "Section A", question_type: "", question_count: "", correct_mark: "", wrong_mark: "", difficulty_percentages: [] }];
+  const sections = assessment.sections?.length ? assessment.sections : [{ name: "Section A", question_type: "", question_count: "", correct_mark: "", wrong_mark: "" }];
   const assignedQuestionIds = new Set<number>();
   const sectionQuestions = sections.map((section, index) => {
-    const sectionQuestions = matchingQuestions.filter((question) =>
+    const configuredDifficulty = section.difficulty_level?.trim().toLocaleLowerCase();
+    const sectionQuestionPool = matchingQuestions.filter((question) =>
       !assignedQuestionIds.has(question.id)
       && matchesAssessmentQuestionType(question.question_type, section.question_type)
+      && (!configuredDifficulty || question.difficulty_level?.trim().toLocaleLowerCase() === configuredDifficulty)
     );
+    const requestedCount = Number(section.question_count);
+    const sectionQuestions = Number.isInteger(requestedCount) && requestedCount > 0
+      ? sectionQuestionPool.slice(0, requestedCount)
+      : sectionQuestionPool;
     sectionQuestions.forEach((question) => assignedQuestionIds.add(question.id));
     return {
       name: section.name.trim() || `Section ${String.fromCharCode(65 + index)}`,
+      difficulty_level: section.difficulty_level,
       questions: sectionQuestions,
     };
   });
-  const unassignedQuestions = matchingQuestions.filter((question) => !assignedQuestionIds.has(question.id));
-  if (unassignedQuestions.length > 0) {
-    sectionQuestions.push({ name: sections.length ? "Other Questions" : "Section A", questions: unassignedQuestions });
-  }
 
   return (
     <div className="assessment-preview-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
@@ -508,9 +784,9 @@ function AssessmentPreview({ assessment, onClose }: { assessment: AssessmentCard
           <div>
             <h1 id="assessment-preview-title">Preview</h1>
             <p>{assessment.title}{assessment.subtitle ? ` · ${assessment.subtitle}` : ""}</p>
-            {(assessment.question_category || assessment.sub_category || assessment.topic) && (
+            {(assessment.question_category || assessment.sub_category || assessment.topic || assessment.question_language) && (
               <p className="assessment-preview-path">
-                {[assessment.question_category, assessment.sub_category, assessment.topic].filter(Boolean).join("  ›  ")}
+                {[assessment.question_category, assessment.sub_category, assessment.topic, assessment.question_language].filter(Boolean).join("  ›  ")}
               </p>
             )}
           </div>
@@ -525,16 +801,21 @@ function AssessmentPreview({ assessment, onClose }: { assessment: AssessmentCard
               <p>{error}</p>
               <button type="button" onClick={() => setRetryCount((count) => count + 1)}>Try again</button>
             </div>
-          ) : matchingQuestions.length === 0 ? (
+          ) : matchingQuestions.length === 0 && !assessment.sections?.length ? (
             <p className="assessment-preview-message">No questions match this assessment’s selected category, subcategory, topic, and language.</p>
           ) : (
-            sectionQuestions.filter((section) => section.questions.length > 0).map((section) => (
+            sectionQuestions.map((section) => (
               <section className="assessment-preview-section" key={section.name}>
                 <div className="assessment-preview-section-heading">
                   <h2>{section.name}</h2>
                   <span>{section.questions.length} {section.questions.length === 1 ? "question" : "questions"}</span>
                 </div>
-                <div className="assessment-preview-question-list">
+                <p className="assessment-preview-difficulty">
+                  Difficulty: {section.difficulty_level?.trim() || "Any difficulty"}
+                </p>
+                {section.questions.length === 0 ? (
+                  <p className="assessment-preview-message">No matching questions are available for this section’s type and difficulty.</p>
+                ) : <div className="assessment-preview-question-list">
                   {section.questions.map((question) => {
                     const options = Array.isArray(question.details.options)
                       ? question.details.options.filter((option): option is string => typeof option === "string")
@@ -558,7 +839,7 @@ function AssessmentPreview({ assessment, onClose }: { assessment: AssessmentCard
                       </article>
                     );
                   })}
-                </div>
+                </div>}
               </section>
             ))
           )}
@@ -597,7 +878,7 @@ type EvaluationQuestion = {
 };
 
 type EvaluationDetail = {
-  assessment: { id: number; name: string; examination: string };
+  assessment: { id: number; name: string; examination: string; pass_mark: number | null };
   candidate: {
     id: number;
     name: string;
@@ -609,6 +890,7 @@ type EvaluationDetail = {
   submitted_at: string;
   evaluated_at: string | null;
   obtained_mark: number | null;
+  passed: boolean | null;
   max_mark: number;
   answers: Record<string, string | string[]>;
   manual_marks: Record<string, number>;
@@ -731,12 +1013,20 @@ function AssessmentEvaluation({ assessment, accountUserId, onClose }: {
           manualMarks,
         }),
       });
-      const payload = await response.json() as { error?: string; obtained_mark?: number; evaluated_at?: string };
+      const payload = await response.json() as {
+        error?: string;
+        obtained_mark?: number;
+        evaluated_at?: string;
+        pass_mark?: number | null;
+        passed?: boolean | null;
+      };
       if (!response.ok) throw new Error(payload.error ?? "Unable to mark this assessment as evaluated.");
       setDetail((current) => current ? {
         ...current,
         evaluated_at: payload.evaluated_at ?? new Date().toISOString(),
         obtained_mark: Number(payload.obtained_mark ?? 0),
+        passed: payload.passed ?? null,
+        assessment: { ...current.assessment, pass_mark: payload.pass_mark ?? current.assessment.pass_mark },
         manual_marks: manualMarks,
         questions: current.questions.map((question) => {
           if (!question.is_manual) return question;
@@ -836,6 +1126,21 @@ function AssessmentEvaluation({ assessment, accountUserId, onClose }: {
                         <tr><th>Exam</th><td>{detail.assessment.name}</td></tr>
                         <tr><th>Total Mark</th><td>{detail.max_mark}</td></tr>
                         <tr><th>Mark Obtained</th><td>{detail.evaluated_at ? detail.obtained_mark : estimatedMark}</td></tr>
+                        <tr><th>Pass Mark</th><td>{detail.assessment.pass_mark ?? "Not set"}</td></tr>
+                        <tr>
+                          <th>Result</th>
+                          <td>
+                            <span className={`assessment-result-outcome${detail.passed === true ? " is-pass" : detail.passed === false ? " is-fail" : detail.assessment.pass_mark === null ? " is-unset" : " is-pending"}`}>
+                              {detail.assessment.pass_mark === null
+                                ? "Pass mark not set"
+                                : detail.passed === true
+                                  ? "Passed"
+                                  : detail.passed === false
+                                    ? "Failed"
+                                    : "Pending evaluation"}
+                            </span>
+                          </td>
+                        </tr>
                       </tbody>
                     </table>
                     <div className="assessment-evaluation-photos">
@@ -2022,6 +2327,9 @@ function AssessmentInvigilation({ assessment, accountUserId, onClose }: { assess
 
 function ManualAssessmentForm({ onClose, onSaved, initialAssessment }: { onClose: () => void; onSaved: (assessment: AssessmentCardData) => void; initialAssessment?: AssessmentCardData }) {
   const [sectionIds, setSectionIds] = useState(() => initialAssessment?.sections?.length ? initialAssessment.sections.map((_, index) => index) : [0]);
+  const [sectionDifficultyLevels, setSectionDifficultyLevels] = useState<Record<number, string>>(() =>
+    Object.fromEntries((initialAssessment?.sections ?? []).map((section, index) => [index, section.difficulty_level ?? ""])),
+  );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [examinations, setExaminations] = useState<AssessmentType[]>([]);
@@ -2033,11 +2341,28 @@ function ManualAssessmentForm({ onClose, onSaved, initialAssessment }: { onClose
   const [questionTopics, setQuestionTopics] = useState<QuestionTopic[]>([]);
   const [questionLanguages, setQuestionLanguages] = useState<LanguageItem[]>([]);
   const [difficultyLevels, setDifficultyLevels] = useState<DifficultyLevel[]>([]);
+  const [loadingDifficultyLevels, setLoadingDifficultyLevels] = useState(true);
+  const [difficultyLevelLoadError, setDifficultyLevelLoadError] = useState("");
   const [selectedExamination, setSelectedExamination] = useState(initialAssessment?.examination ?? "");
   const [selectedQuestionCategory, setSelectedQuestionCategory] = useState(initialAssessment?.question_category ?? "");
   const [selectedSubCategory, setSelectedSubCategory] = useState(initialAssessment?.sub_category ?? "");
   const [selectedTopic, setSelectedTopic] = useState(initialAssessment?.topic ?? "");
   const [selectedQuestionLanguage, setSelectedQuestionLanguage] = useState(initialAssessment?.question_language ?? "");
+  const [totalMark, setTotalMark] = useState(() => getAssessmentMaxMark(initialAssessment?.sections));
+  const assessmentFormRef = useRef<HTMLFormElement>(null);
+
+  const updateTotalMark = (excludedSectionId?: number) => {
+    const sections = Array.from(assessmentFormRef.current?.querySelectorAll<HTMLElement>(".section-block") ?? [])
+      .filter((block) => Number(block.dataset.sectionId) !== excludedSectionId)
+      .map((block) => ({
+        name: "",
+        question_type: "",
+        question_count: block.querySelector<HTMLInputElement>("[data-section-field='question-count']")?.value ?? "",
+        correct_mark: block.querySelector<HTMLInputElement>("[data-section-field='correct-mark']")?.value ?? "",
+        wrong_mark: "",
+      }));
+    setTotalMark(getAssessmentMaxMark(sections));
+  };
 
   const dateTimeLocalValue = (value?: string | null) => {
     if (!value) return "";
@@ -2057,6 +2382,19 @@ function ManualAssessmentForm({ onClose, onSaved, initialAssessment }: { onClose
       .finally(() => setLoadingExaminations(false));
   }, []);
 
+  useEffect(() => {
+    fetch("/api/difficulty-levels")
+      .then(async (response) => {
+        const data = await response.json() as DifficultyLevel[] & { error?: string };
+        if (!response.ok) throw new Error(data.error ?? "Unable to load difficulty levels");
+        setDifficultyLevels(data.filter((item) => item.status));
+      })
+      .catch((loadError) => {
+        setDifficultyLevelLoadError(loadError instanceof Error ? loadError.message : "Unable to load difficulty levels");
+      })
+      .finally(() => setLoadingDifficultyLevels(false));
+  }, []);
+
   const saveAssessment = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setSaving(true);
@@ -2071,9 +2409,17 @@ function ManualAssessmentForm({ onClose, onSaved, initialAssessment }: { onClose
       question_count: block.querySelector<HTMLInputElement>("[data-section-field='question-count']")?.value ?? "",
       correct_mark: block.querySelector<HTMLInputElement>("[data-section-field='correct-mark']")?.value ?? "",
       wrong_mark: block.querySelector<HTMLInputElement>("[data-section-field='wrong-mark']")?.value ?? "",
-      difficulty_percentages: Array.from(block.querySelectorAll<HTMLInputElement>("[data-difficulty-field]"))
-        .map((input) => ({ level: input.dataset.difficultyField ?? "", percentage: input.value })),
+      difficulty_level: block.querySelector<HTMLSelectElement>("[data-section-field='difficulty-level']")?.value ?? "",
     }));
+    const calculatedTotalMark = getAssessmentMaxMark(sections);
+    const passMarkText = String(formData.get("pass_mark") ?? "").trim();
+    const passMark = passMarkText ? Number(passMarkText) : null;
+    setTotalMark(calculatedTotalMark);
+    if (passMark !== null && (!Number.isFinite(passMark) || passMark < 0 || passMark > calculatedTotalMark)) {
+      setError("Pass Mark must be zero or greater and cannot exceed Total Mark.");
+      setSaving(false);
+      return;
+    }
     const startDate = String(formData.get("start_date") ?? "").trim();
     const endDate = String(formData.get("end_date") ?? "").trim();
     if (startDate && Number.isNaN(new Date(startDate).getTime())) {
@@ -2110,17 +2456,6 @@ function ManualAssessmentForm({ onClose, onSaved, initialAssessment }: { onClose
         setSaving(false);
         return;
       }
-      const percentages = section.difficulty_percentages.filter((item) => item.percentage.trim());
-      if (percentages.length) {
-        const values = percentages.map((item) => Number(item.percentage));
-        if (percentages.length !== section.difficulty_percentages.length
-          || values.some((value) => !Number.isFinite(value) || value < 0 || value > 100)
-          || Math.abs(values.reduce((sum, value) => sum + value, 0) - 100) > 0.0001) {
-          setError(`Difficulty percentages for section ${index + 1} must be filled in and total 100%.`);
-          setSaving(false);
-          return;
-        }
-      }
     }
 
     try {
@@ -2140,6 +2475,7 @@ function ManualAssessmentForm({ onClose, onSaved, initialAssessment }: { onClose
           topic: formData.get("topic"),
           question_language: formData.get("question_language"),
           sections,
+          pass_mark: passMarkText,
         }),
       });
       const data = await response.json() as {
@@ -2151,6 +2487,7 @@ function ManualAssessmentForm({ onClose, onSaved, initialAssessment }: { onClose
         end_date?: string | null;
         total_time?: number | null;
         last_login?: number | null;
+        pass_mark?: number | string | null;
         question_category?: string | null;
         sub_category?: string | null;
         topic?: string | null;
@@ -2168,6 +2505,7 @@ function ManualAssessmentForm({ onClose, onSaved, initialAssessment }: { onClose
         end_date: data.end_date ?? null,
         total_time: data.total_time ?? null,
         last_login: data.last_login ?? null,
+        pass_mark: data.pass_mark ?? passMark,
         question_category: data.question_category ?? null,
         sub_category: data.sub_category ?? null,
         topic: data.topic ?? null,
@@ -2190,23 +2528,18 @@ function ManualAssessmentForm({ onClose, onSaved, initialAssessment }: { onClose
     Promise.all([
       fetch("/api/question-topics"),
       fetch("/api/languages"),
-      fetch("/api/difficulty-levels"),
     ])
-      .then(async ([topicsResponse, languagesResponse, difficultyResponse]) => {
+      .then(async ([topicsResponse, languagesResponse]) => {
         const topics = await topicsResponse.json() as QuestionTopic[] & { error?: string };
         const languages = await languagesResponse.json() as LanguageItem[] & { error?: string };
-        const difficulties = await difficultyResponse.json() as DifficultyLevel[] & { error?: string };
         if (!topicsResponse.ok) throw new Error(topics.error ?? "Unable to load topics");
         if (!languagesResponse.ok) throw new Error(languages.error ?? "Unable to load languages");
-        if (!difficultyResponse.ok) throw new Error(difficulties.error ?? "Unable to load difficulty levels");
         setQuestionTopics(topics.filter((item) => item.status));
         setQuestionLanguages(languages.filter((item) => item.status));
-        setDifficultyLevels(difficulties.filter((item) => item.status));
       })
       .catch(() => {
         setQuestionTopics([]);
         setQuestionLanguages([]);
-        setDifficultyLevels([]);
       });
   }, []);
 
@@ -2243,7 +2576,7 @@ function ManualAssessmentForm({ onClose, onSaved, initialAssessment }: { onClose
           <button className="form-close-icon" type="button" onClick={onClose} aria-label="Close form">×</button>
         </div>
 
-        <form onSubmit={saveAssessment}>
+        <form ref={assessmentFormRef} onSubmit={saveAssessment}>
           <div className="form-field full-width">
             <label htmlFor="examination">Examination</label>
             <select id="examination" name="examination" value={selectedExamination} onChange={(event) => setSelectedExamination(event.target.value)} disabled={loadingExaminations} required>
@@ -2328,14 +2661,22 @@ function ManualAssessmentForm({ onClose, onSaved, initialAssessment }: { onClose
 
           <div className="section-list">
             {sectionIds.map((sectionId, index) => (
-              <div className="section-block" key={sectionId}>
+              <div className="section-block" key={sectionId} data-section-id={sectionId}>
                 <div className="section-block-heading">
                   <span>Section {index + 1}</span>
                   {index > 0 && (
                     <button
                       className="remove-section-button"
                       type="button"
-                      onClick={() => setSectionIds(sectionIds.filter((id) => id !== sectionId))}
+                      onClick={() => {
+                        updateTotalMark(sectionId);
+                        setSectionIds(sectionIds.filter((id) => id !== sectionId));
+                        setSectionDifficultyLevels((current) => {
+                          const next = { ...current };
+                          delete next[sectionId];
+                          return next;
+                        });
+                      }}
                       aria-label={`Remove section ${index + 1}`}
                     >
                       × Remove
@@ -2349,27 +2690,56 @@ function ManualAssessmentForm({ onClose, onSaved, initialAssessment }: { onClose
                     <option>Objective</option>
                     <option>Subjective</option>
                   </select>
-                  <input data-section-field="question-count" type="number" min="1" step="1" aria-label={`Section ${index + 1} question count`} placeholder="Question Count" defaultValue={initialAssessment?.sections?.[index]?.question_count ?? ""} required />
-                  <input data-section-field="correct-mark" type="number" min="0" step="any" aria-label={`Section ${index + 1} correct mark`} placeholder="Correct Mark" defaultValue={initialAssessment?.sections?.[index]?.correct_mark ?? ""} required />
+                  <input data-section-field="question-count" type="number" min="1" step="1" aria-label={`Section ${index + 1} question count`} placeholder="Question Count" defaultValue={initialAssessment?.sections?.[index]?.question_count ?? ""} onChange={() => updateTotalMark()} required />
+                  <input data-section-field="correct-mark" type="number" min="0" step="any" aria-label={`Section ${index + 1} correct mark`} placeholder="Correct Mark" defaultValue={initialAssessment?.sections?.[index]?.correct_mark ?? ""} onChange={() => updateTotalMark()} required />
                   <input data-section-field="wrong-mark" type="number" max="0" step="any" aria-label={`Section ${index + 1} wrong mark`} placeholder="Wrong Mark (0 or negative)" defaultValue={initialAssessment?.sections?.[index]?.wrong_mark ?? ""} />
                 </div>
-                <p className="difficulty-label">% of Questions from Difficulty Levels <span>(total should be 100)</span></p>
-                <div className="difficulty-fields">
-                  {difficultyLevels.map((level) => (
-                    <input
-                      key={level.id}
-                      type="number"
-                      min="0"
-                      max="100"
-                      data-difficulty-field={level.Difficulty_level}
-                      placeholder={`Level: ${level.Difficulty_level}`}
-                      aria-label={`Section ${index + 1}, level ${level.Difficulty_level} percentage`}
-                      defaultValue={initialAssessment?.sections?.[index]?.difficulty_percentages.find((item) => item.level === level.Difficulty_level)?.percentage ?? ""}
-                    />
-                  ))}
-                </div>
+                <label className="form-field">
+                  <span>Difficulty Level</span>
+                  <select
+                    data-section-field="difficulty-level"
+                    aria-label={`Section ${index + 1} difficulty level`}
+                    value={sectionDifficultyLevels[sectionId] ?? ""}
+                    disabled={loadingDifficultyLevels || Boolean(difficultyLevelLoadError)}
+                    onChange={(event) => setSectionDifficultyLevels((current) => ({
+                      ...current,
+                      [sectionId]: event.target.value,
+                    }))}
+                  >
+                    <option value="">
+                      {loadingDifficultyLevels ? "Loading difficulty levels..." : difficultyLevelLoadError ? "Unable to load difficulty levels" : "Any difficulty"}
+                    </option>
+                    {initialAssessment?.sections?.[index]?.difficulty_level
+                      && !difficultyLevels.some((level) => level.Difficulty_level === initialAssessment.sections?.[index]?.difficulty_level)
+                      && <option value={initialAssessment.sections[index].difficulty_level}>Saved: {initialAssessment.sections[index].difficulty_level} (unavailable)</option>}
+                    {difficultyLevels.map((level) => (
+                      <option key={level.id} value={level.Difficulty_level}>{level.Difficulty_level}</option>
+                    ))}
+                  </select>
+                  {difficultyLevelLoadError && <small role="alert">{difficultyLevelLoadError}</small>}
+                </label>
               </div>
             ))}
+          </div>
+
+          <div className="form-row assessment-mark-fields">
+            <div className="form-field">
+              <label htmlFor="assessment-total-mark">Total Mark</label>
+              <input id="assessment-total-mark" type="number" value={totalMark} readOnly aria-readonly="true" />
+            </div>
+            <div className="form-field">
+              <label htmlFor="assessment-pass-mark">Pass Mark</label>
+              <input
+                id="assessment-pass-mark"
+                name="pass_mark"
+                type="number"
+                min="0"
+                max={totalMark}
+                step="any"
+                placeholder="Enter Pass Mark"
+                defaultValue={initialAssessment?.pass_mark ?? ""}
+              />
+            </div>
           </div>
 
           <div className="form-actions">
@@ -2403,15 +2773,26 @@ function BulkUploadForm({ onClose, onUploaded }: { onClose: () => void; onUpload
 
   const downloadTemplate = () => {
     const headers = ["Examination", "Name", "Start Date", "End Date", "Total Time", "Last Login Time", "Question Category", "Sub-Category", "Topic", "Question Language", "Sections JSON"];
-    const exampleSections = JSON.stringify([{ name: "Section 1", question_type: "Objective", question_count: "10", correct_mark: "1", wrong_mark: "0", difficulty_percentages: [] }]);
-    const csv = Papa.unparse([headers, ["", "", "", "", "", "", "", "", "", "", exampleSections]]);
-    const blob = new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "assessment-upload-template.csv";
-    link.click();
-    URL.revokeObjectURL(url);
+    const exampleSections = JSON.stringify([{
+      name: "Section 1",
+      question_type: "Objective",
+      question_count: "10",
+      correct_mark: "1",
+      wrong_mark: "0",
+    }]);
+    downloadUploadTemplate("assessment-upload-template.xlsx", "Assessments", headers, [
+      "Sample Examination",
+      "Sample Assessment",
+      "2027-01-15 09:00",
+      "2027-01-15 10:00",
+      "60",
+      "",
+      "Sample Question Category",
+      "Sample Sub-Category",
+      "Sample Topic",
+      "English",
+      exampleSections,
+    ]);
   };
 
   const readFile = async (file: File) => {
@@ -2421,30 +2802,7 @@ function BulkUploadForm({ onClose, onUploaded }: { onClose: () => void; onUpload
     setSuccess("");
     setParsing(true);
     try {
-      let headers: string[];
-      let parsedRows: Record<string, unknown>[];
-      if (file.name.toLowerCase().endsWith(".csv")) {
-        const parsed = Papa.parse<Record<string, string>>(await file.text(), {
-          header: true,
-          skipEmptyLines: "greedy",
-          transformHeader: (header) => header.replace(/^\uFEFF/, "").trim(),
-        });
-        if (parsed.errors.length > 0) throw new Error(parsed.errors[0].message);
-        headers = parsed.meta.fields ?? [];
-        parsedRows = parsed.data.filter((row) => Object.values(row).some((value) => String(value ?? "").trim()));
-      } else if (file.name.toLowerCase().endsWith(".xlsx")) {
-        const workbookSheets = await readXlsxFile(file);
-        const sheetRows = workbookSheets[0]?.data;
-        if (!sheetRows) throw new Error("The selected file has no worksheet.");
-        const [headerRow = [], ...dataRows] = sheetRows;
-        const toCellString = (value: unknown) => value instanceof Date ? value.toISOString().slice(0, 10) : String(value ?? "").trim();
-        headers = headerRow.map(toCellString).filter(Boolean);
-        parsedRows = dataRows
-          .filter((row) => row.some((value) => String(value ?? "").trim()))
-          .map((row) => Object.fromEntries(headers.map((header, index) => [header, toCellString(row[index])])));
-      } else {
-        throw new Error("Choose a CSV or XLSX file. Legacy XLS files are not supported.");
-      }
+      const { headers, rows: parsedRows } = await readUploadFile(file);
 
       const expectedHeaders = ["Examination", "Name", "Start Date", "End Date", "Total Time", "Last Login Time", "Question Category", "Sub-Category", "Topic", "Question Language", "Sections JSON"];
       const missingHeaders = expectedHeaders.filter((header) => !headers.includes(header));
@@ -2517,7 +2875,7 @@ function BulkUploadForm({ onClose, onUploaded }: { onClose: () => void; onUpload
               <input
                 id="assessment-file"
                 type="file"
-                accept=".csv,.xlsx"
+                accept=".xlsx,.csv"
                 onChange={(event) => {
                   const file = event.target.files?.[0];
                   if (file) void readFile(file);
@@ -2540,7 +2898,7 @@ function BulkUploadForm({ onClose, onUploaded }: { onClose: () => void; onUpload
   );
 }
 
-function CandidateUploadForm({ onClose, onUploaded, candidateInfo }: { onClose: () => void; onUploaded: () => void; candidateInfo: CandidateInfoItem[] }) {
+function CandidateUploadForm({ onClose, onUploaded, candidateInfo, categories, subCategories }: { onClose: () => void; onUploaded: () => void; candidateInfo: CandidateInfoItem[]; categories: CandidateCategory[]; subCategories: CandidateSubCategory[] }) {
   const [fileName, setFileName] = useState("");
   const [rows, setRows] = useState<Record<string, unknown>[]>([]);
   const [parsing, setParsing] = useState(false);
@@ -2551,14 +2909,30 @@ function CandidateUploadForm({ onClose, onUploaded, candidateInfo }: { onClose: 
   const downloadTemplate = () => {
     const candidateFields = candidateInfo.filter((item) => !isCandidateIdFieldName(item.name));
     const headers = ["Category", "Sub-Category", ...candidateFields.map((item) => item.name)];
-    const csv = Papa.unparse([headers, headers.map(() => "")]);
-    const blob = new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "candidate-information-template.csv";
-    link.click();
-    URL.revokeObjectURL(url);
+    const category = categories[0]?.candidate_category ?? "";
+    const subCategory = subCategories.find((item) => item.category === category)?.candidate_sub_category ?? "";
+    const sampleValues = candidateFields.map((field) => {
+      const name = field.name.toLowerCase();
+      if (field.column_type === "Dropdown") {
+        const options = Array.isArray(field.options)
+          ? field.options
+          : typeof field.options === "string"
+            ? field.options.split(",").map((option) => option.trim())
+            : [];
+        return options.find((option): option is string => typeof option === "string" && Boolean(option.trim())) ?? "";
+      }
+      if (field.column_type === "Email" || name.includes("email")) return "sample.candidate@example.com";
+      if (field.column_type === "Date" || /date|dob|birth/.test(name)) return "2000-01-15";
+      if (field.column_type === "Number") return String(field.min_value ?? 1);
+      if (name.includes("name")) return "Sample Candidate";
+      return "Sample value";
+    });
+    downloadUploadTemplate(
+      "candidate-information-template.xlsx",
+      "Candidates",
+      headers,
+      [category, subCategory, ...sampleValues],
+    );
   };
 
   const readFile = async (file: File) => {
@@ -2568,30 +2942,7 @@ function CandidateUploadForm({ onClose, onUploaded, candidateInfo }: { onClose: 
     setSuccess("");
     setParsing(true);
     try {
-      let headers: string[];
-      let parsedRows: Record<string, unknown>[];
-      if (file.name.toLowerCase().endsWith(".csv")) {
-        const parsed = Papa.parse<Record<string, string>>(await file.text(), {
-          header: true,
-          skipEmptyLines: "greedy",
-            transformHeader: (header) => header.replace(/^\uFEFF/, "").trim(),
-        });
-        if (parsed.errors.length > 0) throw new Error(parsed.errors[0].message);
-        headers = parsed.meta.fields ?? [];
-        parsedRows = parsed.data.filter((row) => Object.values(row).some((value) => String(value ?? "").trim()));
-      } else if (file.name.toLowerCase().endsWith(".xlsx")) {
-        const workbookSheets = await readXlsxFile(file);
-        const sheetRows = workbookSheets[0]?.data;
-        if (!sheetRows) throw new Error("The selected file has no worksheet.");
-        const [headerRow = [], ...dataRows] = sheetRows;
-        const toCellString = (value: unknown) => value instanceof Date ? value.toISOString().slice(0, 10) : String(value ?? "").trim();
-        headers = headerRow.map(toCellString).filter(Boolean);
-        parsedRows = dataRows
-          .filter((row) => row.some((value) => String(value ?? "").trim()))
-          .map((row) => Object.fromEntries(headers.map((header, index) => [header, toCellString(row[index])])));
-      } else {
-        throw new Error("Choose a CSV or XLSX file. Legacy XLS files are not supported.");
-      }
+      const { headers, rows: parsedRows } = await readUploadFile(file);
 
       const expectedHeaders = ["Category", "Sub-Category", ...candidateInfo.filter((item) => !isCandidateIdFieldName(item.name)).map((item) => item.name)];
       const missingHeaders = expectedHeaders.filter((header) => !headers.includes(header));
@@ -2658,7 +3009,7 @@ function CandidateUploadForm({ onClose, onUploaded, candidateInfo }: { onClose: 
               <input
                 id="candidate-file"
                 type="file"
-                accept=".csv,.xlsx"
+                accept=".xlsx,.csv"
                 onChange={(event) => {
                   const file = event.target.files?.[0];
                   if (file) void readFile(file);
@@ -2849,12 +3200,15 @@ function AddCandidateForm({ onClose, currentRole }: { onClose: () => void; curre
 }
 
 function CandidatesPanel({ currentRole }: { currentRole?: any }) {
-  const [pageSize, setPageSize] = useState("25");
+  const [pageSize, setPageSize] = useState(25);
+  const [currentPage, setCurrentPage] = useState(1);
   const [search, setSearch] = useState("");
   const [showCandidateUpload, setShowCandidateUpload] = useState(false);
   const [showAddCandidate, setShowAddCandidate] = useState(false);
   const [candidates, setCandidates] = useState<any[]>([]);
   const [candidateInfo, setCandidateInfo] = useState<CandidateInfoItem[]>([]);
+  const [categories, setCategories] = useState<CandidateCategory[]>([]);
+  const [subCategories, setSubCategories] = useState<CandidateSubCategory[]>([]);
   const [loading, setLoading] = useState(true);
   const canCreate = hasRolePermission(currentRole, "Candidates", "create");
   const additionalCandidateInfo = candidateInfo.filter((info) =>
@@ -2866,10 +3220,14 @@ function CandidatesPanel({ currentRole }: { currentRole?: any }) {
     Promise.all([
       fetch("/api/candidates").then((res) => res.json()),
       fetch("/api/candidate-info").then((res) => res.json()),
+      fetch("/api/candidate-categories").then((res) => res.json()),
+      fetch("/api/candidate-sub-categories").then((res) => res.json()),
     ])
-      .then(([candidatesData, infoData]) => {
+      .then(([candidatesData, infoData, categoriesData, subCategoriesData]) => {
         if (!candidatesData.error) setCandidates(candidatesData);
         if (!infoData.error) setCandidateInfo(infoData.filter((i: CandidateInfoItem) => i.status));
+        if (!categoriesData.error) setCategories(categoriesData.filter((item: CandidateCategory) => item.status));
+        if (!subCategoriesData.error) setSubCategories(subCategoriesData.filter((item: CandidateSubCategory) => item.status));
       })
       .catch((error) => console.error("Error fetching data:", error))
       .finally(() => setLoading(false));
@@ -2879,10 +3237,27 @@ function CandidatesPanel({ currentRole }: { currentRole?: any }) {
     fetchData();
   }, []);
 
+  const normalizedSearch = search.trim().toLowerCase();
+  const filteredCandidates = candidates.filter((candidate) => [
+    candidate.name,
+    getCandidateFieldValue(candidate.candidate_data, "Candidate ID"),
+    getCandidateFieldValue(candidate.candidate_data, "Date of Birth"),
+    ...Object.values(candidate.candidate_data?.fields ?? {}),
+    candidate.candidate_data?.category,
+    candidate.candidate_data?.sub_category,
+    candidate.status ? "active" : "inactive",
+  ].some((value) => String(value ?? "").toLowerCase().includes(normalizedSearch)));
+  const totalPages = Math.max(1, Math.ceil(filteredCandidates.length / pageSize));
+  const visiblePage = Math.min(currentPage, totalPages);
+  const visibleCandidates = filteredCandidates.slice((visiblePage - 1) * pageSize, visiblePage * pageSize);
+  const firstVisibleEntry = filteredCandidates.length === 0 ? 0 : (visiblePage - 1) * pageSize + 1;
+  const lastVisibleEntry = Math.min(visiblePage * pageSize, filteredCandidates.length);
+
   return (
     <section className="candidates-section" id="candidates">
       <div className="candidate-section-header">
         <h1>Candidate Information</h1>
+        <p className="assessment-count">{loading ? "Loading candidates..." : `Total candidates: ${candidates.length}`}</p>
       </div>
       <div className="candidates-panel">
         <div className="candidates-actions">
@@ -2897,16 +3272,14 @@ function CandidatesPanel({ currentRole }: { currentRole?: any }) {
         <div className="candidate-table-toolbar">
           <label className="entries-control" htmlFor="page-size">
             Show
-            <select id="page-size" value={pageSize} onChange={(event) => setPageSize(event.target.value)}>
-              <option>10</option>
-              <option>25</option>
-              <option>50</option>
+            <select id="page-size" value={pageSize} onChange={(event) => { setPageSize(Number(event.target.value)); setCurrentPage(1); }}>
+              {[10, 25, 50].map((size) => <option key={size} value={size}>{size}</option>)}
             </select>
             entries
           </label>
           <label className="search-control" htmlFor="candidate-search">
             Search:
-            <input id="candidate-search" value={search} onChange={(event) => setSearch(event.target.value)} />
+            <input id="candidate-search" value={search} onChange={(event) => { setSearch(event.target.value); setCurrentPage(1); }} />
           </label>
         </div>
 
@@ -2933,8 +3306,12 @@ function CandidatesPanel({ currentRole }: { currentRole?: any }) {
                 <tr>
                   <td colSpan={additionalCandidateInfo.length + 5}>No data available in table</td>
                 </tr>
+              ) : filteredCandidates.length === 0 ? (
+                <tr>
+                  <td colSpan={additionalCandidateInfo.length + 5}>No candidates match your search.</td>
+                </tr>
               ) : (
-                candidates.map((c) => (
+                visibleCandidates.map((c) => (
                   <tr key={c.id}>
                     <td>{getCandidateFieldValue(c.candidate_data, "Candidate ID") || "-"}</td>
                     <td>{getCandidateFieldValue(c.candidate_data, "Date of Birth") || "Not provided"}</td>
@@ -2952,15 +3329,17 @@ function CandidatesPanel({ currentRole }: { currentRole?: any }) {
         </div>
 
         <div className="candidate-table-footer">
-          <span>Showing {candidates.length > 0 ? 1 : 0} to {candidates.length} of {candidates.length} entries</span>
+          <span>Showing {firstVisibleEntry} to {lastVisibleEntry} of {filteredCandidates.length} entries</span>
           <div>
-            <button type="button" disabled>Previous</button>
-            <button type="button" disabled>Next</button>
+            <button type="button" disabled={visiblePage <= 1} onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}>Previous</button>
+            <button type="button" disabled={visiblePage >= totalPages} onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}>Next</button>
           </div>
         </div>
       </div>
       {showCandidateUpload && <CandidateUploadForm
         candidateInfo={candidateInfo.filter((item) => item.status)}
+        categories={categories}
+        subCategories={subCategories}
         onClose={() => setShowCandidateUpload(false)}
         onUploaded={fetchData}
       />}
@@ -5620,14 +5999,16 @@ function QuestionUploadForm({ onClose, onUploaded }: { onClose: () => void; onUp
 
   const downloadTemplate = () => {
     const exampleDetails = JSON.stringify({ answer: "A", options: ["Option A", "Option B", "", "", ""], randomize_options: "Yes" });
-    const csv = Papa.unparse([headers, ["Single Choice", "Example question?", "", "", "", "", "", exampleDetails]]);
-    const blob = new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "question-upload-template.csv";
-    link.click();
-    URL.revokeObjectURL(url);
+    downloadUploadTemplate("question-upload-template.xlsx", "Questions", headers, [
+      "Single Choice",
+      "Example question?",
+      "Sample Question Category",
+      "Sample Sub-Category",
+      "Sample Topic",
+      "Easy",
+      "English",
+      exampleDetails,
+    ]);
   };
 
   const readFile = async (file: File) => {
@@ -5637,30 +6018,7 @@ function QuestionUploadForm({ onClose, onUploaded }: { onClose: () => void; onUp
     setSuccess("");
     setParsing(true);
     try {
-      let fileHeaders: string[];
-      let parsedRows: Record<string, unknown>[];
-      if (file.name.toLowerCase().endsWith(".csv")) {
-        const parsed = Papa.parse<Record<string, string>>(await file.text(), {
-          header: true,
-          skipEmptyLines: "greedy",
-          transformHeader: (header) => header.replace(/^\uFEFF/, "").trim(),
-        });
-        if (parsed.errors.length > 0) throw new Error(parsed.errors[0].message);
-        fileHeaders = parsed.meta.fields ?? [];
-        parsedRows = parsed.data.filter((row) => Object.values(row).some((value) => String(value ?? "").trim()));
-      } else if (file.name.toLowerCase().endsWith(".xlsx")) {
-        const workbookSheets = await readXlsxFile(file);
-        const sheetRows = workbookSheets[0]?.data;
-        if (!sheetRows) throw new Error("The selected file has no worksheet.");
-        const [headerRow = [], ...dataRows] = sheetRows;
-        const toCellString = (value: unknown) => value instanceof Date ? value.toISOString().slice(0, 10) : String(value ?? "").trim();
-        fileHeaders = headerRow.map(toCellString).filter(Boolean);
-        parsedRows = dataRows
-          .filter((row) => row.some((value) => String(value ?? "").trim()))
-          .map((row) => Object.fromEntries(fileHeaders.map((header, index) => [header, toCellString(row[index])])));
-      } else {
-        throw new Error("Choose a CSV or XLSX file. Legacy XLS files are not supported.");
-      }
+      const { headers: fileHeaders, rows: parsedRows } = await readUploadFile(file);
 
       const missingHeaders = headers.filter((header) => !fileHeaders.includes(header));
       if (missingHeaders.length > 0) throw new Error(`Missing columns: ${missingHeaders.join(", ")}. Download the template and keep its column names.`);
@@ -5736,7 +6094,7 @@ function QuestionUploadForm({ onClose, onUploaded }: { onClose: () => void; onUp
             <div className="file-picker">
               <label className="choose-file-button" htmlFor="question-upload-file">Choose File</label>
               <span>{fileName || "No file chosen"}</span>
-              <input id="question-upload-file" type="file" accept=".csv,.xlsx" onChange={(event) => {
+              <input id="question-upload-file" type="file" accept=".xlsx,.csv" onChange={(event) => {
                 const file = event.target.files?.[0];
                 if (file) void readFile(file);
               }} />
@@ -5846,7 +6204,10 @@ function QuestionsPanel({ currentRole }: { currentRole?: any }) {
 
   return (
     <section className="candidates-section questions-section" id="questions">
-      <h1>Questions</h1>
+      <div className="candidate-section-header">
+        <h1>Questions</h1>
+        <p className="assessment-count">{loadingQuestions ? "Loading questions..." : `Total questions: ${questions.length}`}</p>
+      </div>
       <div className="candidates-panel">
         <div className="candidates-actions">
           {canCreate && <button className="candidate-action-button" type="button" onClick={() => setShowQuestionUpload(true)}>
@@ -6185,6 +6546,8 @@ type StudentAssessmentResult = {
   examination: string;
   obtained_mark: number;
   total_mark: number;
+  pass_mark: number | null;
+  passed: boolean | null;
   evaluated_at: string;
 };
 
@@ -7430,21 +7793,28 @@ function StudentPortalDashboard({ student, onLogout }: { student: { id: number; 
                       <th>Examination</th>
                       <th>Assessment</th>
                       <th>Marks</th>
+                      <th>Result</th>
                       <th>Evaluated On</th>
                     </tr>
                   </thead>
                   <tbody>
                     {resultsLoading ? (
-                      <tr><td className="student-exam-empty" colSpan={4}>Loading your results...</td></tr>
+                      <tr><td className="student-exam-empty" colSpan={5}>Loading your results...</td></tr>
                     ) : resultsError ? (
-                      <tr><td className="student-exam-empty" colSpan={4}>Your results are unavailable.</td></tr>
+                      <tr><td className="student-exam-empty" colSpan={5}>Your results are unavailable.</td></tr>
                     ) : results.length === 0 ? (
-                      <tr><td className="student-exam-empty" colSpan={4}>No evaluated results have been published yet.</td></tr>
+                      <tr><td className="student-exam-empty" colSpan={5}>No evaluated results have been published yet.</td></tr>
                     ) : results.map((result) => (
                       <tr key={`${result.assessment_id}-${result.evaluated_at}`}>
                         <td>{result.examination || "-"}</td>
                         <td className="student-exam-name">{result.assessment_name}</td>
                         <td>{result.obtained_mark} / {result.total_mark}</td>
+                        <td>
+                          <span className={`assessment-result-outcome${result.passed === true ? " is-pass" : result.passed === false ? " is-fail" : " is-unset"}`}>
+                            {result.passed === true ? "Passed" : result.passed === false ? "Failed" : "Pass mark not set"}
+                          </span>
+                          {result.pass_mark !== null && <small>Pass mark: {result.pass_mark}</small>}
+                        </td>
                         <td>{formatStudentExamDate(result.evaluated_at)}</td>
                       </tr>
                     ))}
@@ -7596,6 +7966,7 @@ export default function Home() {
           end_date: string | null;
           total_time: number | null;
           last_login: number | null;
+          pass_mark: number | string | null;
           question_category: string | null;
           sub_category: string | null;
           topic: string | null;
@@ -7614,6 +7985,7 @@ export default function Home() {
           end_date: assessment.end_date,
           total_time: assessment.total_time,
           last_login: assessment.last_login,
+          pass_mark: assessment.pass_mark,
           question_category: assessment.question_category,
           sub_category: assessment.sub_category,
           topic: assessment.topic,
@@ -8055,7 +8427,7 @@ export default function Home() {
           <div>
             <p className="section-kicker">Examination workspace</p>
             <h1>Assessments</h1>
-            <p className="assessment-count">Showing {assessmentCards.length} of {assessmentCards.length} assessments</p>
+            <p className="assessment-count">Total assessments: {assessmentCards.length}</p>
           </div>
           <div className="toolbar-actions">
             <button
@@ -8134,6 +8506,7 @@ export default function Home() {
               end_date: string | null;
               total_time: number | null;
               last_login: number | null;
+              pass_mark: number | string | null;
               question_category: string | null;
               sub_category: string | null;
               topic: string | null;
@@ -8152,6 +8525,7 @@ export default function Home() {
               end_date: assessment.end_date,
               total_time: assessment.total_time,
               last_login: assessment.last_login,
+              pass_mark: assessment.pass_mark,
               question_category: assessment.question_category,
               sub_category: assessment.sub_category,
               topic: assessment.topic,

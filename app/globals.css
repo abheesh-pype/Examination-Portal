@@ -7660,7 +7660,7 @@ body {
 	position: fixed;
 	z-index: 3;
 	right: 24px;
-	bottom: 22px;
+	top: 88px;
 	width: 220px;
 	padding: 7px;
 	background: #fff;
@@ -8014,7 +8014,7 @@ body {
 
 	.student-exam-camera-status {
 		right: 14px;
-		bottom: 14px;
+		top: 76px;
 		width: 175px;
 	}
 
@@ -8061,7 +8061,7 @@ body {
 
 	.student-exam-camera-status {
 		right: 10px;
-		bottom: 10px;
+		top: 68px;
 		width: 132px;
 	}
 
@@ -8267,6 +8267,125 @@ body {
 	border-color: #5549d4;
 }
 
+.assessment-results-download-overlay {
+	position: fixed;
+	z-index: 1200;
+	inset: 0;
+	display: grid;
+	place-items: center;
+	padding: 20px;
+	background: rgba(30, 32, 50, 0.48);
+}
+
+.assessment-results-download-dialog {
+	width: min(540px, 100%);
+	max-height: min(760px, 92vh);
+	overflow-y: auto;
+	padding: 22px;
+	background: #fff;
+	border: 1px solid #e8e8ef;
+	border-radius: 14px;
+	box-shadow: 0 20px 70px rgba(20, 22, 40, 0.24);
+}
+
+.assessment-results-download-dialog > header,
+.assessment-results-download-dialog > footer {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 14px;
+}
+
+.assessment-results-download-dialog > header {
+	margin-bottom: 20px;
+}
+
+.assessment-results-download-dialog h2 {
+	margin: 3px 0 0;
+	color: #30334a;
+	font-size: 19px;
+}
+
+.assessment-results-download-dialog .form-close-icon {
+	position: static;
+	flex: 0 0 auto;
+}
+
+.assessment-results-download-options {
+	display: grid;
+	gap: 12px;
+}
+
+.assessment-results-download-options > label:not(.assessment-results-download-field) {
+	display: flex;
+	align-items: flex-start;
+	gap: 10px;
+	padding: 13px;
+	border: 1px solid #e6e7ef;
+	border-radius: 9px;
+	cursor: pointer;
+}
+
+.assessment-results-download-options input[type="radio"] {
+	margin-top: 3px;
+	accent-color: #6559e8;
+}
+
+.assessment-results-download-options > label > span {
+	display: grid;
+	gap: 4px;
+}
+
+.assessment-results-download-options strong {
+	color: #41445a;
+	font-size: 13px;
+}
+
+.assessment-results-download-options small {
+	color: #7b7e90;
+	font-size: 11px;
+	line-height: 1.45;
+}
+
+.assessment-results-download-field {
+	display: grid;
+	gap: 6px;
+	color: #697184;
+	font-size: 12px;
+	font-weight: 650;
+}
+
+.assessment-results-download-field input,
+.assessment-results-download-field select {
+	width: 100%;
+	min-height: 38px;
+	padding: 0 10px;
+	color: #41485a;
+	background: #fff;
+	border: 1px solid #dfe1e8;
+	border-radius: 7px;
+	font: inherit;
+	font-weight: 400;
+}
+
+.assessment-results-download-candidate-fields {
+	display: grid;
+	gap: 12px;
+	padding: 0 0 4px 28px;
+}
+
+.assessment-results-download-dialog > footer {
+	justify-content: flex-end;
+	margin-top: 22px;
+	padding-top: 16px;
+	border-top: 1px solid #ececf1;
+}
+
+.assessment-results-download-dialog > footer button:disabled {
+	cursor: not-allowed;
+	opacity: 0.55;
+}
+
 .assessment-results-filter-button {
 	display: inline-flex;
 	height: 38px;
@@ -8356,6 +8475,38 @@ body {
 	color: #41485a;
 	font: inherit;
 	font-weight: 400;
+}
+
+.assessment-result-outcome {
+	display: inline-flex;
+	align-items: center;
+	padding: 5px 9px;
+	border-radius: 999px;
+	font-size: 12px;
+	font-weight: 700;
+	white-space: nowrap;
+}
+
+.assessment-result-outcome.is-pass {
+	color: #287344;
+	background: #eaf8f0;
+}
+
+.assessment-result-outcome.is-fail {
+	color: #a33f35;
+	background: #fff0ee;
+}
+
+.assessment-result-outcome.is-unset,
+.assessment-result-outcome.is-pending {
+	color: #697184;
+	background: #f0f1f5;
+}
+
+.assessment-results-table td > .assessment-result-outcome + small,
+.student-exam-table td > .assessment-result-outcome + small {
+	display: block;
+	margin-top: 5px;
 }
 
 @media (max-width: 620px) {

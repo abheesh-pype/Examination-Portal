@@ -29,7 +29,7 @@ type AssessmentSection = Record<string, unknown> & {
   question_count?: unknown;
   correct_mark?: unknown;
   wrong_mark?: unknown;
-  difficulty_percentages?: unknown;
+  difficulty_level?: unknown;
 };
 
 export type AttemptRow = {
@@ -104,37 +104,6 @@ function getQuestionDetails(value: unknown) {
   return isRecord(value) ? sanitizeStudentDetails(value) as Record<string, unknown> : {};
 }
 
-function allocateDifficultyCounts(section: AssessmentSection, questionCount: number) {
-  if (!Array.isArray(section.difficulty_percentages)) return null;
-  const configured = section.difficulty_percentages
-    .filter(isRecord)
-    .filter((entry) => typeof entry.percentage === "string" || typeof entry.percentage === "number")
-    .filter((entry) => String(entry.percentage).trim() !== "");
-  if (!configured.length) return null;
-
-  const percentages = configured.map((entry) => ({
-    level: String(entry.level ?? "").trim(),
-    percentage: Number(entry.percentage),
-  }));
-  if (percentages.some((entry) => !entry.level || !Number.isFinite(entry.percentage) || entry.percentage < 0 || entry.percentage > 100)
-    || Math.abs(percentages.reduce((sum, entry) => sum + entry.percentage, 0) - 100) > 0.0001
-    || new Set(percentages.map((entry) => entry.level.toLocaleLowerCase())).size !== percentages.length) {
-    throw new Error("Each configured difficulty distribution must use unique levels and total 100%.");
-  }
-
-  const targets = percentages.map((entry) => {
-    const exact = questionCount * entry.percentage / 100;
-    return { level: entry.level, count: Math.floor(exact), remainder: exact - Math.floor(exact) };
-  });
-  let remaining = questionCount - targets.reduce((sum, entry) => sum + entry.count, 0);
-  for (const target of [...targets].sort((first, second) => second.remainder - first.remainder)) {
-    if (remaining <= 0) break;
-    target.count += 1;
-    remaining -= 1;
-  }
-  return targets;
-}
-
 function makeAttemptQuestion(
   row: QuestionRow,
   sectionName: string,
@@ -191,26 +160,35 @@ export function buildAttemptQuestionSet(
       throw new Error(`Section "${name}" has invalid marks.`);
     }
 
-    const available = questionRows.filter((row) =>
-      !selectedIds.has(Number(row.id))
-      && matchesAssessmentQuestionType(row.question_type, section.question_type),
+    const configuredDifficulty = typeof section.difficulty_level === "string"
+      ? section.difficulty_level.trim()
+      : "";
+    const sectionTypeQuestions = questionRows.filter((row) =>
+      matchesAssessmentQuestionType(row.question_type, section.question_type),
     );
-    const difficultyTargets = allocateDifficultyCounts(section, requestedCount);
-    let selected: QuestionRow[];
-    if (difficultyTargets) {
-      selected = [];
-      for (const target of difficultyTargets) {
-        const targetQuestions = available.filter((row) =>
-          String(row.difficulty_level ?? "").trim().toLocaleLowerCase() === target.level.toLocaleLowerCase(),
-        );
-        if (targetQuestions.length < target.count) {
-          throw new Error(`Section "${name}" does not have enough questions at difficulty level "${target.level}".`);
-        }
-        selected.push(...targetQuestions.slice(0, target.count));
+    const available = sectionTypeQuestions.filter((row) => !selectedIds.has(Number(row.id)));
+    const difficultyQuestions = configuredDifficulty
+      ? available.filter((row) =>
+        String(row.difficulty_level ?? "").trim().toLocaleLowerCase() === configuredDifficulty.toLocaleLowerCase(),
+      )
+      : available;
+    if (difficultyQuestions.length < requestedCount) {
+      if (!questionRows.length) {
+        throw new Error(`Section "${name}" has no active questions matching this assessment's category, sub-category, topic, and language filters.`);
       }
-    } else {
-      selected = available.slice(0, requestedCount);
+      if (!sectionTypeQuestions.length) {
+        const sectionType = typeof section.question_type === "string" && section.question_type.trim()
+          ? section.question_type.trim()
+          : "configured";
+        throw new Error(`Section "${name}" requires ${requestedCount} ${sectionType} questions, but no active questions match this section type. Check the question types and assessment filters.`);
+      }
+      if (!available.length) {
+        throw new Error(`Section "${name}" requires ${requestedCount} questions, but all matching questions have already been assigned to earlier sections.`);
+      }
+      const difficultyDescription = configuredDifficulty ? ` at difficulty level "${configuredDifficulty}"` : "";
+      throw new Error(`Section "${name}" requires ${requestedCount} matching questions${difficultyDescription}, but only ${difficultyQuestions.length} are available. Check the assessment filters and that enough active questions are configured.`);
     }
+    const selected = difficultyQuestions.slice(0, requestedCount);
     if (selected.length !== requestedCount) {
       throw new Error(`Section "${name}" requires ${requestedCount} questions, but only ${selected.length} matching questions are available.`);
     }

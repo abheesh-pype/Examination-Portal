@@ -28,6 +28,7 @@ async function ensureAssessmentResultTables() {
       sections JSONB NOT NULL DEFAULT '[]'::jsonb
     )
   `);
+  await databasePool.query("ALTER TABLE assessment ADD COLUMN IF NOT EXISTS pass_mark NUMERIC");
   await databasePool.query(`
     CREATE TABLE IF NOT EXISTS users (
       id SERIAL PRIMARY KEY,
@@ -223,6 +224,10 @@ function getAssessmentResult(row: Record<string, unknown>) {
     obtained_mark: marks.obtainedMark,
     negative_mark: marks.negativeMark,
     total_mark: marks.totalMark,
+    pass_mark: row.pass_mark === null || row.pass_mark === undefined ? null : Number(row.pass_mark),
+    passed: row.pass_mark === null || row.pass_mark === undefined
+      ? null
+      : marks.obtainedMark >= Number(row.pass_mark),
     evaluated_at: row.evaluated_at,
   };
 }
@@ -248,6 +253,7 @@ export async function GET(request: Request) {
              assessment.start_date AS assessment_start_date,
              assessment.end_date AS assessment_end_date,
              assessment.sections,
+             assessment.pass_mark,
              candidate.id AS candidate_id,
              candidate.name AS candidate_name,
              candidate.candidate_data,
@@ -293,6 +299,7 @@ export async function POST(request: Request) {
              assessment.start_date AS assessment_start_date,
              assessment.end_date AS assessment_end_date,
              assessment.sections,
+             assessment.pass_mark,
              candidate.id AS candidate_id,
              candidate.name AS candidate_name,
              candidate.candidate_data,

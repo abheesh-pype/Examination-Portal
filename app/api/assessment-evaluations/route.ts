@@ -43,6 +43,7 @@ async function ensureEvaluationTables() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+  await databasePool.query("ALTER TABLE assessment ADD COLUMN IF NOT EXISTS pass_mark NUMERIC");
   await databasePool.query(`
     CREATE TABLE IF NOT EXISTS users (
       id SERIAL PRIMARY KEY,
@@ -179,7 +180,7 @@ async function getEvaluationAccess(assessmentId: number, accountUserId: number) 
     return { error: "Only administrators and evaluators can evaluate assessments.", status: 403 as const };
   }
   const assessmentResult = await databasePool.query(`
-    SELECT id, examination, name, start_date, end_date, last_login, sections, question_category,
+    SELECT id, examination, name, start_date, end_date, last_login, pass_mark, sections, question_category,
            sub_category, topic, question_language
     FROM assessment WHERE id = $1
   `, [assessmentId]);
@@ -446,6 +447,9 @@ export async function GET(request: Request) {
           id: assessmentId,
           name: String(assessment.name ?? ""),
           examination: String(assessment.examination ?? ""),
+          pass_mark: assessment.pass_mark === null || assessment.pass_mark === undefined
+            ? null
+            : Number(assessment.pass_mark),
         },
         candidate: {
           id: Number(submission.candidate_id),
@@ -458,6 +462,9 @@ export async function GET(request: Request) {
         submitted_at: submission.submitted_at,
         evaluated_at: submission.evaluated_at,
         obtained_mark: submission.obtained_mark === null ? null : Number(submission.obtained_mark),
+        passed: submission.evaluated_at && assessment.pass_mark !== null && assessment.pass_mark !== undefined
+          ? Number(submission.obtained_mark) >= Number(assessment.pass_mark)
+          : null,
         max_mark: getConfiguredMaximumMark(assessment) ?? score.totalMarks,
         answers,
         manual_marks: manualMarks,
@@ -515,6 +522,9 @@ export async function GET(request: Request) {
         id: assessmentId,
         name: String(assessment.name ?? ""),
         examination: String(assessment.examination ?? ""),
+        pass_mark: assessment.pass_mark === null || assessment.pass_mark === undefined
+          ? null
+          : Number(assessment.pass_mark),
       },
       candidates: candidatesResult.rows.map((row) => {
         const data = row.candidate_data as CandidateEvaluationData | null;
@@ -609,6 +619,12 @@ export async function POST(request: Request) {
       evaluated_at: updated.rows[0].evaluated_at,
       obtained_mark: score.obtainedMark,
       max_mark: getConfiguredMaximumMark(access.assessment as Record<string, unknown>) ?? score.totalMarks,
+      pass_mark: access.assessment.pass_mark === null || access.assessment.pass_mark === undefined
+        ? null
+        : Number(access.assessment.pass_mark),
+      passed: access.assessment.pass_mark === null || access.assessment.pass_mark === undefined
+        ? null
+        : score.obtainedMark >= Number(access.assessment.pass_mark),
     });
   } catch (error) {
     console.error("Failed to save assessment evaluation", error);

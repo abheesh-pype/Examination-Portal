@@ -72,6 +72,18 @@ export async function ensureExamAttemptTable() {
   `);
 }
 
+let examAttemptTableReady: Promise<void> | undefined;
+
+export function ensureExamAttemptTableOnce() {
+  if (!examAttemptTableReady) {
+    examAttemptTableReady = ensureExamAttemptTable().catch((error: unknown) => {
+      examAttemptTableReady = undefined;
+      throw error;
+    });
+  }
+  return examAttemptTableReady;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }

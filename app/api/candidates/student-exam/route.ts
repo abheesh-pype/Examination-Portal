@@ -4,7 +4,7 @@ import { authorizeApiRequest } from "@/lib/auth";
 import {
   attemptQuestionResponse,
   buildAttemptQuestionSet,
-  ensureExamAttemptTable,
+  ensureExamAttemptTableOnce,
   finalizeAttempt,
   type AttemptRow,
   validateAttemptAnswer,
@@ -104,7 +104,7 @@ async function createStudentExamTables() {
     ALTER TABLE assessment_candidate_submissions
     ADD COLUMN IF NOT EXISTS questions_snapshot JSONB NOT NULL DEFAULT '[]'::jsonb
   `);
-  await ensureExamAttemptTable();
+  await ensureExamAttemptTableOnce();
 }
 
 let studentExamTablesPromise: Promise<void> | undefined;
@@ -133,6 +133,32 @@ function buildResponse(attempt: AttemptRow, serverTime: Date | string) {
     answers: attempt.answers,
     sections: attemptQuestionResponse(attempt),
   };
+}
+
+export async function GET(request: Request) {
+  try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
+    const assessmentId = Number(new URL(request.url).searchParams.get("assessmentId"));
+    if (!Number.isInteger(assessmentId) || assessmentId <= 0) {
+      return NextResponse.json({ error: "A valid assessment is required." }, { status: 400 });
+    }
+    await ensureStudentExamTables();
+    const result = await databasePool.query(`
+      SELECT started_at, deadline_at, answers, status, NOW() AS server_time
+      FROM assessment_candidate_attempts
+      WHERE assessment_id = $1 AND candidate_id = $2
+    `, [assessmentId, authorization.candidate?.id ?? 0]);
+    if (!result.rowCount) {
+      return NextResponse.json({ error: "No active examination attempt was found." }, { status: 404 });
+    }
+    return NextResponse.json(result.rows[0], {
+      headers: { "Cache-Control": "no-store, private" },
+    });
+  } catch (error) {
+    console.error("Failed to check student examination attempt state", error);
+    return NextResponse.json({ error: "Unable to check the examination attempt state." }, { status: 500 });
+  }
 }
 
 export async function POST(request: Request) {
@@ -361,12 +387,15 @@ export async function PUT(request: Request) {
       assessmentId?: unknown;
       questionId?: unknown;
       answer?: unknown;
+      attemptStartedAt?: unknown;
     };
     const assessmentId = Number(body.assessmentId);
     const questionId = Number(body.questionId);
     if (!Number.isInteger(assessmentId) || assessmentId <= 0
       || !Number.isInteger(questionId) || questionId <= 0
-      || body.answer === undefined) {
+      || body.answer === undefined
+      || typeof body.attemptStartedAt !== "string"
+      || !Number.isFinite(Date.parse(body.attemptStartedAt))) {
       return NextResponse.json({ error: "A valid assessment, question, and answer are required." }, { status: 400 });
     }
     await ensureStudentExamTables();
@@ -388,6 +417,11 @@ export async function PUT(request: Request) {
         await client.query("ROLLBACK");
         transactionStarted = false;
         return NextResponse.json({ error: "No active examination attempt was found." }, { status: 404 });
+      }
+      if (new Date(attempt.started_at).getTime() !== Date.parse(body.attemptStartedAt)) {
+        await client.query("ROLLBACK");
+        transactionStarted = false;
+        return NextResponse.json({ error: "This examination was restarted. Reload the current attempt before saving answers." }, { status: 409 });
       }
       if (attempt.status !== "in_progress" || attempt.deadline_passed) {
         if (attempt.status === "in_progress") {

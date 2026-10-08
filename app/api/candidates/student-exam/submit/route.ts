@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { databasePool } from "@/lib/db";
 import { authorizeApiRequest } from "@/lib/auth";
 import {
-  ensureExamAttemptTable,
+  ensureExamAttemptTableOnce,
   finalizeAttempt,
   type AttemptRow,
   validateAttemptAnswer,
@@ -68,7 +68,7 @@ async function createSubmissionTables() {
     ALTER TABLE assessment_candidate_submissions
     ADD COLUMN IF NOT EXISTS questions_snapshot JSONB NOT NULL DEFAULT '[]'::jsonb
   `);
-  await ensureExamAttemptTable();
+  await ensureExamAttemptTableOnce();
 }
 
 let submissionTablesPromise: Promise<void> | undefined;
@@ -91,9 +91,11 @@ export async function POST(request: Request) {
   try {
     const authorization = await authorizeApiRequest(request);
     if (!authorization.ok) return authorization.response;
-    const body = await request.json() as { assessmentId?: unknown; answers?: unknown };
+    const body = await request.json() as { assessmentId?: unknown; answers?: unknown; attemptStartedAt?: unknown };
     const assessmentId = Number(body.assessmentId);
-    if (!Number.isInteger(assessmentId) || assessmentId <= 0) {
+    if (!Number.isInteger(assessmentId) || assessmentId <= 0
+      || typeof body.attemptStartedAt !== "string"
+      || !Number.isFinite(Date.parse(body.attemptStartedAt))) {
       return NextResponse.json({ error: "A valid assessment is required." }, { status: 400 });
     }
 
@@ -118,6 +120,11 @@ export async function POST(request: Request) {
         await client.query("ROLLBACK");
         transactionStarted = false;
         return NextResponse.json({ error: "No active examination attempt was found." }, { status: 404 });
+      }
+      if (new Date(attempt.started_at).getTime() !== Date.parse(body.attemptStartedAt)) {
+        await client.query("ROLLBACK");
+        transactionStarted = false;
+        return NextResponse.json({ error: "This examination was restarted. Reload the current attempt before submitting." }, { status: 409 });
       }
       if (attempt.status !== "in_progress") {
         await client.query("COMMIT");

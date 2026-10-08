@@ -301,6 +301,7 @@ export async function authorizeApiRequest(request: Request): Promise<ApiAuthoriz
   }
   if (path === "/api/assessment-invigilate-candidates"
     || path === "/api/assessment-invigilate-activity"
+    || path === "/api/assessment-invigilate-restart"
     || (path === "/api/candidates/student-exam/live-feed" && body.side === "staff")) {
     if (!user.isAdmin && user.role.toLocaleLowerCase() !== "invigilator") {
       return forbidden("Only administrators and invigilators can access invigilation data.");

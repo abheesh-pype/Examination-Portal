@@ -2055,6 +2055,9 @@ function AssessmentInvigilation({ assessment, accountUserId, onClose }: { assess
   const [candidateAction, setCandidateAction] = useState<{ candidate: InvigilationCandidate; action: "timeline" | "feed" | "restart" } | null>(null);
   const [liveFeedStatus, setLiveFeedStatus] = useState("");
   const [liveFeedStream, setLiveFeedStream] = useState<MediaStream | null>(null);
+  const [restartStatus, setRestartStatus] = useState("");
+  const [restartError, setRestartError] = useState("");
+  const [restartingCandidate, setRestartingCandidate] = useState(false);
   const liveFeedVideoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
@@ -2263,6 +2266,8 @@ function AssessmentInvigilation({ assessment, accountUserId, onClose }: { assess
 
   const normalizedSearch = search.trim().toLocaleLowerCase();
   const openCandidateAction = (candidate: InvigilationCandidate, action: "timeline" | "feed" | "restart") => {
+    setRestartStatus("");
+    setRestartError("");
     if (action === "feed") {
       setLiveFeedStream(null);
       setLiveFeedStatus("Requesting consented live camera connection…");
@@ -2303,9 +2308,33 @@ function AssessmentInvigilation({ assessment, accountUserId, onClose }: { assess
     },
     restart: {
       title: "Restart Exam",
-      message: "Exam restart is not available because candidate exam attempts are not implemented yet. No changes have been made.",
+      message: "Restart this candidate's in-progress exam from question 1? All answers they have submitted so far will be permanently cleared. The deadline will stay unchanged, so they will keep only the time currently remaining.",
     },
   }[candidateAction.action] : null;
+  const restartCandidateExam = async () => {
+    if (candidateAction?.action !== "restart" || restartingCandidate) return;
+    setRestartingCandidate(true);
+    setRestartError("");
+    setRestartStatus("");
+    try {
+      const response = await fetch("/api/assessment-invigilate-restart", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          assessmentId: assessment.id,
+          candidateId: candidateAction.candidate.candidate_id,
+        }),
+      });
+      const payload = await response.json() as { error?: string; remaining_seconds?: number };
+      if (!response.ok) throw new Error(payload.error ?? "Unable to restart this candidate's examination.");
+      const seconds = Math.max(0, Number(payload.remaining_seconds) || 0);
+      setRestartStatus(`Exam restarted successfully. The candidate has ${Math.floor(seconds / 60)}m ${seconds % 60}s remaining.`);
+    } catch (error) {
+      setRestartError(error instanceof Error ? error.message : "Unable to restart this candidate's examination.");
+    } finally {
+      setRestartingCandidate(false);
+    }
+  };
 
   return (
     <div className="invigilation-overlay">
@@ -2456,6 +2485,13 @@ function AssessmentInvigilation({ assessment, accountUserId, onClose }: { assess
             <section className="invigilation-action-dialog" role="dialog" aria-modal="true" aria-labelledby="invigilation-action-title">
               <h2 id="invigilation-action-title">{actionDetails.title}</h2>
               <p>{actionDetails.message}</p>
+              {candidateAction?.action === "restart" && restartStatus && <p role="status">{restartStatus}</p>}
+              {candidateAction?.action === "restart" && restartError && <p role="alert">{restartError}</p>}
+              {candidateAction?.action === "restart" && !restartStatus && (
+                <button type="button" onClick={() => void restartCandidateExam()} disabled={restartingCandidate}>
+                  {restartingCandidate ? "Restarting…" : "Restart and clear answers"}
+                </button>
+              )}
               <button type="button" onClick={closeCandidateAction}>Close</button>
             </section>
           )}
@@ -6783,6 +6819,8 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
   const [answers, setAnswers] = useState<Record<number, string | string[]>>({});
   const [activeQuestion, setActiveQuestion] = useState(0);
   const [examDeadline, setExamDeadline] = useState<number | null>(null);
+  const [attemptStartedAt, setAttemptStartedAt] = useState("");
+  const attemptStartedAtRef = useRef("");
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
   const [answerSaveStatus, setAnswerSaveStatus] = useState<"saved" | "saving" | "error">("saved");
   const [answerSaveMessage, setAnswerSaveMessage] = useState("");
@@ -6796,6 +6834,7 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
   const [submittedLocally, setSubmittedLocally] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submissionError, setSubmissionError] = useState("");
+  const [examRestartNotice, setExamRestartNotice] = useState("");
   const [answerLimitMessage, setAnswerLimitMessage] = useState("");
   const submissionPending = useRef(false);
   const deadlineSubmissionAttempted = useRef(false);
@@ -6850,13 +6889,13 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
     }
   }, [assessment.id]);
 
-  const saveAnswerToServer = useCallback((questionId: number, answer: string | string[]) => {
+  const saveAnswerToServer = useCallback((questionId: number, answer: string | string[], startedAt: string) => {
     const save = async () => {
       if (submissionPending.current) return;
       const response = await fetch("/api/candidates/student-exam", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ assessmentId: assessment.id, questionId, answer }),
+        body: JSON.stringify({ assessmentId: assessment.id, questionId, answer, attemptStartedAt: startedAt }),
       });
       const payload = await response.json() as { error?: string };
       if (!response.ok) throw new Error(payload.error ?? "Unable to save this answer.");
@@ -6880,12 +6919,15 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
     if (currentTimer !== undefined) window.clearTimeout(currentTimer);
     answerSaveTimers.current.set(questionId, window.setTimeout(() => {
       answerSaveTimers.current.delete(questionId);
-      void saveAnswerToServer(questionId, value)
+      const startedAt = attemptStartedAtRef.current;
+      void saveAnswerToServer(questionId, value, startedAt)
         .then(() => {
+          if (attemptStartedAtRef.current !== startedAt) return;
           setAnswerSaveStatus("saved");
           setAnswerSaveMessage("");
         })
         .catch((error: unknown) => {
+          if (attemptStartedAtRef.current !== startedAt) return;
           setAnswerSaveStatus("error");
           setAnswerSaveMessage(error instanceof Error ? error.message : "Unable to save your answer. Try again.");
         });
@@ -6936,7 +6978,7 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
       const response = await fetch("/api/candidates/student-exam/submit", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ assessmentId: assessment.id, answers }),
+        body: JSON.stringify({ assessmentId: assessment.id, answers, attemptStartedAt }),
       });
       const payload = await response.json() as { error?: string };
       if (!response.ok) throw new Error(payload.error ?? "Unable to submit this assessment.");
@@ -6950,7 +6992,7 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
       submissionPending.current = false;
       setIsSubmitting(false);
     }
-  }, [answers, assessment.id, clearAnswerSaveTimers, examDeadline, onSubmitted, questions, remainingSeconds, submittedLocally]);
+  }, [answers, assessment.id, attemptStartedAt, clearAnswerSaveTimers, examDeadline, onSubmitted, questions, remainingSeconds, submittedLocally]);
   useEffect(() => {
     submitExamRef.current = () => { void submitExam(); };
   }, [submitExam]);
@@ -7505,11 +7547,16 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
       if (!sections.length || !Number.isFinite(deadline) || !Number.isFinite(serverTime) || remainingMilliseconds <= 0) {
         throw new Error("The server returned an invalid examination attempt.");
       }
+      if (!payload.started_at || !Number.isFinite(Date.parse(payload.started_at))) {
+        throw new Error("The server returned an invalid examination attempt version.");
+      }
       setExamSections(sections);
       setAnswers(Object.fromEntries(
         Object.entries(payload.answers ?? {}).map(([questionId, answer]) => [Number(questionId), answer]),
       ));
       setActiveQuestion(0);
+      attemptStartedAtRef.current = payload.started_at;
+      setAttemptStartedAt(payload.started_at);
       deadlineSubmissionAttempted.current = false;
       setAnswerSaveStatus("saved");
       setAnswerSaveMessage("");
@@ -7526,6 +7573,61 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
       setStep("id-proof");
     }
   }
+
+  useEffect(() => {
+    if (step !== "exam" || !attemptStartedAt) return;
+    let cancelled = false;
+    let polling = false;
+    const checkAttemptState = async () => {
+      if (polling || cancelled) return;
+      polling = true;
+      try {
+        const requestStartedAt = performance.now();
+        const response = await fetch(`/api/candidates/student-exam?assessmentId=${assessment.id}`);
+        const payload = await response.json() as {
+          started_at?: string;
+          deadline_at?: string;
+          answers?: Record<string, string | string[]>;
+          status?: string;
+          server_time?: string;
+          error?: string;
+        };
+        if (!response.ok) throw new Error(payload.error ?? "Unable to check examination status.");
+        if (cancelled || !payload.started_at || payload.started_at === attemptStartedAtRef.current) return;
+        if (payload.status !== "in_progress" || !payload.deadline_at || !payload.server_time) {
+          throw new Error("This examination attempt is no longer in progress.");
+        }
+        const remainingMilliseconds = new Date(payload.deadline_at).getTime()
+          - new Date(payload.server_time).getTime()
+          - (performance.now() - requestStartedAt);
+        if (!Number.isFinite(remainingMilliseconds) || remainingMilliseconds <= 0) return;
+        clearAnswerSaveTimers();
+        answerSaveQueue.current = Promise.resolve();
+        attemptStartedAtRef.current = payload.started_at;
+        setAttemptStartedAt(payload.started_at);
+        setAnswers(Object.fromEntries(
+          Object.entries(payload.answers ?? {}).map(([questionId, answer]) => [Number(questionId), answer]),
+        ));
+        setActiveQuestion(0);
+        setExamDeadline(performance.now() + remainingMilliseconds);
+        setRemainingSeconds(Math.ceil(remainingMilliseconds / 1000));
+        setAnswerSaveStatus("saved");
+        setAnswerSaveMessage("");
+        setAnswerLimitMessage("");
+        setExamRestartNotice("Your examination was restarted by the invigilator. Your previous answers were cleared.");
+      } catch (error) {
+        if (!cancelled) console.error("Unable to check for an invigilator examination restart", error);
+      } finally {
+        polling = false;
+      }
+    };
+    void checkAttemptState();
+    const interval = window.setInterval(() => void checkAttemptState(), 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [assessment.id, attemptStartedAt, clearAnswerSaveTimers, step]);
 
   const formattedTime = remainingSeconds === null
     ? "--:--"
@@ -7690,6 +7792,7 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
             </aside>
             <section className="student-exam-question-area" aria-live="polite">
               <div className="student-exam-session-banner" role="status"><span>●</span> {answerSaveStatus === "saving" ? "Saving your latest answer…" : answerSaveStatus === "error" ? answerSaveMessage || "An answer could not be saved." : "Your answers are saved to this examination attempt."}</div>
+              {examRestartNotice && <p className="student-exam-motion-warning" role="status">{examRestartNotice}</p>}
               {motionWarning && <p className="student-exam-motion-warning" role="alert">⚠ {motionWarning}</p>}
               {answerSaveStatus === "error" && <p className="student-exam-motion-warning" role="alert">{answerSaveMessage}</p>}
               {submissionError && <p className="student-exam-motion-warning" role="alert">{submissionError}</p>}

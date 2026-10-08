@@ -1,6 +1,7 @@
 import type { PoolClient } from "pg";
 import { databasePool } from "@/lib/db";
 import { matchesAssessmentQuestionType } from "@/lib/question-types";
+import { ensureExamTimelineTable, recordExamTimelineEvent } from "@/lib/exam-timeline";
 
 export type AttemptQuestion = {
   id: number;
@@ -239,7 +240,9 @@ export async function finalizeAttempt(
   attempt: AttemptRow,
   status: "submitted" | "expired",
   answers: Record<string, unknown> = attempt.answers,
+  source: "candidate" | "invigilator" | "system" = status === "expired" ? "system" : "candidate",
 ) {
+  await ensureExamTimelineTable();
   const saved = await client.query(
     `UPDATE assessment_candidate_attempts
      SET status = $2, answers = $3::jsonb, submitted_at = NOW()
@@ -248,6 +251,13 @@ export async function finalizeAttempt(
     [attempt.id, status, JSON.stringify(answers)],
   );
   if (!saved.rowCount) return null;
+  await recordExamTimelineEvent(
+    client,
+    attempt.assessment_id,
+    attempt.candidate_id,
+    status === "expired" ? "exam_time_expired" : "exam_submitted",
+    source,
+  );
   const submission = await client.query(`
     INSERT INTO assessment_candidate_submissions (
       assessment_id, candidate_id, answers, questions_snapshot,

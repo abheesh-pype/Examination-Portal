@@ -85,13 +85,36 @@ export async function PATCH(request: Request) {
   try {
     const authorization = await authorizeApiRequest(request);
     if (!authorization.ok) return authorization.response;
-    const body = await request.json() as { id?: unknown; password?: unknown };
+    const body = await request.json() as { id?: unknown; password?: unknown; status?: unknown };
     const userId = Number(body.id);
-    const password = typeof body.password === "string" ? body.password : "";
 
     if (!Number.isInteger(userId) || userId <= 0) {
       return NextResponse.json({ error: "A valid user id is required" }, { status: 400 });
     }
+
+    if ("status" in body) {
+      if (typeof body.status !== "boolean") {
+        return NextResponse.json({ error: "A valid user status is required" }, { status: 400 });
+      }
+
+      await ensureUsersTable();
+      const result = await databasePool.query(
+        `
+          UPDATE users
+          SET status = $2
+          WHERE id = $1
+          RETURNING id, name, email, role, mobile, status, verified, created_on
+        `,
+        [userId, body.status],
+      );
+
+      if (result.rowCount === 0) {
+        return NextResponse.json({ error: "User not found" }, { status: 404 });
+      }
+      return NextResponse.json(result.rows[0]);
+    }
+
+    const password = typeof body.password === "string" ? body.password : "";
     if (!password) {
       return NextResponse.json({ error: "A new password is required" }, { status: 400 });
     }

@@ -9,6 +9,7 @@ import {
   type AttemptRow,
   validateAttemptAnswer,
 } from "@/lib/exam-attempts";
+import { ensureExamTimelineTable, recordExamTimelineEvent } from "@/lib/exam-timeline";
 
 export const runtime = "nodejs";
 
@@ -105,6 +106,7 @@ async function createStudentExamTables() {
     ADD COLUMN IF NOT EXISTS questions_snapshot JSONB NOT NULL DEFAULT '[]'::jsonb
   `);
   await ensureExamAttemptTableOnce();
+  await ensureExamTimelineTable();
 }
 
 let studentExamTablesPromise: Promise<void> | undefined;
@@ -145,12 +147,33 @@ export async function GET(request: Request) {
     }
     await ensureStudentExamTables();
     const result = await databasePool.query(`
-      SELECT started_at, deadline_at, answers, status, NOW() AS server_time
-      FROM assessment_candidate_attempts
-      WHERE assessment_id = $1 AND candidate_id = $2
+      SELECT attempt.started_at, attempt.deadline_at, attempt.answers, attempt.status, NOW() AS server_time,
+             EXISTS (
+               SELECT 1
+               FROM assessment_candidate_timeline_events AS quit_event
+               WHERE quit_event.assessment_id = attempt.assessment_id
+                 AND quit_event.candidate_id = attempt.candidate_id
+                 AND quit_event.source = 'invigilator'
+                 AND quit_event.event_type IN ('exam_quit', 'exam_submitted')
+                 AND quit_event.occurred_at >= attempt.started_at
+             ) AS ended_by_admin
+      FROM assessment_candidate_attempts AS attempt
+      WHERE attempt.assessment_id = $1 AND attempt.candidate_id = $2
     `, [assessmentId, authorization.candidate?.id ?? 0]);
     if (!result.rowCount) {
-      return NextResponse.json({ error: "No active examination attempt was found." }, { status: 404 });
+      const quitResult = await databasePool.query(`
+        SELECT EXISTS (
+          SELECT 1
+          FROM assessment_candidate_timeline_events
+          WHERE assessment_id = $1 AND candidate_id = $2
+            AND source = 'invigilator'
+            AND event_type IN ('exam_quit', 'exam_submitted')
+        ) AS ended_by_admin
+      `, [assessmentId, authorization.candidate?.id ?? 0]);
+      return NextResponse.json({
+        ended_by_admin: Boolean(quitResult.rows[0]?.ended_by_admin),
+        error: "No active examination attempt was found.",
+      }, { status: 404 });
     }
     return NextResponse.json(result.rows[0], {
       headers: { "Cache-Control": "no-store, private" },
@@ -246,6 +269,30 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: "This student is not assigned to the assessment." }, { status: 403 });
       }
 
+      const legacyAdminQuit = await client.query(`
+        SELECT EXISTS (
+          SELECT 1
+          FROM assessment_candidate_submissions AS submission
+          JOIN assessment_candidate_timeline_events AS quit_event
+            ON quit_event.assessment_id = submission.assessment_id
+           AND quit_event.candidate_id = submission.candidate_id
+           AND quit_event.source = 'invigilator'
+           AND quit_event.event_type = 'exam_submitted'
+           AND quit_event.occurred_at >= submission.submitted_at
+          WHERE submission.assessment_id = $1 AND submission.candidate_id = $2
+        ) AS was_quit
+      `, [assessmentId, candidate.id]);
+      if (legacyAdminQuit.rows[0]?.was_quit) {
+        await client.query(
+          "DELETE FROM assessment_candidate_submissions WHERE assessment_id = $1 AND candidate_id = $2",
+          [assessmentId, candidate.id],
+        );
+        await client.query(
+          "DELETE FROM assessment_candidate_attempts WHERE assessment_id = $1 AND candidate_id = $2",
+          [assessmentId, candidate.id],
+        );
+      }
+
       const attemptResult = await client.query(`
         SELECT id, assessment_id, candidate_id, status, answers, questions_snapshot,
                selfie_photo, id_photo, started_at, deadline_at, submitted_at
@@ -266,6 +313,7 @@ export async function POST(request: Request) {
           transactionStarted = false;
           return NextResponse.json({ error: "The examination deadline has passed; your saved answers were submitted." }, { status: 409 });
         }
+        await recordExamTimelineEvent(client, assessmentId, candidate.id, "exam_resumed", "candidate");
         await client.query("COMMIT");
         transactionStarted = false;
         return NextResponse.json(buildResponse(existingAttempt, serverTime));
@@ -364,6 +412,7 @@ export async function POST(request: Request) {
         new Date(deadline).toISOString(),
       ]);
       const attempt = inserted.rows[0] as AttemptRow;
+      await recordExamTimelineEvent(client, assessmentId, candidate.id, "exam_started", "candidate");
       await client.query("COMMIT");
       transactionStarted = false;
       return NextResponse.json(buildResponse(attempt, serverTime), { status: 201 });

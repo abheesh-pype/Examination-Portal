@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { authorizeApiRequest } from "@/lib/auth";
 import { databasePool } from "@/lib/db";
 import { ensureExamAttemptTableOnce, finalizeAttempt, type AttemptRow } from "@/lib/exam-attempts";
+import { ensureExamTimelineTable, recordExamTimelineEvent } from "@/lib/exam-timeline";
 
 export const runtime = "nodejs";
 
@@ -35,6 +36,7 @@ export async function POST(request: Request) {
 
     await ensureRestartAssignmentTable();
     await ensureExamAttemptTableOnce();
+    await ensureExamTimelineTable();
     const client = await databasePool.connect();
     let transactionStarted = false;
     try {
@@ -42,7 +44,8 @@ export async function POST(request: Request) {
       transactionStarted = true;
       await client.query("SELECT pg_advisory_xact_lock($1, $2)", [assessmentId, candidateId]);
 
-      if (!authorization.user.isAdmin) {
+      if (!authorization.user.isAdmin
+        || authorization.user.role.trim().toLocaleLowerCase() === "invigilator") {
         const assignment = await client.query(`
           SELECT 1
           FROM assessment_candidate_invigilator
@@ -100,6 +103,7 @@ export async function POST(request: Request) {
         WHERE id = $1 AND status = 'in_progress'
         RETURNING started_at, deadline_at
       `, [attempt.id]);
+      await recordExamTimelineEvent(client, assessmentId, candidateId, "exam_restarted", "invigilator");
       await client.query("COMMIT");
       transactionStarted = false;
       return NextResponse.json({

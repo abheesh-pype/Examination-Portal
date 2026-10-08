@@ -147,8 +147,8 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: "An active account is required to view monitoring activity." }, { status: 403 });
     }
     const role = String(userResult.rows[0].role ?? "").trim().toLocaleLowerCase();
-    const isAdmin = role.includes("admin") || Boolean(userResult.rows[0].administrator_access);
     const isInvigilator = role === "invigilator";
+    const isAdmin = !isInvigilator && (role.includes("admin") || Boolean(userResult.rows[0].administrator_access));
     if (!isAdmin && !isInvigilator) {
       return NextResponse.json({ error: "Only administrators and assigned invigilators can view monitoring activity." }, { status: 403 });
     }

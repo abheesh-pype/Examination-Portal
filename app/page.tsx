@@ -1,16 +1,22 @@
 "use client";
 
 import React, { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import Link from "next/link";
+import { usePathname, useRouter } from "next/navigation";
 import NextImage from "next/image";
 import Papa from "papaparse";
 import readXlsxFile from "read-excel-file/browser";
 import { strToU8, zipSync } from "fflate";
+import type { CandidateTimelineEventType } from "@/lib/exam-timeline";
 import { matchesAssessmentQuestionType } from "@/lib/question-types";
 
 const navigationItems = [
   { label: "Dashboard", icon: "⌂" },
   { label: "Questions", icon: "?" },
   { label: "Assessments", icon: "▣" },
+  { label: "Assigned Invigilator", icon: "◉" },
+  { label: "Assigned Evaluator", icon: "◎" },
+  { label: "Exam Applicants", icon: "♟" },
   { label: "Candidates", icon: "♙" },
   { 
     label: "Users", 
@@ -45,6 +51,36 @@ const navigationOptionIcons: Record<string, string> = {
   "Candidate Permissions": "◉",
   Results: "▤",
 };
+
+const sectionPaths: Record<string, string> = {
+  Dashboard: "/dashboard",
+  Assessments: "/assessment",
+  "Assigned Invigilator": "/assigned-invigilator",
+  "Assigned Evaluator": "/assigned-evaluator",
+  "Exam Applicants": "/examination-candidates",
+  Questions: "/questions",
+  Candidates: "/candidates",
+  Users: "/users",
+  Results: "/result",
+  Organization: "/settings/organization",
+  "Question Categories": "/settings/question-categories",
+  "Question Sub Categories": "/settings/question-sub-categories",
+  "Question Topics": "/settings/question-topics",
+  "Difficulty Levels": "/settings/difficulty-levels",
+  Languages: "/settings/languages",
+  Examinations: "/settings/examinations",
+  "Candidate Categories": "/settings/candidate-categories",
+  "Candidate Sub Categories": "/settings/candidate-sub-categories",
+  "Candidate Settings": "/settings/candidate-settings",
+  "Candidate Permissions": "/settings/candidate-permissions",
+  "Default Settings": "/settings/default-settings",
+};
+
+function getSectionFromPath(pathname: string) {
+  if (pathname === "/" || pathname === "/dashboard") return "Dashboard";
+  if (pathname === "/home" || pathname === "/assessment") return "Assessments";
+  return Object.entries(sectionPaths).find(([, path]) => path === pathname)?.[0] ?? "Dashboard";
+}
 
 const dashboardPages = [
   { label: "Questions", icon: "?", description: "Question bank" },
@@ -81,6 +117,7 @@ type AssessmentCardData = {
   topic?: string | null;
   question_language?: string | null;
   sections?: AssessmentSection[];
+  has_active_questions?: boolean;
   start: string;
   end: string;
   questions: string;
@@ -697,6 +734,20 @@ function getAssessmentEndTime(assessment: AssessmentCardData) {
     : null;
 }
 
+function formatAssessmentDateTime(value: string | null | undefined, fallback = "—") {
+  if (!value) return fallback;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return fallback;
+  return new Intl.DateTimeFormat("en-GB", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+  }).format(date);
+}
+
 function AssessmentCard({ assessment, currentRole, canEvaluate, isInvigilator, isEvaluator, currentTime, onDeleted, onEdit, onPreview, onAssignCandidates, onAssignEvaluator, onAssignInvigilator, onInvigilate, onEvaluate }: { assessment: AssessmentCardData; currentRole?: any; canEvaluate?: boolean; isInvigilator?: boolean; isEvaluator?: boolean; currentTime?: number | null; onDeleted?: (id: number) => void; onEdit?: (assessment: AssessmentCardData) => void; onPreview?: (assessment: AssessmentCardData) => void; onAssignCandidates?: (assessment: AssessmentCardData) => void; onAssignEvaluator?: (assessment: AssessmentCardData) => void; onAssignInvigilator?: (assessment: AssessmentCardData) => void; onInvigilate?: (assessment: AssessmentCardData) => void; onEvaluate?: (assessment: AssessmentCardData) => void }) {
   const [showOptions, setShowOptions] = useState(false);
   const [openAssignment, setOpenAssignment] = useState<string | null>(null);
@@ -761,6 +812,16 @@ function AssessmentCard({ assessment, currentRole, canEvaluate, isInvigilator, i
               {hasStarted ? "Exam Started" : "Upcoming"}
             </span>
           )}
+          {assessment.has_active_questions === false && (
+            <span
+              className="assessment-no-questions-warning"
+              role="img"
+              aria-label="No active questions match this assessment"
+              title="No active questions match this assessment"
+            >
+              !
+            </span>
+          )}
           <button
             className="more-button"
             type="button"
@@ -779,13 +840,21 @@ function AssessmentCard({ assessment, currentRole, canEvaluate, isInvigilator, i
             {isInvigilator ? (
               <>
                 <button type="button" role="menuitem" onClick={() => { onPreview?.(assessment); setShowOptions(false); }}>Preview</button>
-                <button className="option-menu-item" type="button" role="menuitem" onClick={() => { onInvigilate?.(assessment); setShowOptions(false); }}>Invigilate</button>
+                <button
+                  className="option-menu-item"
+                  type="button"
+                  role="menuitem"
+                  disabled={!hasStarted}
+                  title={!hasStarted ? "Invigilation becomes available when the assessment starts." : undefined}
+                  onClick={() => { onInvigilate?.(assessment); setShowOptions(false); }}
+                >
+                  Invigilate
+                </button>
                 <button className="option-menu-item" type="button" role="menuitem">Reports</button>
               </>
             ) : isEvaluator ? (
               <>
                 <button type="button" role="menuitem" onClick={() => { onPreview?.(assessment); setShowOptions(false); }}>Preview</button>
-                <button className="option-menu-item" type="button" role="menuitem" onClick={() => { onInvigilate?.(assessment); setShowOptions(false); }}>Invigilate</button>
                 <button className="option-menu-item" type="button" role="menuitem" onClick={() => { onEvaluate?.(assessment); setShowOptions(false); }}>Evaluate</button>
                 <button className="option-menu-item" type="button" role="menuitem">Reports</button>
               </>
@@ -860,7 +929,7 @@ function AssessmentPreview({ assessment, onClose }: { assessment: AssessmentCard
     setLoading(true);
     setError("");
 
-    fetch("/api/questions", { signal: controller.signal })
+    fetch(`/api/assessment-preview?assessmentId=${assessment.id}`, { signal: controller.signal })
       .then(async (response) => {
         const data = await response.json() as QuestionRecord[] & { error?: string };
         if (!response.ok) throw new Error(data.error ?? "Unable to load questions");
@@ -1725,7 +1794,9 @@ function AssessmentStaffAssignment({ assessment, role, onClose }: { assessment: 
         setCategories(categoryData.filter((item) => item.status));
         setSubCategories(subCategoryData.filter((item) => item.status));
         setCandidates(candidateData.filter((item) => item.status !== false));
-        setStaffUsers(usersData.filter((user) => user.role.trim().toLocaleLowerCase() === role));
+        setStaffUsers(usersData.filter((user) =>
+          user.status === true && user.role.trim().toLocaleLowerCase() === role
+        ));
         setAssignments(assignmentData.map((assignment) => ({
           candidate_id: Number(assignment.candidate_id),
           staff_user_id: Number(assignment[`${role}_user_id`]),
@@ -2027,6 +2098,14 @@ type InvigilationProctorCounts = {
   fullscreenDisabled: number;
 };
 
+type InvigilationTimelineEvent = {
+  id: string;
+  event_type: string;
+  label: string;
+  source: "candidate" | "invigilator" | "system";
+  occurred_at: string;
+};
+
 type InvigilationActivity = {
   assessment_id: number;
   account_user_id: number;
@@ -2044,7 +2123,7 @@ type InvigilationActivity = {
   }>;
 };
 
-function AssessmentInvigilation({ assessment, accountUserId, onClose }: { assessment: AssessmentCardData; accountUserId: number | null; onClose: () => void }) {
+function AssessmentInvigilation({ assessment, accountUserId, canRestart, canQuit, onClose }: { assessment: AssessmentCardData; accountUserId: number | null; canRestart: boolean; canQuit: boolean; onClose: () => void }) {
   const [activeTab, setActiveTab] = useState<"activity" | "candidates">("activity");
   const [candidates, setCandidates] = useState<InvigilationCandidate[]>([]);
   const [loading, setLoading] = useState(true);
@@ -2052,12 +2131,19 @@ function AssessmentInvigilation({ assessment, accountUserId, onClose }: { assess
   const [activity, setActivity] = useState<InvigilationActivity | null>(null);
   const [activityError, setActivityError] = useState("");
   const [search, setSearch] = useState("");
-  const [candidateAction, setCandidateAction] = useState<{ candidate: InvigilationCandidate; action: "timeline" | "feed" | "restart" } | null>(null);
+  const [candidateAction, setCandidateAction] = useState<{ candidate: InvigilationCandidate; action: "timeline" | "feed" | "restart" | "quit" } | null>(null);
   const [liveFeedStatus, setLiveFeedStatus] = useState("");
   const [liveFeedStream, setLiveFeedStream] = useState<MediaStream | null>(null);
   const [restartStatus, setRestartStatus] = useState("");
   const [restartError, setRestartError] = useState("");
   const [restartingCandidate, setRestartingCandidate] = useState(false);
+  const [quitStatus, setQuitStatus] = useState("");
+  const [quitError, setQuitError] = useState("");
+  const [quittingCandidate, setQuittingCandidate] = useState(false);
+  const [timelineEvents, setTimelineEvents] = useState<InvigilationTimelineEvent[]>([]);
+  const [timelineLoading, setTimelineLoading] = useState(false);
+  const [timelineError, setTimelineError] = useState("");
+  const [timelineUpdatedAt, setTimelineUpdatedAt] = useState<number | null>(null);
   const liveFeedVideoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
@@ -2086,6 +2172,59 @@ function AssessmentInvigilation({ assessment, accountUserId, onClose }: { assess
       });
     return () => controller.abort();
   }, [accountUserId, assessment.id]);
+
+  useEffect(() => {
+    if (candidateAction?.action !== "timeline" || !accountUserId) return;
+    const controller = new AbortController();
+    let polling = false;
+    let hasLoaded = false;
+    let afterId: string | null = null;
+    setTimelineEvents([]);
+    setTimelineLoading(true);
+    setTimelineError("");
+    setTimelineUpdatedAt(null);
+    const loadTimeline = async () => {
+      if (polling || controller.signal.aborted) return;
+      polling = true;
+      try {
+        const cursor = afterId ? `&afterId=${encodeURIComponent(afterId)}` : "";
+        const response = await fetch(`/api/candidates/student-exam/events?assessmentId=${assessment.id}&candidateId=${candidateAction.candidate.candidate_id}&accountUserId=${accountUserId}${cursor}`, {
+          signal: controller.signal,
+          cache: "no-store",
+        });
+        const payload = await response.json() as InvigilationTimelineEvent[] & { error?: string };
+        if (!response.ok) throw new Error(payload.error ?? "Unable to load examination timeline.");
+        if (!Array.isArray(payload)) throw new Error("The examination timeline could not be read.");
+        if (controller.signal.aborted) return;
+        if (payload.length) {
+          afterId = payload[payload.length - 1].id;
+          setTimelineEvents((current) => {
+            const knownIds = new Set(current.map((event) => event.id));
+            return [...current, ...payload.filter((event) => !knownIds.has(event.id))]
+              .sort((first, second) => Date.parse(first.occurred_at) - Date.parse(second.occurred_at)
+                || first.id.localeCompare(second.id, undefined, { numeric: true }));
+          });
+        }
+        setTimelineError("");
+        setTimelineUpdatedAt(Date.now());
+      } catch (loadError) {
+        if (loadError instanceof Error && loadError.name === "AbortError") return;
+        setTimelineError(loadError instanceof Error ? loadError.message : "Unable to load examination timeline.");
+      } finally {
+        polling = false;
+        if (!hasLoaded && !controller.signal.aborted) {
+          hasLoaded = true;
+          setTimelineLoading(false);
+        }
+      }
+    };
+    void loadTimeline();
+    const interval = window.setInterval(() => void loadTimeline(), 2000);
+    return () => {
+      controller.abort();
+      window.clearInterval(interval);
+    };
+  }, [accountUserId, assessment.id, candidateAction]);
 
   useEffect(() => {
     if (!accountUserId) {
@@ -2265,9 +2404,11 @@ function AssessmentInvigilation({ assessment, accountUserId, onClose }: { assess
   }, [liveFeedStream]);
 
   const normalizedSearch = search.trim().toLocaleLowerCase();
-  const openCandidateAction = (candidate: InvigilationCandidate, action: "timeline" | "feed" | "restart") => {
+  const openCandidateAction = (candidate: InvigilationCandidate, action: "timeline" | "feed" | "restart" | "quit") => {
     setRestartStatus("");
     setRestartError("");
+    setQuitStatus("");
+    setQuitError("");
     if (action === "feed") {
       setLiveFeedStream(null);
       setLiveFeedStatus("Requesting consented live camera connection…");
@@ -2286,11 +2427,12 @@ function AssessmentInvigilation({ assessment, accountUserId, onClose }: { assess
     candidate.sub_category,
   ].some((value) => value.toLocaleLowerCase().includes(normalizedSearch)));
   const attendingCount = activity?.live_candidates ?? 0;
+  const canAdminQuit = canQuit || activity?.viewer_role === "admin";
   const assignedCandidateCount = activity?.assigned_candidates ?? 0;
   const assessmentDetails = [
     { label: "Examination", value: assessment.subtitle },
-    { label: "Start Date", value: assessment.start_date ? new Date(assessment.start_date).toLocaleString() : "" },
-    { label: "End Date", value: assessment.end_date ? new Date(assessment.end_date).toLocaleString() : "" },
+    { label: "Start Date", value: formatAssessmentDateTime(assessment.start_date, "") },
+    { label: "End Date", value: formatAssessmentDateTime(assessment.end_date, "") },
     { label: "Duration", value: assessment.total_time ? `${assessment.total_time} minutes` : "" },
     { label: "Question Category", value: assessment.question_category ?? "" },
     { label: "Question Sub-Category", value: assessment.sub_category ?? "" },
@@ -2300,7 +2442,7 @@ function AssessmentInvigilation({ assessment, accountUserId, onClose }: { assess
   const actionDetails = candidateAction ? {
     timeline: {
       title: `Timeline — ${getCandidateFieldValue(candidateAction.candidate.candidate_data, "Candidate Name") || candidateAction.candidate.candidate_name}`,
-      message: "No exam timeline is available because candidate exam attempts are not implemented yet.",
+      message: "",
     },
     feed: {
       title: `Live Feed — ${getCandidateFieldValue(candidateAction.candidate.candidate_data, "Candidate Name") || candidateAction.candidate.candidate_name}`,
@@ -2309,6 +2451,10 @@ function AssessmentInvigilation({ assessment, accountUserId, onClose }: { assess
     restart: {
       title: "Restart Exam",
       message: "Restart this candidate's in-progress exam from question 1? All answers they have submitted so far will be permanently cleared. The deadline will stay unchanged, so they will keep only the time currently remaining.",
+    },
+    quit: {
+      title: "Quit Examination",
+      message: "End this candidate's in-progress examination now? Their saved answers will be retained and submitted for evaluation.",
     },
   }[candidateAction.action] : null;
   const restartCandidateExam = async () => {
@@ -2334,6 +2480,38 @@ function AssessmentInvigilation({ assessment, accountUserId, onClose }: { assess
     } finally {
       setRestartingCandidate(false);
     }
+  };
+  const quitCandidateExam = async () => {
+    if (candidateAction?.action !== "quit" || quittingCandidate) return;
+    setQuittingCandidate(true);
+    setQuitError("");
+    setQuitStatus("");
+    try {
+      const response = await fetch("/api/assessment-invigilate-quit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          assessmentId: assessment.id,
+          candidateId: candidateAction.candidate.candidate_id,
+        }),
+      });
+      const payload = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(payload.error ?? "Unable to end this candidate's examination.");
+      setQuitStatus("Examination ended. The candidate's saved answers were submitted for evaluation.");
+    } catch (error) {
+      setQuitError(error instanceof Error ? error.message : "Unable to end this candidate's examination.");
+    } finally {
+      setQuittingCandidate(false);
+    }
+  };
+  const timelineStart = timelineEvents.find((event) => event.event_type === "exam_started")?.occurred_at;
+  const getTimelineElapsed = (occurredAt: string) => {
+    if (!timelineStart) return "";
+    const elapsedSeconds = Math.max(0, Math.floor((Date.parse(occurredAt) - Date.parse(timelineStart)) / 1000));
+    const hours = Math.floor(elapsedSeconds / 3600);
+    const minutes = Math.floor((elapsedSeconds % 3600) / 60);
+    const seconds = elapsedSeconds % 60;
+    return `+${hours ? `${hours}h ` : ""}${minutes}m ${seconds}s`;
   };
 
   return (
@@ -2445,13 +2623,14 @@ function AssessmentInvigilation({ assessment, accountUserId, onClose }: { assess
                       <td>{candidate.category}</td>
                       <td>{candidate.sub_category}</td>
                       <td>{candidate.invigilator_name || "—"}</td>
-                      <td>{assessment.start_date ? new Date(assessment.start_date).toLocaleString() : "—"}</td>
+                      <td>{formatAssessmentDateTime(assessment.start_date)}</td>
                       <td><span className={`invigilation-candidate-status${candidate.candidate_status ? "" : " is-inactive"}`}>{candidate.candidate_status ? "Not Started Yet" : "Inactive"}</span></td>
                       <td>
                         <div className="invigilation-candidate-actions">
                           <button type="button" aria-label={`View timeline for ${candidate.candidate_name}`} title="View timeline" onClick={() => openCandidateAction(candidate, "timeline")}>◷</button>
                           <button type="button" aria-label={`View live feed for ${candidate.candidate_name}`} title="View live feed" onClick={() => openCandidateAction(candidate, "feed")}>▣</button>
-                          <button type="button" aria-label={`Restart exam for ${candidate.candidate_name}`} title="Restart exam" onClick={() => openCandidateAction(candidate, "restart")}>↻</button>
+                          {canRestart && <button type="button" aria-label={`Restart exam for ${candidate.candidate_name}`} title="Restart exam" onClick={() => openCandidateAction(candidate, "restart")}>↻</button>}
+                          {canAdminQuit && <button className="invigilation-quit-action" type="button" aria-label={`Quit examination for ${candidate.candidate_name}`} title="Quit examination" onClick={() => openCandidateAction(candidate, "quit")}>Quit</button>}
                         </div>
                       </td>
                     </tr>
@@ -2481,10 +2660,52 @@ function AssessmentInvigilation({ assessment, accountUserId, onClose }: { assess
               <p className="invigilation-live-feed-status" role="status">{liveFeedStatus}</p>
               <button type="button" onClick={closeCandidateAction}>End live view</button>
             </section>
+          ) : candidateAction?.action === "timeline" ? (
+            <section className="invigilation-action-dialog invigilation-timeline-dialog" role="dialog" aria-modal="true" aria-labelledby="invigilation-action-title">
+              <header>
+                <h2 id="invigilation-action-title">{actionDetails.title}</h2>
+                <button type="button" onClick={closeCandidateAction} aria-label="Close examination timeline">×</button>
+              </header>
+              <p className="invigilation-timeline-description">
+                Timestamped examination-system and candidate-device monitoring events.
+                {timelineUpdatedAt !== null && <span className="invigilation-timeline-live">Live · updated {new Date(timelineUpdatedAt).toLocaleTimeString()}</span>}
+              </p>
+              {timelineLoading ? (
+                <p role="status">Loading examination timeline…</p>
+              ) : timelineError ? (
+                <p className="invigilation-error" role="alert">{timelineError}</p>
+              ) : timelineEvents.length ? (
+                <ol className="invigilation-timeline-list">
+                  {timelineEvents.map((event) => (
+                    <li key={event.id} className={`is-${event.source}`}>
+                      <span className="invigilation-timeline-marker" aria-hidden="true" />
+                      <div>
+                        <strong>{event.label}</strong>
+                        <p>
+                          <time dateTime={event.occurred_at}>{formatAssessmentDateTime(event.occurred_at)}</time>
+                          {timelineStart && <span> · {getTimelineElapsed(event.occurred_at)} elapsed</span>}
+                          <small>{event.source === "candidate" ? "Student device" : event.source === "invigilator" ? "Invigilator" : "System"}</small>
+                        </p>
+                      </div>
+                    </li>
+                  ))}
+                </ol>
+              ) : (
+                <p className="invigilation-timeline-empty">No timeline events have been recorded for this examination yet.</p>
+              )}
+              <button type="button" onClick={closeCandidateAction}>Close</button>
+            </section>
           ) : (
             <section className="invigilation-action-dialog" role="dialog" aria-modal="true" aria-labelledby="invigilation-action-title">
               <h2 id="invigilation-action-title">{actionDetails.title}</h2>
               <p>{actionDetails.message}</p>
+              {candidateAction?.action === "quit" && quitStatus && <p role="status">{quitStatus}</p>}
+              {candidateAction?.action === "quit" && quitError && <p role="alert">{quitError}</p>}
+              {candidateAction?.action === "quit" && !quitStatus && (
+                <button type="button" onClick={() => void quitCandidateExam()} disabled={quittingCandidate}>
+                  {quittingCandidate ? "Ending examination…" : "Quit examination and submit answers"}
+                </button>
+              )}
               {candidateAction?.action === "restart" && restartStatus && <p role="status">{restartStatus}</p>}
               {candidateAction?.action === "restart" && restartError && <p role="alert">{restartError}</p>}
               {candidateAction?.action === "restart" && !restartStatus && (
@@ -2669,6 +2890,7 @@ function ManualAssessmentForm({ onClose, onSaved, initialAssessment }: { onClose
         topic?: string | null;
         question_language?: string | null;
         sections?: AssessmentSection[];
+        has_active_questions?: boolean;
       };
       if (!response.ok) throw new Error(data.error ?? "Unable to save assessment");
 
@@ -2687,8 +2909,9 @@ function ManualAssessmentForm({ onClose, onSaved, initialAssessment }: { onClose
         topic: data.topic ?? null,
         question_language: data.question_language ?? null,
         sections: data.sections ?? sections,
-        start: data.start_date ? new Date(data.start_date).toLocaleString() : "Not scheduled",
-        end: data.end_date ? new Date(data.end_date).toLocaleString() : "Not scheduled",
+        has_active_questions: data.has_active_questions,
+        start: formatAssessmentDateTime(data.start_date, "Not scheduled"),
+        end: formatAssessmentDateTime(data.end_date, "Not scheduled"),
         questions: String((data.sections ?? sections).reduce((total, section) => total + (Number(section.question_count) || 0), 0)),
         marks: String(getAssessmentMaxMark(data.sections ?? sections)),
         candidates: initialAssessment?.candidates ?? "0",
@@ -2932,6 +3155,7 @@ function ManualAssessmentForm({ onClose, onSaved, initialAssessment }: { onClose
 type AssessmentUploadRecord = {
   id: number;
   candidate_count?: number;
+  has_active_questions?: boolean;
   examination: string;
   name: string;
   start_date: string | null;
@@ -5423,6 +5647,8 @@ function UsersPanel({ currentRole }: { currentRole?: any }) {
   const [resettingPasswordUser, setResettingPasswordUser] = useState<any | null>(null);
   const [roles, setRoles] = useState<any[]>([]);
   const [users, setUsers] = useState<any[]>([]);
+  const [updatingUserStatusId, setUpdatingUserStatusId] = useState<number | null>(null);
+  const [userStatusError, setUserStatusError] = useState("");
   const canCreateRoles = hasRolePermission(currentRole, "Users:Roles & Permissions", "create");
   const canEditRoles = hasRolePermission(currentRole, "Users:Roles & Permissions", "edit");
   const canDeleteRoles = hasRolePermission(currentRole, "Users:Roles & Permissions", "delete");
@@ -5446,6 +5672,28 @@ function UsersPanel({ currentRole }: { currentRole?: any }) {
         if (!data.error) setUsers(data);
       })
       .catch(console.error);
+  };
+
+  const updateUserStatus = async (userId: number, status: boolean) => {
+    setUpdatingUserStatusId(userId);
+    setUserStatusError("");
+    try {
+      const response = await fetch("/api/users", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: userId, status }),
+      });
+      const result = await response.json() as { error?: string; status?: boolean };
+      if (!response.ok) throw new Error(result.error ?? "Unable to update user status");
+      if (typeof result.status !== "boolean") throw new Error("The updated user status could not be confirmed.");
+      setUsers((currentUsers) => currentUsers.map((user) =>
+        user.id === userId ? { ...user, status: result.status } : user
+      ));
+    } catch (statusError) {
+      setUserStatusError(statusError instanceof Error ? statusError.message : "Unable to update user status");
+    } finally {
+      setUpdatingUserStatusId(null);
+    }
   };
 
   const deleteUser = async (userId: number) => {
@@ -5547,6 +5795,7 @@ function UsersPanel({ currentRole }: { currentRole?: any }) {
             <label className="search-control" htmlFor="user-search">Search: <input id="user-search" /></label>
           </div>
           <div className="users-table-wrapper">
+            {userStatusError && <p className="form-error" role="alert">{userStatusError}</p>}
             <table className="users-table">
               <thead><tr><th>Name</th><th>Role</th><th>Mobile</th><th>Status</th><th>Verified</th><th>Created On</th><th /></tr></thead>
               <tbody>
@@ -5555,7 +5804,7 @@ function UsersPanel({ currentRole }: { currentRole?: any }) {
                     <td><span className="user-avatar" /> <span><strong>{user.name}</strong><small>{user.email}</small></span></td>
                     <td>{user.role}</td>
                     <td>{user.mobile}</td>
-                    <td><label className="status-toggle"><input type="checkbox" checked={user.status} readOnly /><span /></label> {user.status ? "Active" : "Inactive"}</td>
+                    <td><label className="status-toggle"><input type="checkbox" checked={user.status} disabled={updatingUserStatusId === user.id} onChange={(event) => void updateUserStatus(user.id, event.target.checked)} /><span /></label> {user.status ? "Active" : "Inactive"}</td>
                     <td>{user.verified ? <b className="verified-badge">Verified</b> : <b className="verified-badge" style={{background: '#fef2f2', color: '#991b1b'}}>Unverified</b>}</td>
                     <td>{new Date(user.created_on).toLocaleString()}</td>
                     <td style={{ position: "relative" }}>
@@ -5765,6 +6014,8 @@ function AddQuestionForm({ onClose, onSaved, initialQuestion }: { onClose: () =>
   const [selectedCategory, setSelectedCategory] = useState(initialQuestion?.category ?? "");
   const [selectedSubCategory, setSelectedSubCategory] = useState(initialQuestion?.sub_category ?? "");
   const [selectedTopic, setSelectedTopic] = useState(initialQuestion?.topic ?? "");
+  const [selectedDifficultyLevel, setSelectedDifficultyLevel] = useState(initialQuestion?.difficulty_level ?? "");
+  const [selectedLanguage, setSelectedLanguage] = useState(initialQuestion?.language ?? "");
   const [selectedQuestionType, setSelectedQuestionType] = useState(initialQuestion?.question_type ?? "");
   const [singleAnswer, setSingleAnswer] = useState(typeof initialDetails.answer === "string" ? initialDetails.answer : "");
   const [multipleAnswers, setMultipleAnswers] = useState<string[]>(Array.isArray(initialDetails.answer)
@@ -6145,11 +6396,11 @@ function AddQuestionForm({ onClose, onSaved, initialQuestion }: { onClose: () =>
           )}
 
           <div className="question-metadata-grid">
-            <div className="form-field"><label htmlFor="question-category">Category</label><select id="question-category" value={selectedCategory} onChange={(event) => { setSelectedCategory(event.target.value); setSelectedSubCategory(""); setSelectedTopic(""); }} disabled={loadingOptions}><option value="" disabled>Choose</option>{categories.map((item) => <option key={item.id} value={item.q_category}>{item.q_category}</option>)}</select></div>
-            <div className="form-field"><label htmlFor="question-sub-category">Sub-Category</label><select id="question-sub-category" value={selectedSubCategory} onChange={(event) => { setSelectedSubCategory(event.target.value); setSelectedTopic(""); }} disabled={loadingOptions || !selectedCategory}><option value="" disabled>Choose</option>{filteredSubCategories.map((item) => <option key={item.id} value={item.q_s_category}>{item.q_s_category}</option>)}</select></div>
-            <div className="form-field"><label htmlFor="question-topic">Topic</label><select id="question-topic" value={selectedTopic} onChange={(event) => setSelectedTopic(event.target.value)} disabled={loadingOptions || !selectedSubCategory}><option value="" disabled>Choose</option>{filteredTopics.map((item) => <option key={item.id} value={item.topic}>{item.topic}</option>)}</select></div>
-            <div className="form-field"><label htmlFor="question-difficulty">Difficulty Level</label><select id="question-difficulty" name="difficulty_level" defaultValue={initialQuestion?.difficulty_level ?? ""} disabled={loadingOptions}><option value="" disabled>Choose</option>{difficultyLevels.map((item) => <option key={item.id}>{item.Difficulty_level}</option>)}</select></div>
-            <div className="form-field"><label htmlFor="question-language">Language</label><select id="question-language" name="language" defaultValue={initialQuestion?.language ?? ""} disabled={loadingOptions}><option value="" disabled>Choose</option>{languages.map((item) => <option key={item.id}>{item.q_language}</option>)}</select></div>
+            <div className="form-field"><label htmlFor="question-category">Category</label><select id="question-category" value={selectedCategory} onChange={(event) => { setSelectedCategory(event.target.value); setSelectedSubCategory(""); setSelectedTopic(""); }} disabled={loadingOptions}><option value="" disabled>Choose</option>{selectedCategory && !categories.some((item) => item.q_category === selectedCategory) && <option value={selectedCategory}>{selectedCategory}</option>}{categories.map((item) => <option key={item.id} value={item.q_category}>{item.q_category}</option>)}</select></div>
+            <div className="form-field"><label htmlFor="question-sub-category">Sub-Category</label><select id="question-sub-category" value={selectedSubCategory} onChange={(event) => { setSelectedSubCategory(event.target.value); setSelectedTopic(""); }} disabled={loadingOptions || !selectedCategory}><option value="" disabled>Choose</option>{selectedSubCategory && !filteredSubCategories.some((item) => item.q_s_category === selectedSubCategory) && <option value={selectedSubCategory}>{selectedSubCategory}</option>}{filteredSubCategories.map((item) => <option key={item.id} value={item.q_s_category}>{item.q_s_category}</option>)}</select></div>
+            <div className="form-field"><label htmlFor="question-topic">Topic</label><select id="question-topic" value={selectedTopic} onChange={(event) => setSelectedTopic(event.target.value)} disabled={loadingOptions || !selectedSubCategory}><option value="" disabled>Choose</option>{selectedTopic && !filteredTopics.some((item) => item.topic === selectedTopic) && <option value={selectedTopic}>{selectedTopic}</option>}{filteredTopics.map((item) => <option key={item.id} value={item.topic}>{item.topic}</option>)}</select></div>
+            <div className="form-field"><label htmlFor="question-difficulty">Difficulty Level</label><select id="question-difficulty" name="difficulty_level" value={selectedDifficultyLevel} onChange={(event) => setSelectedDifficultyLevel(event.target.value)} disabled={loadingOptions}><option value="" disabled>Choose</option>{selectedDifficultyLevel && !difficultyLevels.some((item) => item.Difficulty_level === selectedDifficultyLevel) && <option value={selectedDifficultyLevel}>{selectedDifficultyLevel}</option>}{difficultyLevels.map((item) => <option key={item.id} value={item.Difficulty_level}>{item.Difficulty_level}</option>)}</select></div>
+            <div className="form-field"><label htmlFor="question-language">Language</label><select id="question-language" name="language" value={selectedLanguage} onChange={(event) => setSelectedLanguage(event.target.value)} disabled={loadingOptions}><option value="" disabled>Choose</option>{selectedLanguage && !languages.some((item) => item.q_language === selectedLanguage) && <option value={selectedLanguage}>{selectedLanguage}</option>}{languages.map((item) => <option key={item.id} value={item.q_language}>{item.q_language}</option>)}</select></div>
             <div className="form-field"><label htmlFor="question-reference">Reference (optional)</label><input id="question-reference" name="reference" defaultValue={String(initialDetails.reference ?? "")} /></div>
           </div>
 
@@ -6287,6 +6538,187 @@ function QuestionUploadForm({ onClose, onUploaded }: { onClose: () => void; onUp
         </div>
       </section>
     </div>
+  );
+}
+
+type AssignedAssessmentStaffRow = {
+  assessment_id: number;
+  assessment_name: string;
+  assessment_date: string | null;
+  assigned_staff: string;
+  student_category: string;
+  student_sub_category: string;
+};
+
+type ExamApplicantRow = {
+  candidate_id: string;
+  candidate_name: string;
+  candidate_category: string;
+  candidate_sub_category: string;
+  candidate_email: string;
+  candidate_department: string;
+  assessment_name: string;
+  test_category: string;
+  test_sub_category: string;
+  active_status: boolean;
+};
+
+function ExamApplicantsPanel() {
+  const [rows, setRows] = useState<ExamApplicantRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let requestPending = false;
+    const loadApplicants = async () => {
+      if (requestPending || controller.signal.aborted) return;
+      requestPending = true;
+      try {
+        const response = await fetch("/api/admin/exam-applicants", {
+          signal: controller.signal,
+          cache: "no-store",
+        });
+        const payload = await response.json() as ExamApplicantRow[] & { error?: string };
+        if (!response.ok) throw new Error(payload.error ?? "Unable to load examination applicants.");
+        if (!Array.isArray(payload)) throw new Error("The examination applicant list could not be read.");
+        setRows(payload);
+        setError("");
+      } catch (loadError) {
+        if (loadError instanceof Error && loadError.name === "AbortError") return;
+        setError(loadError instanceof Error ? loadError.message : "Unable to load examination applicants.");
+      } finally {
+        requestPending = false;
+        if (!controller.signal.aborted) setLoading(false);
+      }
+    };
+    void loadApplicants();
+    const refreshInterval = window.setInterval(() => void loadApplicants(), 30_000);
+    return () => {
+      controller.abort();
+      window.clearInterval(refreshInterval);
+    };
+  }, []);
+
+  return (
+    <section className="candidates-section">
+      <div className="candidate-section-header">
+        <h1>Exam Applicants</h1>
+        <p className="assessment-count">{loading ? "Loading applicants..." : `Total applicants: ${rows.length}`}</p>
+      </div>
+      <div className="candidates-panel">
+        {error && <p className="form-error" role="alert">{error}</p>}
+        <div className="candidate-table-wrapper">
+          <table className="candidate-table">
+            <thead>
+              <tr>
+                <th>Candidate ID</th>
+                <th>Candidate Name</th>
+                <th>Candidate Category</th>
+                <th>Candidate Sub-Category</th>
+                <th>Candidate Email</th>
+                <th>Department</th>
+                <th>Assessment Name</th>
+                <th>Test Category</th>
+                <th>Test Sub-Category</th>
+                <th>Active Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading ? (
+                <tr><td colSpan={10}>Loading applicants...</td></tr>
+              ) : error ? (
+                <tr><td colSpan={10}>Unable to show applicants.</td></tr>
+              ) : rows.length === 0 ? (
+                <tr><td colSpan={10}>No active assessment applicants found.</td></tr>
+              ) : rows.map((row, index) => (
+                <tr key={`${row.assessment_name}-${row.candidate_id}-${index}`}>
+                  <td>{row.candidate_id || "—"}</td>
+                  <td>{row.candidate_name || "—"}</td>
+                  <td>{row.candidate_category || "—"}</td>
+                  <td>{row.candidate_sub_category || "—"}</td>
+                  <td>{row.candidate_email || "—"}</td>
+                  <td>{row.candidate_department || "—"}</td>
+                  <td>{row.assessment_name || "—"}</td>
+                  <td>{row.test_category || "—"}</td>
+                  <td>{row.test_sub_category || "—"}</td>
+                  <td>{row.active_status ? "Active" : "Inactive"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function AssignedAssessmentStaffPanel({ role }: { role: "invigilator" | "evaluator" }) {
+  const [rows, setRows] = useState<AssignedAssessmentStaffRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch(`/api/admin/assessment-staff-assignments?role=${role}`, { signal: controller.signal })
+      .then(async (response) => {
+        const payload = await response.json() as AssignedAssessmentStaffRow[] & { error?: string };
+        if (!response.ok) throw new Error(payload.error ?? `Unable to load assigned ${role}s.`);
+        if (!Array.isArray(payload)) throw new Error("The assessment assignment list could not be read.");
+        setRows(payload);
+      })
+      .catch((loadError) => {
+        if (loadError instanceof Error && loadError.name === "AbortError") return;
+        setError(loadError instanceof Error ? loadError.message : `Unable to load assigned ${role}s.`);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, [role]);
+
+  const staffLabel = role === "invigilator" ? "Invigilator" : "Evaluator";
+
+  return (
+    <section className="candidates-section">
+      <div className="candidate-section-header">
+        <h1>Assigned {staffLabel}</h1>
+        <p className="assessment-count">{loading ? "Loading assignments..." : `Total assignment groups: ${rows.length}`}</p>
+      </div>
+      <div className="candidates-panel">
+        {error && <p className="form-error" role="alert">{error}</p>}
+        <div className="candidate-table-wrapper">
+          <table className="candidate-table">
+            <thead>
+              <tr>
+                <th>Assessment Name</th>
+                <th>Date</th>
+                <th>Assigned {staffLabel}</th>
+                <th>Assigned Student Category</th>
+                <th>Assigned Student Sub-Category</th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading ? (
+                <tr><td colSpan={5}>Loading assignments...</td></tr>
+              ) : error ? (
+                <tr><td colSpan={5}>Unable to show assignments.</td></tr>
+              ) : rows.length === 0 ? (
+                <tr><td colSpan={5}>No assessment {role} assignments found.</td></tr>
+              ) : rows.map((row, index) => (
+                <tr key={`${row.assessment_id}-${row.assigned_staff}-${row.student_category}-${row.student_sub_category}-${index}`}>
+                  <td>{row.assessment_name || "—"}</td>
+                  <td>{formatAssessmentDateTime(row.assessment_date)}</td>
+                  <td>{row.assigned_staff || "—"}</td>
+                  <td>{row.student_category || "—"}</td>
+                  <td>{row.student_sub_category || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -6792,11 +7224,12 @@ function validateStudentWrittenAnswer(question: StudentExamQuestion, answer: str
   return null;
 }
 
-function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
+function StudentExamFlow({ student, assessment, onClose, onSubmitted, onAdminQuit }: {
   student: { id: number; name: string; candidateId: string; dateOfBirth: string };
   assessment: StudentAssessment;
   onClose: () => void;
   onSubmitted: (assessmentId: number) => void;
+  onAdminQuit: (assessmentId: number) => void;
 }) {
   const initialProctorCounts = {
     noFace: 0,
@@ -6832,6 +7265,7 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
   const [proctorCounts, setProctorCounts] = useState(initialProctorCounts);
   const proctorCountsRef = useRef(initialProctorCounts);
   const [submittedLocally, setSubmittedLocally] = useState(false);
+  const [endedByAdmin, setEndedByAdmin] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submissionError, setSubmissionError] = useState("");
   const [examRestartNotice, setExamRestartNotice] = useState("");
@@ -6887,6 +7321,22 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
       console.error("Failed to publish student proctor counts", error);
       setTelemetryStatus(error instanceof Error ? error.message : "Unable to share live counts with your invigilator.");
     }
+  }, [assessment.id]);
+
+  const recordTimelineEvent = useCallback((eventType: CandidateTimelineEventType) => {
+    void fetch("/api/candidates/student-exam/events", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ assessmentId: assessment.id, eventType }),
+    }).then(async (response) => {
+      const payload = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(payload.error ?? "Unable to save this monitoring event.");
+    }).catch((error: unknown) => {
+      console.error("Failed to record examination timeline event", error);
+      setTelemetryStatus(error instanceof Error
+        ? `Unable to save timestamped monitoring activity: ${error.message}`
+        : "Unable to save timestamped monitoring activity.");
+    });
   }, [assessment.id]);
 
   const saveAnswerToServer = useCallback((questionId: number, answer: string | string[], startedAt: string) => {
@@ -7165,6 +7615,7 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
           if (!motionActive) {
             motionActive = true;
             const count = incrementProctorCount("motionEvents");
+            recordTimelineEvent("motion_detected");
             const message = `Significant camera-frame movement detected (${count}). Please remain in view and keep still.`;
             setMotionWarning(message);
             openProctorAlert(message, true);
@@ -7175,7 +7626,10 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
           }
         } else if (motionActive) {
           motionQuietFrames += 1;
-          if (motionQuietFrames >= 2) motionActive = false;
+          if (motionQuietFrames >= 2) {
+            motionActive = false;
+            recordTimelineEvent("motion_settled");
+          }
         }
       }
     }, 900);
@@ -7184,10 +7638,15 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
       if (cameraBlocked.current) return;
       cameraBlocked.current = true;
       incrementProctorCount("cameraBlocked");
+      recordTimelineEvent("camera_blocked");
       openProctorAlert("Camera blocked or disconnected. Reconnect your camera to continue the examination.");
       setMotionWarning("Camera connection was interrupted. Reconnect the camera before continuing.");
     };
-    const onCameraRestored = () => { cameraBlocked.current = false; };
+    const onCameraRestored = () => {
+      if (!cameraBlocked.current) return;
+      cameraBlocked.current = false;
+      recordTimelineEvent("camera_restored");
+    };
     tracks.forEach((track) => {
       track.addEventListener("ended", onCameraBlocked);
       track.addEventListener("mute", onCameraBlocked);
@@ -7202,7 +7661,7 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
         track.removeEventListener("unmute", onCameraRestored);
       });
     };
-  }, [assessment.exam_cam_permission_active, cameraStream, incrementProctorCount, openProctorAlert, step]);
+  }, [assessment.exam_cam_permission_active, cameraStream, incrementProctorCount, openProctorAlert, recordTimelineEvent, step]);
 
   useEffect(() => {
     if (!assessment.exam_cam_permission_active || step !== "exam") return;
@@ -7351,12 +7810,14 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
                     if (identityMismatchFrames >= 2 && !personChangeActive) {
                       personChangeActive = true;
                       const count = incrementProctorCount("personChanges");
+                      recordTimelineEvent("person_changed");
                       const message = `The person on camera does not appear to match the check-in photos (${count}). Please show your face clearly.`;
                       setMotionWarning(message);
                       openProctorAlert(message, true);
                     }
                   } else {
                     identityMismatchFrames = 0;
+                    if (personChangeActive) recordTimelineEvent("person_match_restored");
                     personChangeActive = false;
                   }
                 }
@@ -7370,12 +7831,14 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
                 if (multipleFaceFrames.current >= 3 && faceState.current !== "multiple") {
                   faceState.current = "multiple";
                   incrementProctorCount("multipleFaces");
+                  recordTimelineEvent("multiple_faces");
                   openProctorAlert("Multiple Face Detected. Only the student taking the examination should be visible.");
                 }
               } else if (faceCount === 1) {
                 multipleFaceFrames.current = 0;
                 noFaceFrames.current = 0;
                 if (faceState.current !== "one") {
+                  if (faceState.current !== "unknown") recordTimelineEvent("face_detected");
                   faceState.current = "one";
                   incrementProctorCount("okay");
                 }
@@ -7385,6 +7848,7 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
                 if (noFaceFrames.current >= 3 && faceState.current !== "none") {
                   faceState.current = "none";
                   incrementProctorCount("noFace");
+                  recordTimelineEvent("no_face");
                   openProctorAlert("No Face Detected. Please make sure your face is clearly visible in the camera.");
                 }
               }
@@ -7414,7 +7878,7 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
       window.clearTimeout(timeout);
       detector?.close();
     };
-  }, [assessment.exam_cam_permission_active, cameraStream, idPhoto, incrementProctorCount, openProctorAlert, photo, step]);
+  }, [assessment.exam_cam_permission_active, cameraStream, idPhoto, incrementProctorCount, openProctorAlert, photo, recordTimelineEvent, step]);
 
   useEffect(() => {
     if (step !== "exam") return;
@@ -7427,13 +7891,27 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
         ? "A change in the browser tab has been identified."
         : "Full-Screen Mode disabled. Please return to full-screen mode to continue the examination.");
     };
+    let tabWasHidden = document.visibilityState === "hidden";
+    let fullscreenWasActive = Boolean(document.fullscreenElement);
     const warnAboutLeavingExam = () => {
-      if (document.visibilityState !== "hidden") return;
-      recordFocusViolation("tabChanges", (count) => `Exam page switch detected (${count}). Please stay on the examination page until time is complete.`);
+      if (document.visibilityState === "hidden") {
+        if (!tabWasHidden) recordTimelineEvent("tab_hidden");
+        tabWasHidden = true;
+        recordFocusViolation("tabChanges", (count) => `Exam page switch detected (${count}). Please stay on the examination page until time is complete.`);
+      } else if (tabWasHidden) {
+        tabWasHidden = false;
+        recordTimelineEvent("tab_returned");
+      }
     };
     const warnIfFullscreenEnds = () => {
-      if (!document.fullscreenElement) {
+      const isFullscreen = Boolean(document.fullscreenElement);
+      if (!isFullscreen && fullscreenWasActive) {
+        recordTimelineEvent("fullscreen_exited");
+        fullscreenWasActive = false;
         recordFocusViolation("fullscreenDisabled", (count) => `Full-screen exit detected (${count}). Return to the examination and stay until time is complete.`);
+      } else if (isFullscreen && !fullscreenWasActive) {
+        fullscreenWasActive = true;
+        recordTimelineEvent("fullscreen_restored");
       }
     };
     const warnBeforeLeaving = (event: BeforeUnloadEvent) => {
@@ -7448,7 +7926,7 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
       document.removeEventListener("fullscreenchange", warnIfFullscreenEnds);
       window.removeEventListener("beforeunload", warnBeforeLeaving);
     };
-  }, [incrementProctorCount, openProctorAlert, step]);
+  }, [incrementProctorCount, openProctorAlert, recordTimelineEvent, step]);
 
   useEffect(() => {
     if (step !== "exam" || examDeadline === null) return;
@@ -7590,10 +8068,31 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
           answers?: Record<string, string | string[]>;
           status?: string;
           server_time?: string;
+          ended_by_admin?: boolean;
           error?: string;
         };
+        if (cancelled) return;
+        if (payload.ended_by_admin) {
+          clearAnswerSaveTimers();
+          answerSaveQueue.current = Promise.resolve();
+          submissionPending.current = true;
+          setEndedByAdmin(true);
+          setStep("finished");
+          onAdminQuit(assessment.id);
+          return;
+        }
         if (!response.ok) throw new Error(payload.error ?? "Unable to check examination status.");
-        if (cancelled || !payload.started_at || payload.started_at === attemptStartedAtRef.current) return;
+        if (!payload.started_at) return;
+        if (payload.status === "submitted" && payload.started_at === attemptStartedAtRef.current) {
+          clearAnswerSaveTimers();
+          answerSaveQueue.current = Promise.resolve();
+          submissionPending.current = true;
+          setSubmittedLocally(true);
+          setStep("finished");
+          onSubmitted(assessment.id);
+          return;
+        }
+        if (payload.started_at === attemptStartedAtRef.current) return;
         if (payload.status !== "in_progress" || !payload.deadline_at || !payload.server_time) {
           throw new Error("This examination attempt is no longer in progress.");
         }
@@ -7627,7 +8126,7 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [assessment.id, attemptStartedAt, clearAnswerSaveTimers, step]);
+  }, [assessment.id, attemptStartedAt, clearAnswerSaveTimers, onAdminQuit, onSubmitted, step]);
 
   const formattedTime = remainingSeconds === null
     ? "--:--"
@@ -7724,7 +8223,7 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
           <div className="student-exam-finished-icon" aria-hidden="true">✓</div>
           <p className="student-exam-eyebrow">{submittedLocally ? "EXAM COMPLETE" : "ASSESSMENT ENDED"}</p>
           <h1>{submittedLocally ? "Exam complete" : remainingSeconds === 0 ? "Time is up" : "Exam session ended"}</h1>
-          <p>{submittedLocally ? "Your saved answers and check-in photos were submitted for evaluation." : remainingSeconds === 0 ? "Time expired. Your saved answers are being finalized by the server. Retry submission when your connection is available." : "The exam session ended without a successful submission. Contact your administrator."}</p>
+          <p>{endedByAdmin ? "An administrator ended this attempt and cleared its answers. You may attend the examination again from the beginning." : submittedLocally ? "Your saved answers and check-in photos were submitted for evaluation." : remainingSeconds === 0 ? "Time expired. Your saved answers are being finalized by the server. Retry submission when your connection is available." : "The exam session ended without a successful submission. Contact your administrator."}</p>
           <button className="student-exam-primary-button" type="button" onClick={onClose}>Return to exam schedule</button>
         </section>
       ) : (
@@ -7789,7 +8288,10 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
               ) : (
                 <p className="student-exam-focus-note">Camera access is off. Only the two check-in photos were captured before the exam.</p>
               )}
-            </aside>
+                <p className="student-exam-motion-disclaimer">
+                  Timestamped exam activity, including tab visibility, full-screen changes, and enabled camera checks, is available to authorized examination staff.
+                </p>
+              </aside>
             <section className="student-exam-question-area" aria-live="polite">
               <div className="student-exam-session-banner" role="status"><span>●</span> {answerSaveStatus === "saving" ? "Saving your latest answer…" : answerSaveStatus === "error" ? answerSaveMessage || "An answer could not be saved." : "Your answers are saved to this examination attempt."}</div>
               {examRestartNotice && <p className="student-exam-motion-warning" role="status">{examRestartNotice}</p>}
@@ -7890,10 +8392,12 @@ function StudentExamFlow({ student, assessment, onClose, onSubmitted }: {
 }
 
 function StudentPortalDashboard({ student, onLogout }: { student: { id: number; name: string; candidateId: string; dateOfBirth: string }; onLogout: () => void }) {
+  const pathname = usePathname();
+  const router = useRouter();
   const [assessments, setAssessments] = useState<StudentAssessment[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [activeTab, setActiveTab] = useState<"dashboard" | "results">("dashboard");
+  const activeTab = pathname === "/result" ? "results" : "dashboard";
   const [results, setResults] = useState<StudentAssessmentResult[]>([]);
   const [resultsLoading, setResultsLoading] = useState(false);
   const [resultsError, setResultsError] = useState("");
@@ -7964,6 +8468,13 @@ function StudentPortalDashboard({ student, onLogout }: { student: { id: number; 
           assessment.id === assessmentId ? { ...assessment, has_submitted: true } : assessment,
         ));
       }}
+      onAdminQuit={(assessmentId) => {
+        setAssessments((current) => current.map((assessment) =>
+          assessment.id === assessmentId
+            ? { ...assessment, has_submitted: false, has_active_attempt: false }
+            : assessment,
+        ));
+      }}
     />;
   }
 
@@ -7986,19 +8497,10 @@ function StudentPortalDashboard({ student, onLogout }: { student: { id: number; 
 
       <div className="student-dashboard-main">
         <header className="student-dashboard-header">
-          <a className="student-dashboard-brand" href="#" aria-label="ums.exam student dashboard">
-            <span className="portal-crest" aria-hidden="true">
-              <svg viewBox="0 0 48 56" fill="none">
-                <path d="M24 2 44 9v17c0 12-8.5 21-20 28C12.5 47 4 38 4 26V9L24 2Z" fill="#fff" stroke="currentColor" strokeWidth="2.5" />
-                <path d="M15 16v12c0 5.2 3.4 8.5 9 8.5s9-3.3 9-8.5V16" stroke="currentColor" strokeWidth="4" strokeLinecap="round" />
-                <path d="M11 42c3.6 3.3 8 5.8 13 8 5-2.2 9.4-4.7 13-8" stroke="#c68b3c" strokeWidth="2.5" strokeLinecap="round" />
-              </svg>
-            </span>
-            <span className="student-dashboard-brand-copy">
-              <strong>INSTITUTE OF INTEGRATED</strong>
-              <strong>TRAINING &amp; STUDIES</strong>
-            </span>
-          </a>
+          <Link className="student-dashboard-brand" href="/home" aria-label="ums.exam student dashboard">
+            <span className="brand-mark" aria-hidden="true">U</span>
+            <span className="brand-name">ums<span>.</span>exam</span>
+          </Link>
           <div className="student-dashboard-header-actions">
             <span className="student-dashboard-avatar" aria-hidden="true">{student.name.slice(0, 1).toUpperCase()}</span>
             <div className="student-dashboard-user">
@@ -8014,7 +8516,7 @@ function StudentPortalDashboard({ student, onLogout }: { student: { id: number; 
             className={`student-dashboard-tab-button${activeTab === "dashboard" ? " student-dashboard-current-tab" : ""}`}
             type="button"
             aria-current={activeTab === "dashboard" ? "page" : undefined}
-            onClick={() => setActiveTab("dashboard")}
+            onClick={() => router.push("/dashboard")}
           >
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1V10Z" /></svg>
             Dashboard
@@ -8027,7 +8529,7 @@ function StudentPortalDashboard({ student, onLogout }: { student: { id: number; 
               if (activeTab === "results") return;
               setResultsError("");
               setResultsLoading(true);
-              setActiveTab("results");
+              router.push("/result");
             }}
           >
             Results
@@ -8162,8 +8664,8 @@ function StudentExamScheduleRow({ assessment, onAttend }: {
     <tr>
       <td>{assessment.examination || "-"}</td>
       <td className="student-exam-name">{assessment.name || "-"}</td>
-      <td>{formatStudentExamDate(assessment.start_date)}</td>
-      <td>{formatStudentExamDate(assessment.end_date)}</td>
+      <td>{formatAssessmentDateTime(assessment.start_date)}</td>
+      <td>{formatAssessmentDateTime(assessment.end_date)}</td>
       <td>{assessment.total_questions}</td>
       <td>{assessment.total_marks}</td>
       <td>{action}</td>
@@ -8172,10 +8674,12 @@ function StudentExamScheduleRow({ assessment, onAttend }: {
 }
 
 export default function Home() {
+  const pathname = usePathname();
+  const router = useRouter();
   const [sessionUser, setSessionUser] = useState<any>(null);
   const [isReady, setIsReady] = useState(false);
   const [view, setView] = useState<"grid" | "list">("grid");
-  const [activeSection, setActiveSection] = useState("Dashboard");
+  const activeSection = getSectionFromPath(pathname);
   const [sidebarExpanded, setSidebarExpanded] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [sidebarHovered, setSidebarHovered] = useState(false);
@@ -8194,14 +8698,20 @@ export default function Home() {
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [currentRole, setCurrentRole] = useState<any>(null);
   const [savedAssessments, setSavedAssessments] = useState<AssessmentCardData[]>([]);
+  const [assessmentLoadError, setAssessmentLoadError] = useState("");
   const [assessmentClock, setAssessmentClock] = useState<number | null>(null);
   const [assessmentFilter, setAssessmentFilter] = useState<"all" | "started" | "upcoming" | "balance" | "previous">("started");
+  const [hasSelectedAssessmentFilter, setHasSelectedAssessmentFilter] = useState(false);
   const [moduleSearch, setModuleSearch] = useState("");
   const [showModuleSearchResults, setShowModuleSearchResults] = useState(false);
   const [profileMenuAnchor, setProfileMenuAnchor] = useState<"header" | "sidebar" | null>(null);
   const headerProfileRef = useRef<HTMLDivElement>(null);
   const mobileNavToggleRef = useRef<HTMLButtonElement>(null);
   const sidebarProfileRef = useRef<HTMLDivElement>(null);
+
+  const navigateToSection = useCallback((section: string) => {
+    router.push(sectionPaths[section] ?? "/dashboard");
+  }, [router]);
 
   const handleLogout = async () => {
     try {
@@ -8211,6 +8721,8 @@ export default function Home() {
       setSessionUser(null);
       setCurrentUser(null);
       setCurrentRole(null);
+      setAssessmentFilter("started");
+      setHasSelectedAssessmentFilter(false);
     } catch (error) {
       console.error("Unable to end the authenticated session", error);
     }
@@ -8267,9 +8779,11 @@ export default function Home() {
   useEffect(() => {
     if (!sessionUser || sessionUser.portalType === "student") {
       setSavedAssessments([]);
+      setAssessmentLoadError("");
       return;
     }
 
+    setAssessmentLoadError("");
     fetch("/api/assessments")
       .then(async (response) => {
         const data = await response.json() as Array<{
@@ -8288,6 +8802,7 @@ export default function Home() {
           sections: AssessmentSection[];
           candidate_count: number;
           total_marks: number;
+          has_active_questions: boolean;
         }> & { error?: string };
         if (!response.ok) throw new Error(data.error ?? "Unable to load assessments");
         setSavedAssessments(data.map((assessment) => ({
@@ -8305,14 +8820,18 @@ export default function Home() {
           topic: assessment.topic,
           question_language: assessment.question_language,
           sections: assessment.sections ?? [],
-          start: assessment.start_date ? new Date(assessment.start_date).toLocaleString() : "Not scheduled",
-          end: assessment.end_date ? new Date(assessment.end_date).toLocaleString() : "Not scheduled",
+          has_active_questions: assessment.has_active_questions,
+          start: formatAssessmentDateTime(assessment.start_date, "Not scheduled"),
+          end: formatAssessmentDateTime(assessment.end_date, "Not scheduled"),
           questions: String((assessment.sections ?? []).reduce((total, section) => total + (Number(section.question_count) || 0), 0)),
           marks: String(assessment.total_marks ?? getAssessmentMaxMark(assessment.sections)),
           candidates: String(assessment.candidate_count ?? 0),
         })));
       })
-      .catch(() => setSavedAssessments([]));
+      .catch((error) => {
+        console.error("Failed to load assessments", error);
+        setAssessmentLoadError(error instanceof Error ? error.message : "Unable to load assessments.");
+      });
   }, [sessionUser]);
 
   const activeSectionPermissionKey: Record<string, string> = {
@@ -8328,8 +8847,17 @@ export default function Home() {
     "Candidate Permissions": "Settings:Candidates:Candidate Permissions",
   };
 
+  const isAdministrator = Boolean(
+    currentRole?.administrator_access
+    || String(currentUser?.role ?? "").trim().toLocaleLowerCase().includes("admin"),
+  );
   const hasAccess = (sectionId: string) => {
     if (sectionId === "Dashboard") return true;
+    if (["Assigned Invigilator", "Assigned Evaluator", "Exam Applicants"].includes(sectionId)) {
+      return isAdministrator;
+    }
+    if (sectionId === "Assessments"
+      && ["invigilator", "evaluator"].includes(String(currentUser?.role ?? "").trim().toLocaleLowerCase())) return true;
     if (!currentRole) return false;
     if (sectionId === "Settings:Results" || sectionId === "Results") {
       return Boolean(currentRole.administrator_access || String(currentUser?.role ?? "").toLocaleLowerCase().includes("admin"));
@@ -8375,6 +8903,10 @@ export default function Home() {
     ).slice(0, 6)
     : [];
   const assessmentCards = savedAssessments;
+  const isCurrentUserInvigilator = String(currentUser?.role ?? "").trim().toLocaleLowerCase() === "invigilator";
+  const displayedAssessmentFilter = isCurrentUserInvigilator && !hasSelectedAssessmentFilter
+    ? "all"
+    : assessmentFilter;
   const startedAssessments = assessmentClock === null ? [] : assessmentCards
     .filter((assessment) => {
       const startTime = assessment.start_date ? new Date(assessment.start_date).getTime() : Number.NaN;
@@ -8383,8 +8915,14 @@ export default function Home() {
         && startTime <= assessmentClock
         && (endTime === null || endTime > assessmentClock);
     })
-    .sort((first, second) => (getAssessmentEndTime(first) ?? Number.POSITIVE_INFINITY)
-      - (getAssessmentEndTime(second) ?? Number.POSITIVE_INFINITY));
+    .sort((first, second) => {
+      const firstStart = first.start_date ? new Date(first.start_date).getTime() : Number.POSITIVE_INFINITY;
+      const secondStart = second.start_date ? new Date(second.start_date).getTime() : Number.POSITIVE_INFINITY;
+      const chronologicalOrder = firstStart - secondStart;
+      if (chronologicalOrder !== 0) return chronologicalOrder;
+      return (getAssessmentEndTime(first) ?? Number.POSITIVE_INFINITY)
+        - (getAssessmentEndTime(second) ?? Number.POSITIVE_INFINITY);
+    });
   const upcomingAssessments = assessmentClock === null ? [] : assessmentCards
     .filter((assessment) => {
       const startTime = assessment.start_date ? new Date(assessment.start_date).getTime() : Number.NaN;
@@ -8427,13 +8965,13 @@ export default function Home() {
     balance: { label: "Balance Examinations", assessments: balanceAssessments },
     previous: { label: "Previous Examinations", assessments: previousAssessments },
   };
-  const selectedAssessmentGroup = assessmentGroups[assessmentFilter];
+  const selectedAssessmentGroup = assessmentGroups[displayedAssessmentFilter];
   const renderAssessmentCards = (assessments: AssessmentCardData[]) => assessments.map((assessment) => (
     <AssessmentCard
       assessment={assessment}
       currentRole={currentRole}
       canEvaluate={/admin|evaluator/i.test(String(currentUser?.role ?? ""))}
-      isInvigilator={String(currentUser?.role ?? "").trim().toLocaleLowerCase() === "invigilator"}
+      isInvigilator={isCurrentUserInvigilator}
       isEvaluator={/evaluator/i.test(String(currentUser?.role ?? ""))}
       currentTime={assessmentClock}
       key={assessment.id ?? assessment.title}
@@ -8544,10 +9082,10 @@ export default function Home() {
           >
             <span aria-hidden="true">⋮</span>
           </button>
-          <a className="brand" href="#assessments" aria-label="Examination dashboard home">
+          <Link className="brand" href="/assessment" aria-label="Examination dashboard home">
             <span className="brand-mark">U</span>
             <span className="brand-name">ums<span>.</span>exam</span>
-          </a>
+          </Link>
           <div className="header-module-search">
             <svg aria-hidden="true" viewBox="0 0 24 24" fill="none">
               <circle cx="10.8" cy="10.8" r="6.8" stroke="currentColor" strokeWidth="1.8" />
@@ -8570,7 +9108,7 @@ export default function Home() {
               onKeyDown={(event) => {
                 if (event.key === "Escape") setShowModuleSearchResults(false);
                 if (event.key === "Enter" && matchingDashboardPages[0]) {
-                  setActiveSection(matchingDashboardPages[0].label);
+                  navigateToSection(matchingDashboardPages[0].label);
                   setModuleSearch("");
                   setShowModuleSearchResults(false);
                 }
@@ -8585,7 +9123,7 @@ export default function Home() {
                     role="option"
                     aria-selected="false"
                     onClick={() => {
-                      setActiveSection(page.label);
+                      navigateToSection(page.label);
                       setModuleSearch("");
                       setShowModuleSearchResults(false);
                     }}
@@ -8687,7 +9225,7 @@ export default function Home() {
                     setSidebarExpanded(true);
                     setOpenNavigation(openNavigation === item.label ? null : item.label);
                   } else {
-                    setActiveSection(item.label);
+                    navigateToSection(item.label);
                     setOpenNavigation(null);
                     setSidebarExpanded(false);
                     setMobileNavOpen(false);
@@ -8705,7 +9243,7 @@ export default function Home() {
                     const nestedKey = `${item.label}:${optionLabel}`;
 
                     return typeof option === "string" ? (
-                      <button key={option} type="button" role="menuitem" onClick={() => { setActiveSection(option); setOpenNavigation(null); setSidebarExpanded(false); setMobileNavOpen(false); }}>
+                      <button key={option} type="button" role="menuitem" onClick={() => { navigateToSection(option); setOpenNavigation(null); setSidebarExpanded(false); setMobileNavOpen(false); }}>
                         <span className="dropdown-option-icon" aria-hidden="true">{navigationOptionIcons[option]}</span>
                         {option}
                       </button>
@@ -8729,34 +9267,37 @@ export default function Home() {
                               role="menuitem"
                               onClick={() => {
                                 if (item.label === "Settings" && option.label === "Questions" && nestedOption === "Categories") {
-                                  setActiveSection("Question Categories");
+                                  navigateToSection("Question Categories");
                                 }
                                 if (item.label === "Settings" && option.label === "Questions" && nestedOption === "Sub Categories") {
-                                  setActiveSection("Question Sub Categories");
+                                  navigateToSection("Question Sub Categories");
                                 }
                                 if (item.label === "Settings" && option.label === "Questions" && nestedOption === "Topics") {
-                                  setActiveSection("Question Topics");
+                                  navigateToSection("Question Topics");
                                 }
                                 if (item.label === "Settings" && option.label === "Questions" && nestedOption === "Difficulty Levels") {
-                                  setActiveSection("Difficulty Levels");
+                                  navigateToSection("Difficulty Levels");
                                 }
                                 if (item.label === "Settings" && option.label === "Questions" && nestedOption === "Languages") {
-                                  setActiveSection("Languages");
+                                  navigateToSection("Languages");
                                 }
                                 if (item.label === "Settings" && option.label === "Assessments" && nestedOption === "Examinations") {
-                                  setActiveSection("Examinations");
+                                  navigateToSection("Examinations");
+                                }
+                                if (item.label === "Settings" && option.label === "Assessments" && nestedOption === "Default Settings") {
+                                  navigateToSection("Default Settings");
                                 }
                                 if (item.label === "Settings" && option.label === "Candidates" && nestedOption === "Categories") {
-                                  setActiveSection("Candidate Categories");
+                                  navigateToSection("Candidate Categories");
                                 }
                                 if (item.label === "Settings" && option.label === "Candidates" && nestedOption === "Sub Categories") {
-                                  setActiveSection("Candidate Sub Categories");
+                                  navigateToSection("Candidate Sub Categories");
                                 }
                                 if (item.label === "Settings" && option.label === "Candidates" && nestedOption === "Settings") {
-                                  setActiveSection("Candidate Settings");
+                                  navigateToSection("Candidate Settings");
                                 }
                                 if (item.label === "Settings" && option.label === "Candidates" && nestedOption === "Candidate Permissions") {
-                                  setActiveSection("Candidate Permissions");
+                                  navigateToSection("Candidate Permissions");
                                 }
                                 setOpenNavigation(null);
                                 setSidebarExpanded(false);
@@ -8814,13 +9355,14 @@ export default function Home() {
       </aside>
 
       <div className="page-body">
-        {!hasAccess(activeSection) ? <SectionPlaceholder title="Access restricted" /> : activeSection === "Dashboard" ? <DashboardPanel name={currentUser?.name || "Administrator"} shortcuts={visibleDashboardPages} onNavigate={setActiveSection} /> :
-        activeSection === "Questions" ? <QuestionsPanel currentRole={currentRole} /> : activeSection === "Question Categories" ? <QuestionCategoriesPanel currentRole={currentRole} /> : activeSection === "Question Sub Categories" ? <QuestionSubCategoriesPanel currentRole={currentRole} /> : activeSection === "Question Topics" ? <QuestionTopicsPanel currentRole={currentRole} /> : activeSection === "Difficulty Levels" ? <DifficultyLevelsPanel currentRole={currentRole} /> : activeSection === "Languages" ? <LanguagesPanel currentRole={currentRole} /> : activeSection === "Examinations" ? <AssessmentTypesPanel currentRole={currentRole} /> : activeSection === "Candidate Categories" ? <CandidateCategoriesPanel currentRole={currentRole} /> : activeSection === "Candidate Sub Categories" ? <CandidateSubCategoriesPanel currentRole={currentRole} /> : activeSection === "Candidate Settings" ? <CandidateSettingsPanel currentRole={currentRole} /> : activeSection === "Candidate Permissions" ? <CandidatePermissionsPanel accountUserId={Number(currentUser?.id) || null} /> : activeSection === "Results" ? <ResultsPanel accountUserId={Number(currentUser?.id) || null} /> : activeSection === "Candidates" ? <CandidatesPanel currentRole={currentRole} /> : activeSection === "Assessments" ? <section className="assessments-section" id="assessments">
+        {!hasAccess(activeSection) ? <SectionPlaceholder title="Access restricted" /> : activeSection === "Dashboard" ? <DashboardPanel name={currentUser?.name || "Administrator"} shortcuts={visibleDashboardPages} onNavigate={navigateToSection} /> :
+        activeSection === "Questions" ? <QuestionsPanel currentRole={currentRole} /> : activeSection === "Question Categories" ? <QuestionCategoriesPanel currentRole={currentRole} /> : activeSection === "Question Sub Categories" ? <QuestionSubCategoriesPanel currentRole={currentRole} /> : activeSection === "Question Topics" ? <QuestionTopicsPanel currentRole={currentRole} /> : activeSection === "Difficulty Levels" ? <DifficultyLevelsPanel currentRole={currentRole} /> : activeSection === "Languages" ? <LanguagesPanel currentRole={currentRole} /> : activeSection === "Examinations" ? <AssessmentTypesPanel currentRole={currentRole} /> : activeSection === "Candidate Categories" ? <CandidateCategoriesPanel currentRole={currentRole} /> : activeSection === "Candidate Sub Categories" ? <CandidateSubCategoriesPanel currentRole={currentRole} /> : activeSection === "Candidate Settings" ? <CandidateSettingsPanel currentRole={currentRole} /> : activeSection === "Candidate Permissions" ? <CandidatePermissionsPanel accountUserId={Number(currentUser?.id) || null} /> : activeSection === "Results" ? <ResultsPanel accountUserId={Number(currentUser?.id) || null} /> : activeSection === "Candidates" ? <CandidatesPanel currentRole={currentRole} /> : activeSection === "Assigned Invigilator" ? <AssignedAssessmentStaffPanel role="invigilator" /> : activeSection === "Assigned Evaluator" ? <AssignedAssessmentStaffPanel role="evaluator" /> : activeSection === "Exam Applicants" ? <ExamApplicantsPanel /> : activeSection === "Assessments" ? <section className="assessments-section" id="assessments">
         <div className="assessments-toolbar">
           <div>
             <p className="section-kicker">Examination workspace</p>
             <h1>Assessments</h1>
             <p className="assessment-count">Total assessments: {assessmentCards.length}</p>
+            {assessmentLoadError && <p className="form-error" role="alert">{assessmentLoadError}</p>}
           </div>
           <div className="toolbar-actions">
             <button
@@ -8839,11 +9381,11 @@ export default function Home() {
           {(Object.entries(assessmentGroups) as Array<[keyof typeof assessmentGroups, typeof assessmentGroups[keyof typeof assessmentGroups]]>)
             .map(([key, group]) => (
               <button
-                className={`assessment-filter-button${assessmentFilter === key ? " is-active" : ""}`}
+                className={`assessment-filter-button${displayedAssessmentFilter === key ? " is-active" : ""}`}
                 type="button"
-                aria-pressed={assessmentFilter === key}
+                aria-pressed={displayedAssessmentFilter === key}
                 key={key}
-                onClick={() => setAssessmentFilter(key)}
+                onClick={() => { setAssessmentFilter(key); setHasSelectedAssessmentFilter(true); }}
               >
                 {group.label}
                 <span>{group.assessments.length}</span>
@@ -8851,7 +9393,7 @@ export default function Home() {
             ))}
         </div>
 
-        {assessmentFilter === "all" ? (
+        {displayedAssessmentFilter === "all" ? (
           <>
             <section className="assessment-group" aria-labelledby="all-live-assessments-title">
               <div className="assessment-group-heading">
@@ -8977,6 +9519,7 @@ export default function Home() {
               sections: AssessmentSection[];
               candidate_count: number;
               total_marks: number;
+              has_active_questions: boolean;
             }> & { error?: string };
             if (!response.ok) throw new Error(data.error ?? "Unable to refresh assessment candidates");
             setSavedAssessments(data.map((assessment) => ({
@@ -8994,8 +9537,9 @@ export default function Home() {
               topic: assessment.topic,
               question_language: assessment.question_language,
               sections: assessment.sections ?? [],
-              start: assessment.start_date ? new Date(assessment.start_date).toLocaleString() : "Not scheduled",
-              end: assessment.end_date ? new Date(assessment.end_date).toLocaleString() : "Not scheduled",
+              has_active_questions: assessment.has_active_questions,
+              start: formatAssessmentDateTime(assessment.start_date, "Not scheduled"),
+              end: formatAssessmentDateTime(assessment.end_date, "Not scheduled"),
               questions: String((assessment.sections ?? []).reduce((total, section) => total + (Number(section.question_count) || 0), 0)),
               marks: String(assessment.total_marks ?? getAssessmentMaxMark(assessment.sections)),
               candidates: String(assessment.candidate_count ?? 0),
@@ -9008,6 +9552,8 @@ export default function Home() {
       {invigilatingAssessment &&       <AssessmentInvigilation
         assessment={invigilatingAssessment}
         accountUserId={Number(currentUser?.id) || null}
+        canRestart={Boolean(currentRole?.administrator_access || String(currentUser?.role ?? "").toLocaleLowerCase().includes("admin"))}
+        canQuit={Boolean(currentRole?.administrator_access || String(currentUser?.role ?? "").toLocaleLowerCase().includes("admin"))}
         onClose={() => setInvigilatingAssessment(null)}
       />}
       {evaluatingAssessment && <AssessmentEvaluation
@@ -9036,8 +9582,9 @@ export default function Home() {
               subtitle: assessment.examination,
               examination: assessment.examination,
               sections: assessment.sections ?? [],
-              start: assessment.start_date ? new Date(assessment.start_date).toLocaleString() : "Not scheduled",
-              end: assessment.end_date ? new Date(assessment.end_date).toLocaleString() : "Not scheduled",
+              has_active_questions: assessment.has_active_questions,
+              start: formatAssessmentDateTime(assessment.start_date, "Not scheduled"),
+              end: formatAssessmentDateTime(assessment.end_date, "Not scheduled"),
               questions: String((assessment.sections ?? []).reduce((total, section) => total + (Number(section.question_count) || 0), 0)),
               marks: String(getAssessmentMaxMark(assessment.sections)),
               candidates: String(assessment.candidate_count ?? 0),

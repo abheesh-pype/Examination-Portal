@@ -4428,6 +4428,22 @@ body {
 	content: "";
 }
 
+.assessment-no-questions-warning {
+	display: inline-grid;
+	width: 20px;
+	height: 20px;
+	flex: 0 0 20px;
+	place-items: center;
+	color: #fff;
+	background: #d62828;
+	border: 1px solid #b91c1c;
+	border-radius: 50%;
+	font-size: 13px;
+	font-weight: 800;
+	line-height: 1;
+	cursor: help;
+}
+
 .assessment-card-icon {
 	background: #f1efff;
 	border-radius: 13px;
@@ -5187,24 +5203,35 @@ body {
 	display: flex;
 	min-width: 0;
 	align-items: center;
-	gap: 9px;
-	color: #26385d;
+	gap: 10px;
 }
 
-.student-dashboard-brand .portal-crest {
-	width: 34px;
-	height: 43px;
+.student-dashboard-brand .brand-mark {
+	display: inline-grid;
+	width: 36px;
+	height: 36px;
 	flex: 0 0 auto;
+	place-items: center;
+	color: #fff;
+	background: linear-gradient(145deg, #725ff0, #4338ca);
+	border-radius: 12px;
+	box-shadow: 0 5px 12px rgba(81, 66, 217, 0.22);
+	font-family: Arial, sans-serif;
+	font-size: 18px;
+	font-weight: 800;
 }
 
-.student-dashboard-brand-copy {
-	display: grid;
-	color: #314467;
-	font-family: Georgia, "Times New Roman", serif;
-	font-size: 13px;
-	font-weight: 700;
-	letter-spacing: 0.2px;
-	line-height: 1.2;
+.student-dashboard-brand .brand-name {
+	color: #1c2443;
+	font-family: inherit;
+	font-size: 21px;
+	font-weight: 750;
+	letter-spacing: -0.8px;
+	white-space: nowrap;
+}
+
+.student-dashboard-brand .brand-name span {
+	color: var(--accent);
 }
 
 .student-dashboard-header-actions {
@@ -6514,6 +6541,20 @@ body {
 	outline: none;
 }
 
+.invigilation-candidate-actions .invigilation-quit-action {
+	width: auto;
+	padding: 0 7px;
+	color: #a63838;
+	font-size: 12px;
+	font-weight: 700;
+}
+
+.invigilation-candidate-actions .invigilation-quit-action:hover,
+.invigilation-candidate-actions .invigilation-quit-action:focus-visible {
+	color: #8f2525;
+	background: #fff0f0;
+}
+
 .invigilation-error {
 	margin: 12px 0;
 	color: #a63838;
@@ -6548,6 +6589,124 @@ body {
 .invigilation-live-feed-dialog {
 	width: min(100%, 900px);
 	padding: 20px;
+}
+
+.invigilation-timeline-dialog {
+	display: flex;
+	width: min(100%, 720px);
+	max-height: min(85vh, 780px);
+	flex-direction: column;
+	gap: 14px;
+}
+
+.invigilation-timeline-dialog > header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 16px;
+}
+
+.invigilation-timeline-dialog > header h2 {
+	margin: 0;
+}
+
+.invigilation-timeline-dialog > header button {
+	width: 34px;
+	min-height: 34px;
+	padding: 0;
+	color: #64677a;
+	background: #f1f2f7;
+	font-size: 22px;
+}
+
+.invigilation-timeline-description,
+.invigilation-timeline-empty {
+	margin: 0;
+	color: #777b8f;
+	font-size: 13px;
+	line-height: 1.5;
+}
+
+.invigilation-timeline-live {
+	display: block;
+	margin-top: 5px;
+	color: #34805a;
+	font-size: 11px;
+	font-weight: 600;
+}
+
+.invigilation-timeline-list {
+	display: grid;
+	gap: 0;
+	overflow: auto;
+	margin: 0;
+	padding: 4px 8px 4px 0;
+	list-style: none;
+}
+
+.invigilation-timeline-list li {
+	position: relative;
+	display: grid;
+	grid-template-columns: 18px minmax(0, 1fr);
+	gap: 12px;
+	min-height: 66px;
+}
+
+.invigilation-timeline-list li:not(:last-child)::after {
+	position: absolute;
+	top: 14px;
+	bottom: -2px;
+	left: 6px;
+	width: 2px;
+	background: #e3e5ef;
+	content: "";
+}
+
+.invigilation-timeline-marker {
+	z-index: 1;
+	width: 14px;
+	height: 14px;
+	margin-top: 2px;
+	background: #7867e8;
+	border: 3px solid #eeebff;
+	border-radius: 50%;
+}
+
+.invigilation-timeline-list li.is-invigilator .invigilation-timeline-marker {
+	background: #ca8a20;
+	border-color: #fff3d7;
+}
+
+.invigilation-timeline-list li.is-system .invigilation-timeline-marker {
+	background: #75809a;
+	border-color: #eef0f5;
+}
+
+.invigilation-timeline-list li strong {
+	display: block;
+	color: #30354b;
+	font-size: 13px;
+	font-weight: 650;
+	line-height: 1.4;
+}
+
+.invigilation-timeline-list li p {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+	margin: 4px 0 14px;
+	color: #777b8f;
+	font-size: 11px;
+}
+
+.invigilation-timeline-list li small {
+	flex-basis: 100%;
+	color: #9699a8;
+	font-size: 10px;
+}
+
+.invigilation-timeline-dialog > button {
+	align-self: flex-end;
 }
 
 .invigilation-live-feed-dialog > header {

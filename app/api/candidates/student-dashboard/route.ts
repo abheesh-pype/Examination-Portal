@@ -95,7 +95,18 @@ export async function POST(request: Request) {
       SELECT assessment.id, assessment.examination, assessment.name,
              assessment.start_date, assessment.end_date, assessment.total_time,
              assessment.last_login, assessment.sections,
-             (submission.submitted_at IS NOT NULL) AS has_submitted,
+             (
+               submission.submitted_at IS NOT NULL
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM assessment_candidate_timeline_events AS quit_event
+                 WHERE quit_event.assessment_id = assessment.id
+                   AND quit_event.candidate_id = $3
+                   AND quit_event.source = 'invigilator'
+                   AND quit_event.event_type IN ('exam_quit', 'exam_submitted')
+                   AND quit_event.occurred_at >= submission.submitted_at
+               )
+             ) AS has_submitted,
              (attempt.status = 'in_progress' AND attempt.deadline_at > NOW()) AS has_active_attempt,
              (assessment.start_date > NOW()) AS is_upcoming,
              (

@@ -256,7 +256,8 @@ export async function authorizeApiRequest(request: Request): Promise<ApiAuthoriz
     return candidate ? { ok: true, candidate } : unauthorized();
   }
 
-  if ((isStudentRoute(path) && (path !== "/api/assessment-results" || method === "POST"))
+  if (((isStudentRoute(path) && (path !== "/api/assessment-results" || method === "POST"))
+    || (path === "/api/candidates/student-exam/events" && method === "POST"))
     || (path === "/api/candidates/student-exam/live-feed" && body.side === "candidate")) {
     if (session.subjectType !== "candidate") return forbidden("A student session is required.");
     const candidate = await resolveCandidate(session.subjectId);
@@ -299,9 +300,24 @@ export async function authorizeApiRequest(request: Request): Promise<ApiAuthoriz
     if (!user.isAdmin && normalizedRole !== "evaluator") return forbidden("Only administrators and evaluators can access assessment evaluations.");
     return { ok: true, user };
   }
+  if (path === "/api/assessment-preview" && method === "GET") {
+    if (!user.isAdmin && !["evaluator", "invigilator"].includes(user.role.trim().toLocaleLowerCase())) {
+      return forbidden("Only administrators, evaluators, and invigilators can preview assessments.");
+    }
+    return { ok: true, user };
+  }
+  if (path === "/api/admin/assessment-staff-assignments" && method === "GET") {
+    if (!user.isAdmin) return forbidden("Only administrators can view assessment staff assignments.");
+    return { ok: true, user };
+  }
+  if (path === "/api/admin/exam-applicants" && method === "GET") {
+    if (!user.isAdmin) return forbidden("Only administrators can view exam applicants.");
+    return { ok: true, user };
+  }
   if (path === "/api/assessment-invigilate-candidates"
     || path === "/api/assessment-invigilate-activity"
     || path === "/api/assessment-invigilate-restart"
+    || (path === "/api/candidates/student-exam/events" && method === "GET")
     || (path === "/api/candidates/student-exam/live-feed" && body.side === "staff")) {
     if (!user.isAdmin && user.role.toLocaleLowerCase() !== "invigilator") {
       return forbidden("Only administrators and invigilators can access invigilation data.");
@@ -313,6 +329,12 @@ export async function authorizeApiRequest(request: Request): Promise<ApiAuthoriz
     return { ok: true, user };
   }
   if (path === "/api/roles" && method === "GET") return { ok: true, user };
+  if (path === "/api/assessments" && method === "GET") {
+    if (!user.isAdmin && !["invigilator", "evaluator"].includes(user.role.trim().toLocaleLowerCase())) {
+      return forbidden("Only administrators, invigilators, and evaluators can view assessments.");
+    }
+    return { ok: true, user };
+  }
   if (path === "/api/assessment-results" && method === "GET") {
     if (!user.isAdmin) return forbidden("Only administrators can view all assessment results.");
     return { ok: true, user };

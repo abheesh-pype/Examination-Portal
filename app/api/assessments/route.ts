@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { databasePool } from "@/lib/db";
 import { authorizeApiRequest } from "@/lib/auth";
+import { matchesAssessmentQuestionType } from "@/lib/question-types";
 
 export const runtime = "nodejs";
 
@@ -71,6 +72,21 @@ async function ensureAssessmentTable() {
   await databasePool.query('ALTER TABLE "Candidate Information" ADD COLUMN IF NOT EXISTS record_type TEXT NOT NULL DEFAULT \'field\'');
   await databasePool.query('ALTER TABLE "Candidate Information" ADD COLUMN IF NOT EXISTS candidate_data JSONB');
   await databasePool.query(`
+    CREATE TABLE IF NOT EXISTS questions (
+      id SERIAL PRIMARY KEY,
+      question_type TEXT NOT NULL,
+      question TEXT NOT NULL,
+      category TEXT,
+      sub_category TEXT,
+      topic TEXT,
+      difficulty_level TEXT,
+      language TEXT,
+      details JSONB NOT NULL DEFAULT '{}'::jsonb,
+      status BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await databasePool.query(`
     CREATE TABLE IF NOT EXISTS candidate_sub_category (
       id SERIAL PRIMARY KEY,
       candidate_sub_category TEXT NOT NULL,
@@ -87,6 +103,78 @@ async function ensureAssessmentTable() {
       PRIMARY KEY (assessment_id, candidate_sub_category_id)
     )
   `);
+  await databasePool.query(`
+    CREATE TABLE IF NOT EXISTS assessment_candidate_invigilator (
+      assessment_id INTEGER NOT NULL REFERENCES assessment(id) ON DELETE CASCADE,
+      candidate_id INTEGER NOT NULL REFERENCES "Candidate Information"(id) ON DELETE CASCADE,
+      invigilator_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (assessment_id, candidate_id)
+    )
+  `);
+  await databasePool.query(`
+    CREATE TABLE IF NOT EXISTS assessment_candidate_evaluator (
+      assessment_id INTEGER NOT NULL REFERENCES assessment(id) ON DELETE CASCADE,
+      candidate_id INTEGER NOT NULL REFERENCES "Candidate Information"(id) ON DELETE CASCADE,
+      evaluator_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (assessment_id, candidate_id)
+    )
+  `);
+}
+
+type ActiveQuestion = {
+  id: number | string;
+  question_type: string;
+  difficulty_level: string | null;
+  category: string | null;
+  sub_category: string | null;
+  topic: string | null;
+  language: string | null;
+};
+
+type AssessmentWithSections = {
+  sections?: unknown;
+  question_category?: string | null;
+  sub_category?: string | null;
+  topic?: string | null;
+  question_language?: string | null;
+};
+
+async function loadActiveQuestions(): Promise<ActiveQuestion[]> {
+  const result = await databasePool.query(`
+    SELECT id, question_type, difficulty_level, category, sub_category, topic, language
+    FROM questions
+    WHERE status = TRUE
+    ORDER BY created_at DESC, id DESC
+  `);
+  return result.rows;
+}
+
+function hasMatchingActiveQuestion(assessment: AssessmentWithSections, activeQuestions: ActiveQuestion[]) {
+  const matchesText = (questionValue: string | null, assessmentValue: string | null | undefined) =>
+    !assessmentValue?.trim()
+    || questionValue?.trim().toLocaleLowerCase() === assessmentValue.trim().toLocaleLowerCase();
+  const matchingQuestions = activeQuestions.filter((question) =>
+    matchesText(question.category, assessment.question_category)
+    && matchesText(question.sub_category, assessment.sub_category)
+    && matchesText(question.topic, assessment.topic)
+    && matchesText(question.language, assessment.question_language),
+  );
+  if (!Array.isArray(assessment.sections) || assessment.sections.length === 0) {
+    return matchingQuestions.length > 0;
+  }
+  return assessment.sections.some((section) => {
+    if (!section || typeof section !== "object" || Array.isArray(section)) return false;
+    const config = section as Record<string, unknown>;
+    const requestedCount = Number(config.question_count);
+    if (!Number.isInteger(requestedCount) || requestedCount <= 0) return false;
+    const difficulty = typeof config.difficulty_level === "string" ? config.difficulty_level.trim() : "";
+    return matchingQuestions.some((question) =>
+      matchesAssessmentQuestionType(question.question_type, config.question_type)
+      && (!difficulty || question.difficulty_level?.trim().toLocaleLowerCase() === difficulty.toLocaleLowerCase()),
+    );
+  });
 }
 
 const optionalText = (value: unknown) => typeof value === "string" && value.trim() ? value.trim() : null;
@@ -199,6 +287,10 @@ export async function GET(request: Request) {
     const authorization = await authorizeApiRequest(request);
     if (!authorization.ok) return authorization.response;
     await ensureAssessmentTable();
+    const userRole = authorization.user?.role.trim().toLocaleLowerCase();
+    const assignedInvigilatorId = userRole === "invigilator" ? authorization.user?.id ?? null : null;
+    const assignedEvaluatorId = userRole === "evaluator" ? authorization.user?.id ?? null : null;
+    const activeQuestions = await loadActiveQuestions();
     const result = await databasePool.query(`
       SELECT id, examination, name, start_date, end_date, total_time, last_login,
              pass_mark,
@@ -232,9 +324,25 @@ export async function GET(request: Request) {
                WHERE assignment.assessment_id = assessment.id
              ) AS candidate_count
       FROM assessment
+      WHERE ($1::integer IS NULL AND $2::integer IS NULL)
+         OR EXISTS (
+           SELECT 1
+           FROM assessment_candidate_invigilator AS invigilator_assignment
+           WHERE invigilator_assignment.assessment_id = assessment.id
+             AND invigilator_assignment.invigilator_user_id = $1
+         )
+         OR EXISTS (
+           SELECT 1
+           FROM assessment_candidate_evaluator AS evaluator_assignment
+           WHERE evaluator_assignment.assessment_id = assessment.id
+             AND evaluator_assignment.evaluator_user_id = $2
+         )
       ORDER BY created_at DESC, id DESC
-    `);
-    return NextResponse.json(result.rows);
+    `, [assignedInvigilatorId, assignedEvaluatorId]);
+    return NextResponse.json(result.rows.map((assessment) => ({
+      ...assessment,
+      has_active_questions: hasMatchingActiveQuestion(assessment, activeQuestions),
+    })));
   } catch (error) {
     console.error("Failed to load assessments", error);
     return NextResponse.json({ error: "Unable to load assessments" }, { status: 500 });
@@ -337,6 +445,7 @@ export async function POST(request: Request) {
       }
 
       await ensureAssessmentTable();
+      const activeQuestions = await loadActiveQuestions();
       const client = await databasePool.connect();
       let transactionStarted = false;
       try {
@@ -372,7 +481,13 @@ export async function POST(request: Request) {
         }
         await client.query("COMMIT");
         transactionStarted = false;
-        return NextResponse.json({ imported: insertedRows.length, assessments: insertedRows }, { status: 201 });
+        return NextResponse.json({
+          imported: insertedRows.length,
+          assessments: insertedRows.map((assessment) => ({
+            ...assessment,
+            has_active_questions: hasMatchingActiveQuestion(assessment, activeQuestions),
+          })),
+        }, { status: 201 });
       } catch (error) {
         if (transactionStarted) await client.query("ROLLBACK").catch(() => undefined);
         throw error;
@@ -396,6 +511,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Wrong Mark must be zero or a negative number." }, { status: 400 });
     }
     await ensureAssessmentTable();
+    const activeQuestions = await loadActiveQuestions();
     const result = await databasePool.query(`
       INSERT INTO assessment (
         examination, name, start_date, end_date, total_time, last_login,
@@ -421,7 +537,10 @@ export async function POST(request: Request) {
       optionalMark(body.pass_mark),
     ]);
 
-    return NextResponse.json(result.rows[0], { status: 201 });
+    return NextResponse.json({
+      ...result.rows[0],
+      has_active_questions: hasMatchingActiveQuestion(result.rows[0], activeQuestions),
+    }, { status: 201 });
   } catch (error) {
     console.error("Failed to create assessment", error);
     return NextResponse.json({ error: "Unable to create assessment" }, { status: 500 });
@@ -449,6 +568,7 @@ export async function PATCH(request: Request) {
       return NextResponse.json({ error: "Wrong Mark must be zero or a negative number." }, { status: 400 });
     }
     await ensureAssessmentTable();
+    const activeQuestions = await loadActiveQuestions();
     const result = await databasePool.query(`
       UPDATE assessment
       SET examination = $1, name = $2, start_date = $3, end_date = $4,
@@ -479,7 +599,10 @@ export async function PATCH(request: Request) {
     if (result.rowCount === 0) {
       return NextResponse.json({ error: "Assessment not found" }, { status: 404 });
     }
-    return NextResponse.json(result.rows[0]);
+    return NextResponse.json({
+      ...result.rows[0],
+      has_active_questions: hasMatchingActiveQuestion(result.rows[0], activeQuestions),
+    });
   } catch (error) {
     console.error("Failed to update assessment", error);
     return NextResponse.json({ error: "Unable to update assessment" }, { status: 500 });

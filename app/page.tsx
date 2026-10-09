@@ -7751,14 +7751,24 @@ function LoginPage({ onLogin, onStudentLogin }: { onLogin: (user: any) => void; 
                     autoComplete="current-password"
                     required
                   />
-                  <button
-                    type="button"
-                    className="password-toggle-btn"
-                    aria-label={showPassword ? "Hide password" : "Show password"}
-                    onClick={() => setShowPassword((current) => !current)}
+                  <span
+                    className="password-visibility-icon"
+                    aria-hidden="true"
+                    title="Hover to show password"
+                    onMouseEnter={() => setShowPassword(true)}
+                    onMouseLeave={() => setShowPassword(false)}
                   >
-                    {showPassword ? "Hide" : "Show"}
-                  </button>
+                    <svg viewBox="0 0 24 24" aria-hidden="true" fill="none">
+                      <path
+                        d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"
+                        stroke="currentColor"
+                        strokeWidth="1.8"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                      <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.8" />
+                    </svg>
+                  </span>
                 </div>
               </label>
 

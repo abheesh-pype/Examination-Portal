@@ -10,6 +10,7 @@ type Session = {
   subjectType: "user" | "candidate";
   subjectId: number;
   expiresAt: Date;
+  user: AuthenticatedUser | null;
 };
 
 export type AuthenticatedUser = {
@@ -142,9 +143,22 @@ async function resolveSession(request: Request): Promise<Session | null> {
   if (!/^[A-Za-z0-9_-]{40,}$/.test(token)) return null;
   await ensureSessionTable();
   const result = await databasePool.query(`
-    SELECT token_hash, subject_type, subject_id, expires_at
-    FROM ums_auth_sessions
-    WHERE token_hash = $1 AND expires_at > NOW()
+    SELECT session.token_hash, session.subject_type, session.subject_id, session.expires_at,
+           users.id AS user_id, users.role AS user_role,
+           COALESCE(roles.administrator_access, FALSE) AS administrator_access
+    FROM ums_auth_sessions AS session
+    LEFT JOIN users
+      ON session.subject_type = 'user'
+     AND users.id = session.subject_id
+     AND users.status = TRUE
+    LEFT JOIN LATERAL (
+      SELECT administrator_access
+      FROM roles
+      WHERE LOWER(BTRIM(role_name)) = LOWER(BTRIM(users.role))
+        AND status = TRUE
+      LIMIT 1
+    ) AS roles ON TRUE
+    WHERE session.token_hash = $1 AND session.expires_at > NOW()
   `, [sha256(token)]);
   if (!result.rowCount) return null;
   const row = result.rows[0];
@@ -154,24 +168,14 @@ async function resolveSession(request: Request): Promise<Session | null> {
     subjectType: row.subject_type,
     subjectId: Number(row.subject_id),
     expiresAt: new Date(row.expires_at),
-  };
-}
-
-async function resolveUser(subjectId: number): Promise<AuthenticatedUser | null> {
-  const result = await databasePool.query(`
-    SELECT users.id, users.role,
-           COALESCE(roles.administrator_access, FALSE) AS administrator_access
-    FROM users
-    LEFT JOIN roles ON LOWER(BTRIM(roles.role_name)) = LOWER(BTRIM(users.role)) AND roles.status = TRUE
-    WHERE users.id = $1 AND users.status = TRUE
-    LIMIT 1
-  `, [subjectId]);
-  if (!result.rowCount) return null;
-  const role = String(result.rows[0].role ?? "").trim();
-  return {
-    id: Number(result.rows[0].id),
-    role,
-    isAdmin: role.toLocaleLowerCase().includes("admin") || Boolean(result.rows[0].administrator_access),
+    user: row.user_id === null || row.user_id === undefined
+      ? null
+      : {
+        id: Number(row.user_id),
+        role: String(row.user_role ?? "").trim(),
+        isAdmin: String(row.user_role ?? "").trim().toLocaleLowerCase().includes("admin")
+          || Boolean(row.administrator_access),
+      },
   };
 }
 
@@ -249,7 +253,7 @@ export async function authorizeApiRequest(request: Request): Promise<ApiAuthoriz
 
   if (path === "/api/auth/session" && method === "GET") {
     if (session.subjectType === "user") {
-      const user = await resolveUser(session.subjectId);
+      const user = session.user;
       return user ? { ok: true, user } : unauthorized();
     }
     const candidate = await resolveCandidate(session.subjectId);
@@ -278,7 +282,7 @@ export async function authorizeApiRequest(request: Request): Promise<ApiAuthoriz
 
   if (path === "/api/candidate-permissions" && method === "GET") {
     if (session.subjectType === "user") {
-      const user = await resolveUser(session.subjectId);
+      const user = session.user;
       return user ? { ok: true, user } : unauthorized();
     }
     const candidate = await resolveCandidate(session.subjectId);
@@ -286,7 +290,7 @@ export async function authorizeApiRequest(request: Request): Promise<ApiAuthoriz
   }
 
   if (session.subjectType !== "user") return forbidden("A staff account is required.");
-  const user = await resolveUser(session.subjectId);
+  const user = session.user;
   if (!user) return unauthorized("The account is inactive or no longer exists.");
 
   for (const key of ["accountUserId", "viewerUserId", "invigilatorUserId"]) {

@@ -4,7 +4,9 @@ import { databasePool } from "@/lib/db";
 
 export const runtime = "nodejs";
 
-async function ensureAssignmentTables() {
+let assignmentTablesReady: Promise<void> | null = null;
+
+async function initializeAssignmentTables() {
   await databasePool.query(`
     CREATE TABLE IF NOT EXISTS assessment (
       id SERIAL PRIMARY KEY,
@@ -73,6 +75,16 @@ async function ensureAssignmentTables() {
       PRIMARY KEY (assessment_id, candidate_id)
     )
   `);
+}
+
+async function ensureAssignmentTables() {
+  if (!assignmentTablesReady) {
+    assignmentTablesReady = initializeAssignmentTables().catch((error: unknown) => {
+      assignmentTablesReady = null;
+      throw error;
+    });
+  }
+  await assignmentTablesReady;
 }
 
 export async function GET(request: Request) {

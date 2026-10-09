@@ -29,6 +29,7 @@ async function ensureAssessmentResultTables() {
     )
   `);
   await databasePool.query("ALTER TABLE assessment ADD COLUMN IF NOT EXISTS pass_mark NUMERIC");
+  await databasePool.query("ALTER TABLE assessment ADD COLUMN IF NOT EXISTS results_published BOOLEAN NOT NULL DEFAULT FALSE");
   await databasePool.query(`
     CREATE TABLE IF NOT EXISTS users (
       id SERIAL PRIMARY KEY,
@@ -72,6 +73,16 @@ async function ensureAssessmentResultTables() {
   await databasePool.query(`
     ALTER TABLE assessment_candidate_submissions
     ADD COLUMN IF NOT EXISTS manual_marks JSONB NOT NULL DEFAULT '{}'::jsonb
+  `);
+  await databasePool.query(`
+    CREATE INDEX IF NOT EXISTS assessment_candidate_submissions_published_candidate_idx
+    ON assessment_candidate_submissions (candidate_id, evaluated_at DESC)
+    WHERE evaluated_at IS NOT NULL
+  `);
+  await databasePool.query(`
+    CREATE INDEX IF NOT EXISTS assessment_candidate_submissions_evaluated_idx
+    ON assessment_candidate_submissions (evaluated_at DESC, assessment_id, candidate_id)
+    WHERE evaluated_at IS NOT NULL
   `);
 }
 
@@ -246,7 +257,15 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: "Only administrators can view assessment results." }, { status: 403 });
     }
 
-    const result = await databasePool.query(`
+    const [assessmentResult, result] = await Promise.all([
+      databasePool.query(`
+        SELECT id AS assessment_id, name AS assessment_name, examination,
+               start_date AS assessment_start_date, end_date AS assessment_end_date,
+               results_published
+        FROM assessment
+        ORDER BY name, id DESC
+      `),
+      databasePool.query(`
       SELECT assessment.id AS assessment_id,
              assessment.name AS assessment_name,
              assessment.examination,
@@ -268,9 +287,11 @@ export async function GET(request: Request) {
        AND candidate.record_type = 'candidate'
       WHERE submission.evaluated_at IS NOT NULL
       ORDER BY submission.evaluated_at DESC, assessment.name, candidate.name
-    `);
+      `),
+    ]);
 
     return NextResponse.json({
+      assessments: assessmentResult.rows,
       results: result.rows.map((row) => getAssessmentResult(row)),
     });
   } catch (error) {
@@ -314,6 +335,7 @@ export async function POST(request: Request) {
        AND candidate.record_type = 'candidate'
       WHERE submission.candidate_id = $1
         AND submission.evaluated_at IS NOT NULL
+        AND assessment.results_published = TRUE
       ORDER BY submission.evaluated_at DESC, submission.submitted_at DESC, assessment.id DESC
     `, [candidate.id]);
 
@@ -321,5 +343,39 @@ export async function POST(request: Request) {
   } catch (error) {
     console.error("Failed to load student assessment results", error);
     return NextResponse.json({ error: "Unable to load your results." }, { status: 500 });
+  }
+}
+
+export async function PATCH(request: Request) {
+  try {
+    const authorization = await authorizeApiRequest(request);
+    if (!authorization.ok) return authorization.response;
+    if (!authorization.user?.isAdmin) {
+      return NextResponse.json({ error: "Only administrators can publish assessment results." }, { status: 403 });
+    }
+
+    const body = await request.json() as { assessmentId?: unknown };
+    const assessmentId = Number(body.assessmentId);
+    if (!Number.isInteger(assessmentId) || assessmentId <= 0) {
+      return NextResponse.json({ error: "A valid assessment id is required." }, { status: 400 });
+    }
+
+    await ensureAssessmentResultTables();
+    const result = await databasePool.query(`
+      UPDATE assessment
+      SET results_published = TRUE
+      WHERE id = $1
+      RETURNING results_published
+    `, [assessmentId]);
+    if (!result.rowCount) {
+      return NextResponse.json({ error: "Assessment not found." }, { status: 404 });
+    }
+    return NextResponse.json({
+      assessment_id: assessmentId,
+      results_published: Boolean(result.rows[0].results_published),
+    });
+  } catch (error) {
+    console.error("Failed to publish assessment results", error);
+    return NextResponse.json({ error: "Unable to publish assessment results." }, { status: 500 });
   }
 }

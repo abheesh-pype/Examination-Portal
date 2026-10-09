@@ -154,6 +154,15 @@ type AssessmentResultRecord = {
   evaluated_at: string;
 };
 
+type AssessmentResultAssessment = {
+  assessment_id: number;
+  assessment_name: string;
+  examination: string;
+  assessment_start_date: string | null;
+  assessment_end_date: string | null;
+  results_published: boolean;
+};
+
 function excelColumnName(index: number) {
   let value = index + 1;
   let name = "";
@@ -371,10 +380,15 @@ async function readUploadFile(file: File, headerGroups?: string[][]) {
 }
 
 function ResultsPanel({ accountUserId }: { accountUserId: number | null }) {
+  const [assessments, setAssessments] = useState<AssessmentResultAssessment[]>([]);
   const [results, setResults] = useState<AssessmentResultRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [publishError, setPublishError] = useState("");
+  const [publishingAssessmentId, setPublishingAssessmentId] = useState<number | null>(null);
   const [search, setSearch] = useState("");
+  const [assessmentSearch, setAssessmentSearch] = useState("");
+  const [selectedAssessmentId, setSelectedAssessmentId] = useState<number | null>(null);
   const [showDownloadDialog, setShowDownloadDialog] = useState(false);
   const [downloadMode, setDownloadMode] = useState<"all" | "assessment" | "candidate">("all");
   const [downloadFormat, setDownloadFormat] = useState<"excel" | "pdf">("excel");
@@ -392,9 +406,15 @@ function ResultsPanel({ accountUserId }: { accountUserId: number | null }) {
     const controller = new AbortController();
     fetch(`/api/assessment-results?accountUserId=${accountUserId}`, { signal: controller.signal })
       .then(async (response) => {
-        const payload = await response.json() as { results?: AssessmentResultRecord[]; error?: string };
+        const payload = await response.json() as {
+          assessments?: AssessmentResultAssessment[];
+          results?: AssessmentResultRecord[];
+          error?: string;
+        };
         if (!response.ok) throw new Error(payload.error ?? "Unable to load assessment results.");
+        if (!Array.isArray(payload.assessments)) throw new Error("The assessments could not be read.");
         if (!Array.isArray(payload.results)) throw new Error("The assessment results could not be read.");
+        setAssessments(payload.assessments);
         setResults(payload.results);
         setError("");
       })
@@ -408,6 +428,30 @@ function ResultsPanel({ accountUserId }: { accountUserId: number | null }) {
 
     return () => controller.abort();
   }, [accountUserId, retryCount]);
+
+  const publishAssessmentResults = async (assessmentId: number) => {
+    setPublishingAssessmentId(assessmentId);
+    setPublishError("");
+    try {
+      const response = await fetch("/api/assessment-results", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ assessmentId }),
+      });
+      const payload = await response.json() as { results_published?: boolean; error?: string };
+      if (!response.ok) throw new Error(payload.error ?? "Unable to publish assessment results.");
+      if (payload.results_published !== true) throw new Error("The assessment results were not published.");
+      setAssessments((current) => current.map((assessment) =>
+        assessment.assessment_id === assessmentId
+          ? { ...assessment, results_published: true }
+          : assessment,
+      ));
+    } catch (publishFailure) {
+      setPublishError(publishFailure instanceof Error ? publishFailure.message : "Unable to publish assessment results.");
+    } finally {
+      setPublishingAssessmentId(null);
+    }
+  };
 
   useEffect(() => {
     if (!showDownloadDialog) return;
@@ -440,6 +484,22 @@ function ResultsPanel({ accountUserId }: { accountUserId: number | null }) {
       result.examination,
       candidateDetails,
     ].join(" ").toLocaleLowerCase().includes(search.trim().toLocaleLowerCase());
+  });
+  const filteredAssessments = assessments.filter((assessment) =>
+    [assessment.assessment_name, assessment.examination].join(" ")
+      .toLocaleLowerCase()
+      .includes(assessmentSearch.trim().toLocaleLowerCase()),
+  );
+  const selectedAssessment = assessments.find((assessment) => assessment.assessment_id === selectedAssessmentId);
+  const selectedAssessmentResults = selectedAssessment
+    ? filteredResults.filter((result) => result.assessment_id === selectedAssessment.assessment_id)
+    : [];
+  const assessmentResultCounts = new Map<number, number>();
+  results.forEach((result) => {
+    assessmentResultCounts.set(
+      result.assessment_id,
+      (assessmentResultCounts.get(result.assessment_id) ?? 0) + 1,
+    );
   });
   const downloadAssessments = [...new Map(results.map((result) => [
     result.assessment_id,
@@ -608,23 +668,51 @@ function ResultsPanel({ accountUserId }: { accountUserId: number | null }) {
       <div className="assessments-toolbar">
         <div>
           <p className="section-kicker">Assessment outcomes</p>
-          <h1>Results</h1>
-          <p className="assessment-count">Showing {filteredResults.length} of {results.length} evaluated results</p>
+          <h1>{selectedAssessment ? selectedAssessment.assessment_name : "Results"}</h1>
+          <p className="assessment-count">
+            {selectedAssessment
+              ? `${selectedAssessmentResults.length} evaluated candidate result${selectedAssessmentResults.length === 1 ? "" : "s"}`
+              : `${assessments.length} assessment${assessments.length === 1 ? "" : "s"}`}
+          </p>
         </div>
         <div className="assessment-results-toolbar-actions">
+          {selectedAssessment ? (
+            <button
+              className="assessment-results-back-button"
+              type="button"
+              onClick={() => {
+                setSelectedAssessmentId(null);
+                setSearch("");
+                setSelectedExamination("");
+                setSelectedCategory("");
+                setSelectedSubCategory("");
+              }}
+            >
+              ← Assessments
+            </button>
+          ) : (
+            <label className="assessment-results-search">
+              <span>Search assessments</span>
+              <input value={assessmentSearch} onChange={(event) => setAssessmentSearch(event.target.value)} placeholder="Assessment or examination" />
+            </label>
+          )}
           <button className="assessment-results-download-button" type="button" onClick={() => setShowDownloadDialog(true)}>
             <span aria-hidden="true">↓</span> Download
           </button>
-          <button className={`assessment-results-filter-button${showFilters ? " is-active" : ""}`} type="button" aria-expanded={showFilters} onClick={() => setShowFilters((open) => !open)}>
-            <span aria-hidden="true">☷</span> Filters{hasActiveFilters ? ` (${Number(Boolean(selectedExamination)) + Number(Boolean(selectedCategory)) + Number(Boolean(selectedSubCategory))})` : ""}
-          </button>
-          <label className="assessment-results-search">
-            <span>Search results</span>
-            <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Candidate or assessment" />
-          </label>
+          {selectedAssessment && (
+            <>
+              <button className={`assessment-results-filter-button${showFilters ? " is-active" : ""}`} type="button" aria-expanded={showFilters} onClick={() => setShowFilters((open) => !open)}>
+                <span aria-hidden="true">☷</span> Filters{hasActiveFilters ? ` (${Number(Boolean(selectedExamination)) + Number(Boolean(selectedCategory)) + Number(Boolean(selectedSubCategory))})` : ""}
+              </button>
+              <label className="assessment-results-search">
+                <span>Search candidates</span>
+                <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Candidate name or ID" />
+              </label>
+            </>
+          )}
         </div>
       </div>
-      {showFilters && (
+      {selectedAssessment && showFilters && (
         <div className="assessment-results-filter-panel" aria-label="Filter results">
           <label>
             <span>Examination</span>
@@ -673,8 +761,61 @@ function ResultsPanel({ accountUserId }: { accountUserId: number | null }) {
           }}>Try again</button>}
         </p>
       )}
-      <div className="assessment-results-table-wrap">
-        <table className="assessment-results-table">
+      {publishError && <p className="assessment-results-error" role="alert">{publishError}</p>}
+      {!selectedAssessment ? (
+        <div className="assessment-results-assessment-grid">
+          {loading ? (
+            <p className="assessment-results-empty">Loading assessments…</p>
+          ) : resultsError ? (
+            <p className="assessment-results-empty">Assessments are unavailable.</p>
+          ) : filteredAssessments.length === 0 ? (
+            <p className="assessment-results-empty">
+              {assessmentSearch ? "No assessments match your search." : "No assessments are available yet."}
+            </p>
+          ) : filteredAssessments.map((assessment) => (
+            <article
+              className="assessment-results-assessment-card"
+              key={assessment.assessment_id}
+            >
+              <button
+                className="assessment-results-assessment-open"
+                type="button"
+                onClick={() => {
+                  setSelectedAssessmentId(assessment.assessment_id);
+                  setSearch("");
+                  setSelectedExamination("");
+                  setSelectedCategory("");
+                  setSelectedSubCategory("");
+                }}
+              >
+                <span className="assessment-results-assessment-examination">{assessment.examination || "Examination"}</span>
+                <strong>{assessment.assessment_name}</strong>
+                <span className="assessment-results-assessment-dates">
+                  {assessment.assessment_start_date ? formatStudentExamDate(assessment.assessment_start_date) : "No start date"}
+                  {assessment.assessment_end_date ? ` – ${formatStudentExamDate(assessment.assessment_end_date)}` : ""}
+                </span>
+                <span className="assessment-results-assessment-count">
+                  {assessmentResultCounts.get(assessment.assessment_id) ?? 0} evaluated candidate
+                  {(assessmentResultCounts.get(assessment.assessment_id) ?? 0) === 1 ? "" : "s"}
+                </span>
+                <span className="assessment-results-assessment-link">View candidate results →</span>
+              </button>
+              <button
+                className={`assessment-results-publish-button${assessment.results_published ? " is-published" : ""}`}
+                type="button"
+                disabled={assessment.results_published || publishingAssessmentId === assessment.assessment_id}
+                onClick={() => void publishAssessmentResults(assessment.assessment_id)}
+              >
+                {assessment.results_published
+                  ? "Result Published"
+                  : publishingAssessmentId === assessment.assessment_id ? "Publishing…" : "Publish Result"}
+              </button>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <div className="assessment-results-table-wrap">
+          <table className="assessment-results-table">
           <thead>
             <tr>
               <th>Candidate</th>
@@ -693,9 +834,9 @@ function ResultsPanel({ accountUserId }: { accountUserId: number | null }) {
               <tr><td colSpan={9} className="assessment-results-empty">Loading results…</td></tr>
             ) : resultsError ? (
               <tr><td colSpan={9} className="assessment-results-empty">Results are unavailable.</td></tr>
-            ) : filteredResults.length === 0 ? (
-              <tr><td colSpan={9} className="assessment-results-empty">{search || hasActiveFilters ? "No results match your search or filters." : "No evaluated results are available yet."}</td></tr>
-            ) : filteredResults.map((result) => (
+            ) : selectedAssessmentResults.length === 0 ? (
+              <tr><td colSpan={9} className="assessment-results-empty">{search || selectedCategory || selectedSubCategory ? "No results match your search or filters." : "No evaluated candidate results are available for this assessment yet."}</td></tr>
+            ) : selectedAssessmentResults.map((result) => (
               <tr key={`${result.assessment_id}-${result.candidate_id}`}>
                 <td>
                   <strong>{result.candidate_name}</strong>
@@ -727,8 +868,9 @@ function ResultsPanel({ accountUserId }: { accountUserId: number | null }) {
               </tr>
             ))}
           </tbody>
-        </table>
-      </div>
+          </table>
+        </div>
+      )}
       {showDownloadDialog && (
         <div
           className="assessment-results-download-overlay"
@@ -1502,8 +1644,15 @@ function AssessmentEvaluation({ assessment, accountUserId, onClose }: {
                         <h2>Section: {section}</h2>
                         {detail.questions.filter((question) => question.section === section).map((question, index) => {
                           const response = detail.answers[String(question.id)];
-                          const options = question.options;
                           const grade = question.grade;
+                          const candidateAnswer = Array.isArray(response)
+                            ? response.join(", ")
+                            : typeof response === "string" && response.trim()
+                              ? response
+                              : "No answer provided";
+                          const correctAnswer = Array.isArray(question.correct_answer)
+                            ? question.correct_answer.join(", ")
+                            : String(question.correct_answer ?? "Not configured");
                           return (
                             <article className="assessment-evaluation-question" key={question.id}>
                               <div className="assessment-evaluation-question-heading">
@@ -1519,31 +1668,18 @@ function AssessmentEvaluation({ assessment, accountUserId, onClose }: {
                                 )}
                               </div>
                               {question.passage && <p className="assessment-evaluation-passage">{question.passage}</p>}
-                              {options.length > 0 ? (
-                                <ul className="assessment-evaluation-options">
-                                  {options.map((option, optionIndex) => {
-                                    const correct = Array.isArray(question.correct_answer)
-                                      ? question.correct_answer.some((item) => String(item).trim().toLocaleLowerCase() === option.trim().toLocaleLowerCase())
-                                      : String(question.correct_answer ?? "").trim().toLocaleLowerCase() === option.trim().toLocaleLowerCase();
-                                    const chosen = Array.isArray(response)
-                                      ? response.some((item) => item.trim().toLocaleLowerCase() === option.trim().toLocaleLowerCase())
-                                      : typeof response === "string" && response.trim().toLocaleLowerCase() === option.trim().toLocaleLowerCase();
-                                    return (
-                                      <li className={`${chosen ? "is-selected" : ""}${correct ? " is-correct-answer" : ""}`} key={`${question.id}-${optionIndex}`}>
-                                        <span className="assessment-evaluation-option-marker">{String.fromCharCode(65 + optionIndex)}</span>
-                                        <span>{option}</span>
-                                        {chosen && <small>Your answer</small>}
-                                        {correct && <small className="is-correct-label">Correct answer</small>}
-                                      </li>
-                                    );
-                                  })}
-                                </ul>
-                              ) : (
-                                <div className="assessment-evaluation-written-answer">
-                                  <div><span>Candidate answer</span><p className="is-handwritten-answer">{Array.isArray(response) ? response.join(", ") : response || "No answer provided"}</p></div>
-                                  {!question.is_manual && <div><span>Correct answer</span><p>{Array.isArray(question.correct_answer) ? question.correct_answer.join(", ") : String(question.correct_answer ?? "Not configured")}</p></div>}
+                              <div className="assessment-evaluation-written-answer is-answer-only">
+                                <div>
+                                  <span>Candidate answer</span>
+                                  <p className="is-handwritten-answer">{candidateAnswer}</p>
                                 </div>
-                              )}
+                                {!question.is_manual && (
+                                  <div className="assessment-evaluation-correct-answer">
+                                    <span>Correct answer</span>
+                                    <p>{correctAnswer}</p>
+                                  </div>
+                                )}
+                              </div>
                               <div className="assessment-evaluation-question-footer">
                                 <span>{grade?.mark ?? 0} / {question.correct_mark} marks</span>
                                 {question.is_manual && detail.evaluated_at === null && (
@@ -6357,9 +6493,9 @@ function UsersPanel({ currentRole }: { currentRole?: any }) {
                       </button>
                       {activeUserMenu === user.id && (
                         <div className="row-action-menu" role="menu">
-                          {canEditUsers && <button type="button" role="menuitem" onClick={() => { setResettingPasswordUser(user); setActiveUserMenu(null); }}>Reset Password</button>}
-                          {canEditUsers && <button type="button" role="menuitem" onClick={() => { setEditingUser(user); setActiveUserMenu(null); }}>Edit</button>}
-                          {canDeleteUsers && <button type="button" role="menuitem" onClick={() => { deleteUser(user.id); setActiveUserMenu(null); }}>Delete</button>}
+                          {canEditUsers && <button className="row-action-menu-button" type="button" role="menuitem" onClick={() => { setEditingUser(user); setActiveUserMenu(null); }}>Update User</button>}
+                          {canEditUsers && <button className="row-action-menu-button" type="button" role="menuitem" onClick={() => { setResettingPasswordUser(user); setActiveUserMenu(null); }}>Reset Password</button>}
+                          {canDeleteUsers && <button className="row-action-menu-button is-destructive" type="button" role="menuitem" onClick={() => { deleteUser(user.id); setActiveUserMenu(null); }}>Delete User</button>}
                         </div>
                       )}
                     </td>

@@ -21,7 +21,9 @@ type AssessmentPayload = {
   sections?: unknown;
 };
 
-async function ensureAssessmentTable() {
+let assessmentTablesReady: Promise<void> | null = null;
+
+async function initializeAssessmentTables() {
   await databasePool.query(`
     CREATE TABLE IF NOT EXISTS assessment (
       id SERIAL PRIMARY KEY,
@@ -129,6 +131,41 @@ async function ensureAssessmentTable() {
       PRIMARY KEY (assessment_id, candidate_id)
     )
   `);
+  await databasePool.query(`
+    CREATE INDEX IF NOT EXISTS assessment_candidate_invigilator_staff_lookup_idx
+    ON assessment_candidate_invigilator (invigilator_user_id, assessment_id)
+  `);
+  await databasePool.query(`
+    CREATE INDEX IF NOT EXISTS assessment_candidate_evaluator_staff_lookup_idx
+    ON assessment_candidate_evaluator (evaluator_user_id, assessment_id)
+  `);
+  await databasePool.query(`
+    CREATE INDEX IF NOT EXISTS candidate_sub_category_lookup_idx
+    ON candidate_sub_category (category, candidate_sub_category, status)
+  `);
+  await databasePool.query(`
+    CREATE INDEX IF NOT EXISTS candidate_active_category_subcategory_idx
+    ON "Candidate Information" (
+      BTRIM(COALESCE(candidate_data->>'category', '')),
+      BTRIM(COALESCE(candidate_data->>'sub_category', ''))
+    )
+    WHERE record_type = 'candidate' AND status = TRUE
+  `);
+  await databasePool.query(`
+    CREATE INDEX IF NOT EXISTS questions_active_created_idx
+    ON questions (created_at DESC, id DESC)
+    WHERE status = TRUE
+  `);
+}
+
+async function ensureAssessmentTable() {
+  if (!assessmentTablesReady) {
+    assessmentTablesReady = initializeAssessmentTables().catch((error: unknown) => {
+      assessmentTablesReady = null;
+      throw error;
+    });
+  }
+  await assessmentTablesReady;
 }
 
 type ActiveQuestion = {
@@ -298,8 +335,9 @@ export async function GET(request: Request) {
     const userRole = authorization.user?.role.trim().toLocaleLowerCase();
     const assignedInvigilatorId = userRole === "invigilator" ? authorization.user?.id ?? null : null;
     const assignedEvaluatorId = userRole === "evaluator" ? authorization.user?.id ?? null : null;
-    const activeQuestions = await loadActiveQuestions();
-    const result = await databasePool.query(`
+    const [activeQuestions, result] = await Promise.all([
+      loadActiveQuestions(),
+      databasePool.query(`
       SELECT id, examination, name, start_date, end_date, total_time, last_login,
              pass_mark,
              question_category, sub_category, topic, question_language, sections,
@@ -357,7 +395,8 @@ export async function GET(request: Request) {
              AND evaluator_assignment.evaluator_user_id = $2
          )
       ORDER BY created_at DESC, id DESC
-    `, [assignedInvigilatorId, assignedEvaluatorId]);
+      `, [assignedInvigilatorId, assignedEvaluatorId]),
+    ]);
     return NextResponse.json(result.rows.map((assessment) => ({
       ...assessment,
       has_active_questions: hasMatchingActiveQuestion(assessment, activeQuestions),

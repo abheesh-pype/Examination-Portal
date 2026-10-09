@@ -94,6 +94,14 @@ async function ensureEvaluationTables() {
     )
   `);
   await databasePool.query(`
+    CREATE TABLE IF NOT EXISTS assessment_candidate_direct_assignment (
+      assessment_id INTEGER NOT NULL REFERENCES assessment(id) ON DELETE CASCADE,
+      candidate_id INTEGER NOT NULL REFERENCES "Candidate Information"(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (assessment_id, candidate_id)
+    )
+  `);
+  await databasePool.query(`
     CREATE TABLE IF NOT EXISTS assessment_candidate_evaluator (
       assessment_id INTEGER NOT NULL REFERENCES assessment(id) ON DELETE CASCADE,
       candidate_id INTEGER NOT NULL REFERENCES "Candidate Information"(id) ON DELETE CASCADE,
@@ -193,14 +201,26 @@ async function canAccessCandidate(assessmentId: number, candidateId: number, acc
     const result = await databasePool.query(`
       SELECT 1
       FROM "Candidate Information" AS candidate
-      JOIN candidate_sub_category AS candidate_group
-        ON candidate_group.status = TRUE
-        AND candidate_group.category = BTRIM(COALESCE(candidate.candidate_data->>'category', ''))
-        AND candidate_group.candidate_sub_category = BTRIM(COALESCE(candidate.candidate_data->>'sub_category', ''))
-      JOIN assessment_candidate_sub_category AS cohort_assignment
-        ON cohort_assignment.candidate_sub_category_id = candidate_group.id
-        AND cohort_assignment.assessment_id = $1
-      WHERE candidate.id = $2 AND candidate.record_type = 'candidate'
+      WHERE candidate.id = $2
+        AND candidate.record_type = 'candidate'
+        AND (
+          EXISTS (
+            SELECT 1
+            FROM candidate_sub_category AS candidate_group
+            JOIN assessment_candidate_sub_category AS cohort_assignment
+              ON cohort_assignment.candidate_sub_category_id = candidate_group.id
+             AND cohort_assignment.assessment_id = $1
+            WHERE candidate_group.status = TRUE
+              AND candidate_group.category = BTRIM(COALESCE(candidate.candidate_data->>'category', ''))
+              AND candidate_group.candidate_sub_category = BTRIM(COALESCE(candidate.candidate_data->>'sub_category', ''))
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM assessment_candidate_direct_assignment AS direct_assignment
+            WHERE direct_assignment.assessment_id = $1
+              AND direct_assignment.candidate_id = candidate.id
+          )
+        )
       LIMIT 1
     `, [assessmentId, candidateId]);
     return Boolean(result.rowCount);
@@ -497,6 +517,9 @@ export async function GET(request: Request) {
       LEFT JOIN assessment_candidate_sub_category AS cohort_assignment
         ON cohort_assignment.assessment_id = $1
         AND cohort_assignment.candidate_sub_category_id = candidate_group.id
+      LEFT JOIN assessment_candidate_direct_assignment AS direct_assignment
+        ON direct_assignment.assessment_id = $1
+        AND direct_assignment.candidate_id = candidate.id
       LEFT JOIN assessment_candidate_evaluator AS evaluator_assignment
         ON evaluator_assignment.assessment_id = $1
         AND evaluator_assignment.candidate_id = candidate.id
@@ -504,7 +527,10 @@ export async function GET(request: Request) {
       LEFT JOIN assessment_candidate_submissions AS submission
         ON submission.assessment_id = $1 AND submission.candidate_id = candidate.id
       WHERE candidate.record_type = 'candidate'
-        AND (($3::boolean AND cohort_assignment.assessment_id IS NOT NULL)
+        AND (($3::boolean AND (
+              cohort_assignment.assessment_id IS NOT NULL
+              OR direct_assignment.candidate_id IS NOT NULL
+            ))
           OR (NOT $3::boolean AND evaluator_assignment.evaluator_user_id = $2))
       ORDER BY candidate.id, submission.submitted_at DESC NULLS LAST
     `, [assessmentId, accountUserId, access.isAdmin]);

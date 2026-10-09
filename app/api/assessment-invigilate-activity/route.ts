@@ -108,6 +108,14 @@ async function ensureInvigilationActivityTables() {
     )
   `);
   await databasePool.query(`
+    CREATE TABLE IF NOT EXISTS assessment_candidate_direct_assignment (
+      assessment_id INTEGER NOT NULL REFERENCES assessment(id) ON DELETE CASCADE,
+      candidate_id INTEGER NOT NULL REFERENCES "Candidate Information"(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (assessment_id, candidate_id)
+    )
+  `);
+  await databasePool.query(`
     CREATE TABLE IF NOT EXISTS assessment_candidate_proctor_state (
       assessment_id INTEGER NOT NULL REFERENCES assessment(id) ON DELETE CASCADE,
       candidate_id INTEGER NOT NULL REFERENCES "Candidate Information"(id) ON DELETE CASCADE,
@@ -179,13 +187,19 @@ export async function GET(request: Request) {
       LEFT JOIN assessment_candidate_sub_category AS cohort_assignment
         ON cohort_assignment.assessment_id = $1
         AND cohort_assignment.candidate_sub_category_id = candidate_group.id
+      LEFT JOIN assessment_candidate_direct_assignment AS direct_assignment
+        ON direct_assignment.assessment_id = $1
+        AND direct_assignment.candidate_id = candidate.id
       LEFT JOIN assessment_candidate_proctor_state AS state
         ON state.assessment_id = $1
         AND state.candidate_id = candidate.id
         AND state.last_seen >= NOW() - INTERVAL '30 seconds'
       WHERE candidate.record_type = 'candidate'
         AND (
-          ($3::boolean AND cohort_assignment.assessment_id IS NOT NULL)
+          ($3::boolean AND (
+            cohort_assignment.assessment_id IS NOT NULL
+            OR direct_assignment.candidate_id IS NOT NULL
+          ))
           OR (NOT $3::boolean AND assignment.invigilator_user_id = $2)
         )
       ORDER BY candidate.id, state.last_seen DESC NULLS LAST

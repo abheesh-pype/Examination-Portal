@@ -43,6 +43,14 @@ async function ensureStudentScheduleTables() {
     )
   `);
   await databasePool.query(`
+    CREATE TABLE IF NOT EXISTS assessment_candidate_direct_assignment (
+      assessment_id INTEGER NOT NULL REFERENCES assessment(id) ON DELETE CASCADE,
+      candidate_id INTEGER NOT NULL REFERENCES "Candidate Information"(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (assessment_id, candidate_id)
+    )
+  `);
+  await databasePool.query(`
     CREATE TABLE IF NOT EXISTS assessment_candidate_submissions (
       assessment_id INTEGER NOT NULL REFERENCES assessment(id) ON DELETE CASCADE,
       candidate_id INTEGER NOT NULL REFERENCES "Candidate Information"(id) ON DELETE CASCADE,
@@ -87,10 +95,6 @@ export async function POST(request: Request) {
       category?: string | null;
       sub_category?: string | null;
     } | null;
-    if (!candidateData?.category || !candidateData.sub_category) {
-      return NextResponse.json({ assessments: [], exam_cam_permission_active: examCamPermissionActive });
-    }
-
     const assessments = await databasePool.query(`
       SELECT assessment.id, assessment.examination, assessment.name,
              assessment.start_date, assessment.end_date, assessment.total_time,
@@ -121,10 +125,6 @@ export async function POST(request: Request) {
                AND (assessment.total_time > 0 OR assessment.end_date IS NOT NULL)
              ) AS can_start
       FROM assessment
-      JOIN assessment_candidate_sub_category AS assignment
-        ON assignment.assessment_id = assessment.id
-      JOIN candidate_sub_category AS sub_category
-        ON sub_category.id = assignment.candidate_sub_category_id
       LEFT JOIN assessment_candidate_submissions AS submission
         ON submission.assessment_id = assessment.id
        AND submission.candidate_id = $3
@@ -132,11 +132,26 @@ export async function POST(request: Request) {
         ON attempt.assessment_id = assessment.id
        AND attempt.candidate_id = $3
       WHERE assessment.status = TRUE
-        AND sub_category.status = TRUE
-        AND sub_category.category = $1
-        AND sub_category.candidate_sub_category = $2
+        AND (
+          EXISTS (
+            SELECT 1
+            FROM assessment_candidate_sub_category AS assignment
+            JOIN candidate_sub_category AS sub_category
+              ON sub_category.id = assignment.candidate_sub_category_id
+            WHERE assignment.assessment_id = assessment.id
+              AND sub_category.status = TRUE
+              AND sub_category.category = $1
+              AND sub_category.candidate_sub_category = $2
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM assessment_candidate_direct_assignment AS direct_assignment
+            WHERE direct_assignment.assessment_id = assessment.id
+              AND direct_assignment.candidate_id = $3
+          )
+        )
       ORDER BY assessment.start_date ASC NULLS LAST, assessment.id ASC
-    `, [candidateData.category, candidateData.sub_category, candidate.id]);
+    `, [candidateData?.category ?? "", candidateData?.sub_category ?? "", candidate.id]);
 
     return NextResponse.json({
       assessments: assessments.rows.map((assessment) => {

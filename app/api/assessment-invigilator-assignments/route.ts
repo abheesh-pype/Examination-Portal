@@ -98,7 +98,7 @@ export async function PUT(request: Request) {
   try {
     const authorization = await authorizeApiRequest(request);
     if (!authorization.ok) return authorization.response;
-    const body = await request.json() as { assessment_id?: unknown; assignments?: unknown };
+    const body = await request.json() as { assessment_id?: unknown; assignments?: unknown; merge?: unknown };
     const assessmentId = Number(body.assessment_id);
     if (!Number.isInteger(assessmentId) || assessmentId <= 0) {
       return NextResponse.json({ error: "A valid assessment id is required" }, { status: 400 });
@@ -111,6 +111,12 @@ export async function PUT(request: Request) {
       || Number((item as { invigilator_user_id: number }).invigilator_user_id) <= 0
     )) {
       return NextResponse.json({ error: "Assignments must contain valid candidate and invigilator ids" }, { status: 400 });
+    }
+    if (body.merge !== undefined && typeof body.merge !== "boolean") {
+      return NextResponse.json({ error: "The merge option must be a boolean" }, { status: 400 });
+    }
+    if (body.merge === true && body.assignments.length > 1000) {
+      return NextResponse.json({ error: "Upload a maximum of 1000 candidate assignments at a time" }, { status: 400 });
     }
 
     const assignments = body.assignments as Array<{ candidate_id: number; invigilator_user_id: number }>;
@@ -132,7 +138,7 @@ export async function PUT(request: Request) {
       const invigilatorIds = [...new Set(uniqueAssignments.map((item) => item.invigilator_user_id))];
       if (candidateIds.length > 0) {
         const candidateResult = await client.query(
-          `SELECT id FROM "Candidate Information" WHERE record_type = 'candidate' AND id = ANY($1::int[])`,
+          `SELECT id FROM "Candidate Information" WHERE record_type = 'candidate' AND status = TRUE AND id = ANY($1::int[])`,
           [candidateIds],
         );
         if (candidateResult.rowCount !== candidateIds.length) {
@@ -153,13 +159,25 @@ export async function PUT(request: Request) {
         }
       }
 
-      await client.query("DELETE FROM assessment_candidate_invigilator WHERE assessment_id = $1", [assessmentId]);
       if (uniqueAssignments.length > 0) {
-        await client.query(`
-          INSERT INTO assessment_candidate_invigilator (assessment_id, candidate_id, invigilator_user_id)
-          SELECT $1, rows.candidate_id, rows.invigilator_user_id
-          FROM jsonb_to_recordset($2::jsonb) AS rows(candidate_id INTEGER, invigilator_user_id INTEGER)
-        `, [assessmentId, JSON.stringify(uniqueAssignments)]);
+        if (body.merge === true) {
+          await client.query(`
+            INSERT INTO assessment_candidate_invigilator (assessment_id, candidate_id, invigilator_user_id)
+            SELECT $1, rows.candidate_id, rows.invigilator_user_id
+            FROM jsonb_to_recordset($2::jsonb) AS rows(candidate_id INTEGER, invigilator_user_id INTEGER)
+            ON CONFLICT (assessment_id, candidate_id)
+            DO UPDATE SET invigilator_user_id = EXCLUDED.invigilator_user_id
+          `, [assessmentId, JSON.stringify(uniqueAssignments)]);
+        } else {
+          await client.query("DELETE FROM assessment_candidate_invigilator WHERE assessment_id = $1", [assessmentId]);
+          await client.query(`
+            INSERT INTO assessment_candidate_invigilator (assessment_id, candidate_id, invigilator_user_id)
+            SELECT $1, rows.candidate_id, rows.invigilator_user_id
+            FROM jsonb_to_recordset($2::jsonb) AS rows(candidate_id INTEGER, invigilator_user_id INTEGER)
+          `, [assessmentId, JSON.stringify(uniqueAssignments)]);
+        }
+      } else if (body.merge !== true) {
+        await client.query("DELETE FROM assessment_candidate_invigilator WHERE assessment_id = $1", [assessmentId]);
       }
       await client.query("COMMIT");
       transactionStarted = false;

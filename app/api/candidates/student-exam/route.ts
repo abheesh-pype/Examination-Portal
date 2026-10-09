@@ -71,6 +71,14 @@ async function createStudentExamTables() {
     )
   `);
   await databasePool.query(`
+    CREATE TABLE IF NOT EXISTS assessment_candidate_direct_assignment (
+      assessment_id INTEGER NOT NULL REFERENCES assessment(id) ON DELETE CASCADE,
+      candidate_id INTEGER NOT NULL REFERENCES "Candidate Information"(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (assessment_id, candidate_id)
+    )
+  `);
+  await databasePool.query(`
     CREATE TABLE IF NOT EXISTS questions (
       id SERIAL PRIMARY KEY,
       question_type TEXT NOT NULL,
@@ -232,12 +240,6 @@ export async function POST(request: Request) {
       const candidateData = isRecord(candidate.candidate_data) ? candidate.candidate_data : {};
       const category = typeof candidateData.category === "string" ? candidateData.category : "";
       const subCategory = typeof candidateData.sub_category === "string" ? candidateData.sub_category : "";
-      if (!category || !subCategory) {
-        await client.query("ROLLBACK");
-        transactionStarted = false;
-        return NextResponse.json({ error: "This student is not assigned to the assessment." }, { status: 403 });
-      }
-
       const assessmentResult = await client.query(`
         SELECT id, name, start_date, end_date, total_time, last_login,
                question_category, sub_category, topic, question_language, sections
@@ -253,17 +255,24 @@ export async function POST(request: Request) {
       }
 
       const assignment = await client.query(`
-        SELECT 1
-        FROM assessment_candidate_sub_category AS assignment
-        JOIN candidate_sub_category AS candidate_group
-          ON candidate_group.id = assignment.candidate_sub_category_id
-        WHERE assignment.assessment_id = $1
-          AND candidate_group.status = TRUE
-          AND candidate_group.category = $2
-          AND candidate_group.candidate_sub_category = $3
+        SELECT EXISTS (
+          SELECT 1
+          FROM assessment_candidate_sub_category AS assignment
+          JOIN candidate_sub_category AS candidate_group
+            ON candidate_group.id = assignment.candidate_sub_category_id
+          WHERE assignment.assessment_id = $1
+            AND candidate_group.status = TRUE
+            AND candidate_group.category = $2
+            AND candidate_group.candidate_sub_category = $3
+        ) OR EXISTS (
+          SELECT 1
+          FROM assessment_candidate_direct_assignment AS direct_assignment
+          WHERE direct_assignment.assessment_id = $1
+            AND direct_assignment.candidate_id = $4
+        ) AS is_assigned
         LIMIT 1
-      `, [assessmentId, category, subCategory]);
-      if (!assignment.rowCount) {
+      `, [assessmentId, category, subCategory, candidate.id]);
+      if (!assignment.rows[0]?.is_assigned) {
         await client.query("ROLLBACK");
         transactionStarted = false;
         return NextResponse.json({ error: "This student is not assigned to the assessment." }, { status: 403 });

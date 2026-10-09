@@ -102,6 +102,14 @@ async function ensureLiveFeedTables() {
     )
   `);
   await databasePool.query(`
+    CREATE TABLE IF NOT EXISTS assessment_candidate_direct_assignment (
+      assessment_id INTEGER NOT NULL REFERENCES assessment(id) ON DELETE CASCADE,
+      candidate_id INTEGER NOT NULL REFERENCES "Candidate Information"(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (assessment_id, candidate_id)
+    )
+  `);
+  await databasePool.query(`
     CREATE TABLE IF NOT EXISTS assessment_candidate_invigilator (
       assessment_id INTEGER NOT NULL REFERENCES assessment(id) ON DELETE CASCADE,
       candidate_id INTEGER NOT NULL REFERENCES "Candidate Information"(id) ON DELETE CASCADE,
@@ -202,21 +210,25 @@ export async function POST(request: Request) {
         category?: string | null;
         sub_category?: string | null;
       } | null;
-      if (!data?.category || !data.sub_category) {
-        return NextResponse.json({ error: "Candidate is not assigned to this assessment." }, { status: 403 });
-      }
       const cohortAssignment = await databasePool.query(`
-        SELECT 1
-        FROM assessment_candidate_sub_category AS assignment
-        JOIN candidate_sub_category AS candidate_group
-          ON candidate_group.id = assignment.candidate_sub_category_id
-        WHERE assignment.assessment_id = $1
-          AND candidate_group.status = TRUE
-          AND candidate_group.category = $2
-          AND candidate_group.candidate_sub_category = $3
+        SELECT EXISTS (
+          SELECT 1
+          FROM assessment_candidate_sub_category AS assignment
+          JOIN candidate_sub_category AS candidate_group
+            ON candidate_group.id = assignment.candidate_sub_category_id
+          WHERE assignment.assessment_id = $1
+            AND candidate_group.status = TRUE
+            AND candidate_group.category = $2
+            AND candidate_group.candidate_sub_category = $3
+        ) OR EXISTS (
+          SELECT 1
+          FROM assessment_candidate_direct_assignment AS direct_assignment
+          WHERE direct_assignment.assessment_id = $1
+            AND direct_assignment.candidate_id = $4
+        ) AS is_assigned
         LIMIT 1
-      `, [assessmentId, data.category, data.sub_category]);
-      if (!cohortAssignment.rowCount) {
+      `, [assessmentId, data?.category ?? "", data?.sub_category ?? "", candidate.id]);
+      if (!cohortAssignment.rows[0]?.is_assigned) {
         return NextResponse.json({ error: "Candidate is not assigned to this assessment." }, { status: 403 });
       }
     } else {
@@ -253,10 +265,16 @@ export async function POST(request: Request) {
         LEFT JOIN assessment_candidate_sub_category AS cohort_assignment
           ON cohort_assignment.assessment_id = $1
           AND cohort_assignment.candidate_sub_category_id = candidate_group.id
+        LEFT JOIN assessment_candidate_direct_assignment AS direct_assignment
+          ON direct_assignment.assessment_id = $1
+          AND direct_assignment.candidate_id = candidate.id
         WHERE candidate.id = $2
           AND candidate.record_type = 'candidate'
           AND (
-            ($3::boolean AND cohort_assignment.assessment_id IS NOT NULL)
+            ($3::boolean AND (
+              cohort_assignment.assessment_id IS NOT NULL
+              OR direct_assignment.candidate_id IS NOT NULL
+            ))
             OR (NOT $3::boolean AND individual_assignment.invigilator_user_id = $4)
           )
         LIMIT 1

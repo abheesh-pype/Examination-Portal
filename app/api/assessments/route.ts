@@ -104,6 +104,14 @@ async function ensureAssessmentTable() {
     )
   `);
   await databasePool.query(`
+    CREATE TABLE IF NOT EXISTS assessment_candidate_direct_assignment (
+      assessment_id INTEGER NOT NULL REFERENCES assessment(id) ON DELETE CASCADE,
+      candidate_id INTEGER NOT NULL REFERENCES "Candidate Information"(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (assessment_id, candidate_id)
+    )
+  `);
+  await databasePool.query(`
     CREATE TABLE IF NOT EXISTS assessment_candidate_invigilator (
       assessment_id INTEGER NOT NULL REFERENCES assessment(id) ON DELETE CASCADE,
       candidate_id INTEGER NOT NULL REFERENCES "Candidate Information"(id) ON DELETE CASCADE,
@@ -312,16 +320,27 @@ export async function GET(request: Request) {
              ), 0) AS total_marks,
              (
                SELECT COUNT(DISTINCT candidate.id)::int
-               FROM assessment_candidate_sub_category AS assignment
-               JOIN candidate_sub_category AS candidate_group
-                 ON candidate_group.id = assignment.candidate_sub_category_id
-                AND candidate_group.status = TRUE
-               JOIN "Candidate Information" AS candidate
-                 ON candidate.record_type = 'candidate'
-                AND candidate.status = TRUE
-                AND BTRIM(COALESCE(candidate.candidate_data->>'category', '')) = candidate_group.category
-                AND BTRIM(COALESCE(candidate.candidate_data->>'sub_category', '')) = candidate_group.candidate_sub_category
-               WHERE assignment.assessment_id = assessment.id
+               FROM "Candidate Information" AS candidate
+               WHERE candidate.record_type = 'candidate'
+                 AND candidate.status = TRUE
+                 AND (
+                   EXISTS (
+                     SELECT 1
+                     FROM assessment_candidate_sub_category AS assignment
+                     JOIN candidate_sub_category AS candidate_group
+                       ON candidate_group.id = assignment.candidate_sub_category_id
+                      AND candidate_group.status = TRUE
+                     WHERE assignment.assessment_id = assessment.id
+                       AND BTRIM(COALESCE(candidate.candidate_data->>'category', '')) = candidate_group.category
+                       AND BTRIM(COALESCE(candidate.candidate_data->>'sub_category', '')) = candidate_group.candidate_sub_category
+                   )
+                   OR EXISTS (
+                     SELECT 1
+                     FROM assessment_candidate_direct_assignment AS direct_assignment
+                     WHERE direct_assignment.assessment_id = assessment.id
+                       AND direct_assignment.candidate_id = candidate.id
+                   )
+                 )
              ) AS candidate_count
       FROM assessment
       WHERE ($1::integer IS NULL AND $2::integer IS NULL)

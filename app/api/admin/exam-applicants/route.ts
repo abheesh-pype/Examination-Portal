@@ -59,6 +59,14 @@ async function ensureApplicantTables() {
       PRIMARY KEY (assessment_id, candidate_sub_category_id)
     )
   `);
+  await databasePool.query(`
+    CREATE TABLE IF NOT EXISTS assessment_candidate_direct_assignment (
+      assessment_id INTEGER NOT NULL REFERENCES assessment(id) ON DELETE CASCADE,
+      candidate_id INTEGER NOT NULL REFERENCES "Candidate Information"(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (assessment_id, candidate_id)
+    )
+  `);
 }
 
 export async function GET(request: Request) {
@@ -83,15 +91,26 @@ export async function GET(request: Request) {
         COALESCE(assessment.sub_category, '') AS test_sub_category,
         candidate.status AS active_status
       FROM assessment
-      JOIN assessment_candidate_sub_category AS assessment_assignment
-        ON assessment_assignment.assessment_id = assessment.id
-      JOIN candidate_sub_category AS assigned_group
-        ON assigned_group.id = assessment_assignment.candidate_sub_category_id
-       AND assigned_group.status = TRUE
       JOIN "Candidate Information" AS candidate
         ON candidate.record_type = 'candidate'
-       AND BTRIM(COALESCE(candidate.candidate_data->>'category', '')) = BTRIM(assigned_group.category)
-       AND BTRIM(COALESCE(candidate.candidate_data->>'sub_category', '')) = BTRIM(assigned_group.candidate_sub_category)
+       AND (
+         EXISTS (
+           SELECT 1
+           FROM assessment_candidate_sub_category AS assessment_assignment
+           JOIN candidate_sub_category AS assigned_group
+             ON assigned_group.id = assessment_assignment.candidate_sub_category_id
+            AND assigned_group.status = TRUE
+           WHERE assessment_assignment.assessment_id = assessment.id
+             AND BTRIM(COALESCE(candidate.candidate_data->>'category', '')) = BTRIM(assigned_group.category)
+             AND BTRIM(COALESCE(candidate.candidate_data->>'sub_category', '')) = BTRIM(assigned_group.candidate_sub_category)
+         )
+         OR EXISTS (
+           SELECT 1
+           FROM assessment_candidate_direct_assignment AS direct_assignment
+           WHERE direct_assignment.assessment_id = assessment.id
+             AND direct_assignment.candidate_id = candidate.id
+         )
+       )
       CROSS JOIN LATERAL (
         SELECT
           MAX(value) FILTER (WHERE key ~* '^candidate id(?:\\s*\\([^)]*\\))?$') AS candidate_id,

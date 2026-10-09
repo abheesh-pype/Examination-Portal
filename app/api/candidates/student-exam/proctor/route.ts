@@ -57,6 +57,14 @@ async function ensureProctorTables() {
           PRIMARY KEY (assessment_id, candidate_sub_category_id)
         )
       `);
+      await databasePool.query(`
+        CREATE TABLE IF NOT EXISTS assessment_candidate_direct_assignment (
+          assessment_id INTEGER NOT NULL REFERENCES assessment(id) ON DELETE CASCADE,
+          candidate_id INTEGER NOT NULL REFERENCES "Candidate Information"(id) ON DELETE CASCADE,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (assessment_id, candidate_id)
+        )
+      `);
     })();
   }
   try {
@@ -107,24 +115,28 @@ export async function PUT(request: Request) {
       category?: string | null;
       sub_category?: string | null;
     } | null;
-    if (!candidateData?.category || !candidateData.sub_category) {
-      return NextResponse.json({ error: "This student is not assigned to the assessment." }, { status: 403 });
-    }
-
     const assignment = await databasePool.query(`
-      SELECT 1
-      FROM assessment_candidate_sub_category AS assignment
-      JOIN candidate_sub_category AS candidate_group
-        ON candidate_group.id = assignment.candidate_sub_category_id
-      JOIN assessment
-        ON assessment.id = assignment.assessment_id AND assessment.status = TRUE
-      WHERE assignment.assessment_id = $1
-        AND candidate_group.status = TRUE
-        AND candidate_group.category = $2
-        AND candidate_group.candidate_sub_category = $3
+      SELECT EXISTS (
+        SELECT 1
+        FROM assessment_candidate_sub_category AS assignment
+        JOIN candidate_sub_category AS candidate_group
+          ON candidate_group.id = assignment.candidate_sub_category_id
+        JOIN assessment
+          ON assessment.id = assignment.assessment_id AND assessment.status = TRUE
+        WHERE assignment.assessment_id = $1
+          AND candidate_group.status = TRUE
+          AND candidate_group.category = $2
+          AND candidate_group.candidate_sub_category = $3
+      ) OR EXISTS (
+        SELECT 1
+        FROM assessment_candidate_direct_assignment AS direct_assignment
+        JOIN assessment ON assessment.id = direct_assignment.assessment_id AND assessment.status = TRUE
+        WHERE direct_assignment.assessment_id = $1
+          AND direct_assignment.candidate_id = $4
+      ) AS is_assigned
       LIMIT 1
-    `, [assessmentId, candidateData.category, candidateData.sub_category]);
-    if (!assignment.rowCount) {
+    `, [assessmentId, candidateData?.category ?? "", candidateData?.sub_category ?? "", candidate.id]);
+    if (!assignment.rows[0]?.is_assigned) {
       return NextResponse.json({ error: "This student is not assigned to the assessment." }, { status: 403 });
     }
 

@@ -2188,6 +2188,56 @@ h1 {
 	padding-top: 40px;
 }
 
+.invigilator-upload-assessment {
+	display: grid;
+	gap: 4px;
+	margin-bottom: 16px;
+	padding: 12px 14px;
+	background: #f7f7ff;
+	border: 1px solid #e5e4ff;
+	border-radius: 8px;
+	font-family: Arial, sans-serif;
+}
+
+.invigilator-upload-assessment > span,
+.invigilator-upload-assessment > small {
+	color: #71717a;
+	font-size: 12px;
+}
+
+.invigilator-upload-assessment > strong {
+	color: #27272a;
+	font-size: 15px;
+}
+
+.invigilator-upload-help {
+	margin: 0 0 18px;
+	color: #52525b;
+	font-family: Arial, sans-serif;
+	font-size: 13px;
+	line-height: 1.5;
+}
+
+.candidate-upload-assigned-list {
+	max-height: 180px;
+	overflow-y: auto;
+	margin-top: 14px;
+	padding: 12px 14px;
+	color: #3f3f46;
+	background: #fafafa;
+	border: 1px solid #e4e4e7;
+	border-radius: 8px;
+	font-family: Arial, sans-serif;
+	font-size: 13px;
+}
+
+.candidate-upload-assigned-list ul {
+	display: grid;
+	gap: 6px;
+	margin: 8px 0 0;
+	padding-left: 20px;
+}
+
 .download-sample-link {
 	position: absolute;
 	top: 0;

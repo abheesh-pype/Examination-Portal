@@ -6,7 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 import NextImage from "next/image";
 import Papa from "papaparse";
 import readXlsxFile from "read-excel-file/browser";
-import { strToU8, zipSync } from "fflate";
+import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import type { CandidateTimelineEventType } from "@/lib/exam-timeline";
 import { matchesAssessmentQuestionType } from "@/lib/question-types";
 
@@ -210,7 +210,89 @@ function downloadUploadTemplate(fileName: string, sheetName: string, headers: st
   URL.revokeObjectURL(url);
 }
 
-async function readUploadFile(file: File) {
+function readXlsxRawWorksheets(file: Uint8Array) {
+  const archive = unzipSync(file);
+  const readXml = (path: string) => {
+    const content = archive[path];
+    if (!content) return null;
+    const xml = new DOMParser().parseFromString(strFromU8(content), "application/xml");
+    if (xml.getElementsByTagName("parsererror").length > 0) {
+      throw new Error(`The Excel workbook contains invalid XML in ${path}.`);
+    }
+    return xml;
+  };
+  const workbook = readXml("xl/workbook.xml");
+  const relationships = readXml("xl/_rels/workbook.xml.rels");
+  if (!workbook || !relationships) throw new Error("The selected file is not a valid Excel workbook.");
+
+  const relationshipTargets = new Map(
+    Array.from(relationships.getElementsByTagNameNS("*", "Relationship")).map((relationship) => [
+      relationship.getAttribute("Id") ?? "",
+      relationship.getAttribute("Target") ?? "",
+    ]),
+  );
+  const sharedStringsDocument = readXml("xl/sharedStrings.xml");
+  const sharedStrings = sharedStringsDocument
+    ? Array.from(sharedStringsDocument.getElementsByTagNameNS("*", "si")).map((item) =>
+      Array.from(item.getElementsByTagNameNS("*", "t")).map((text) => text.textContent ?? "").join("")
+    )
+    : [];
+  const worksheetEntries = Array.from(workbook.getElementsByTagNameNS("*", "sheet"));
+
+  return worksheetEntries.flatMap((sheet) => {
+    const relationshipId = sheet.getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "id")
+      ?? sheet.getAttribute("r:id")
+      ?? "";
+    const target = relationshipTargets.get(relationshipId);
+    if (!target) return [];
+    const targetPath = target.startsWith("/")
+      ? target.slice(1)
+      : `xl/${target}`;
+    const normalizedPathParts: string[] = [];
+    targetPath.split("/").forEach((part) => {
+      if (!part || part === ".") return;
+      if (part === "..") normalizedPathParts.pop();
+      else normalizedPathParts.push(part);
+    });
+    const worksheet = readXml(normalizedPathParts.join("/"));
+    if (!worksheet) return [];
+
+    const data = Array.from(worksheet.getElementsByTagNameNS("*", "row")).map((rowElement) => {
+      const row: unknown[] = [];
+      let nextColumn = 0;
+      Array.from(rowElement.getElementsByTagNameNS("*", "c")).forEach((cell) => {
+        const reference = cell.getAttribute("r") ?? "";
+        const columnLabel = reference.match(/^[A-Z]+/i)?.[0];
+        let columnIndex = nextColumn;
+        if (columnLabel) {
+          columnIndex = 0;
+          for (const letter of columnLabel.toLocaleUpperCase()) {
+            columnIndex = columnIndex * 26 + letter.charCodeAt(0) - 64;
+          }
+          columnIndex -= 1;
+        }
+        const cellType = cell.getAttribute("t");
+        const valueElement = cell.getElementsByTagNameNS("*", "v")[0];
+        const inlineText = Array.from(cell.getElementsByTagNameNS("*", "t"))
+          .map((text) => text.textContent ?? "")
+          .join("");
+        const rawValue = valueElement?.textContent ?? "";
+        row[columnIndex] = cellType === "s"
+          ? sharedStrings[Number(rawValue)] ?? ""
+          : cellType === "inlineStr"
+            ? inlineText
+            : cellType === "b"
+              ? rawValue === "1" ? "TRUE" : "FALSE"
+              : rawValue;
+        nextColumn = columnIndex + 1;
+      });
+      return row;
+    });
+    return [{ sheet: sheet.getAttribute("name") ?? "Worksheet", data }];
+  });
+}
+
+async function readUploadFile(file: File, headerGroups?: string[][]) {
   if (file.name.toLowerCase().endsWith(".csv")) {
     const parsed = Papa.parse<Record<string, string>>(await file.text(), {
       header: true,
@@ -227,10 +309,57 @@ async function readUploadFile(file: File) {
     throw new Error("Choose an Excel workbook (.xlsx). Legacy .xls files are not supported.");
   }
 
-  const workbookSheets = await readXlsxFile(file);
-  const sheetRows = workbookSheets[0]?.data;
-  if (!sheetRows?.length) throw new Error("The selected workbook has no worksheet data.");
-  const [headerRow = [], ...dataRows] = sheetRows;
+  let workbookSheets: Array<{ sheet: string; data: unknown[][] }> = await readXlsxFile(file);
+  if (workbookSheets.length === 0) throw new Error("The selected workbook has no worksheet data.");
+  const normalizeHeader = (header: unknown) => String(header ?? "")
+    .replace(/^\uFEFF/, "")
+    .replace(/\u00A0/g, " ")
+    .trim()
+    .replace(/[\s_-]+/g, " ")
+    .toLocaleLowerCase();
+  let headerRow: unknown[] | undefined;
+  let dataRows: unknown[][];
+  if (headerGroups?.length) {
+    let matchingSheet: { data: unknown[][]; row: unknown[]; rowIndex: number } | undefined;
+    for (const sheet of workbookSheets) {
+      for (const [rowIndex, row] of sheet.data.entries()) {
+        const normalizedHeaders = row.map(normalizeHeader);
+        if (headerGroups.every((aliases) => aliases.some((alias) => normalizedHeaders.includes(normalizeHeader(alias))))) {
+          matchingSheet = { data: sheet.data, row, rowIndex };
+          break;
+        }
+      }
+      if (matchingSheet) break;
+    }
+    if (!matchingSheet) {
+      const rawWorksheets = readXlsxRawWorksheets(new Uint8Array(await file.arrayBuffer()));
+      if (rawWorksheets.length > 0) workbookSheets = rawWorksheets;
+      for (const sheet of workbookSheets) {
+        for (const [rowIndex, row] of sheet.data.entries()) {
+          const normalizedHeaders = row.map(normalizeHeader);
+          if (headerGroups.every((aliases) => aliases.some((alias) => normalizedHeaders.includes(normalizeHeader(alias))))) {
+            matchingSheet = { data: sheet.data, row, rowIndex };
+            break;
+          }
+        }
+        if (matchingSheet) break;
+      }
+    }
+    if (!matchingSheet) {
+      const detectedHeaders = workbookSheets
+        .flatMap((sheet) => sheet.data.slice(0, 5).map((row) => `${sheet.sheet}: ${row.map((cell) => String(cell ?? "").trim()).filter(Boolean).join(", ")}`))
+        .filter((row) => row.trim().length > 0)
+        .slice(0, 5)
+        .join("; ");
+      throw new Error(`Could not find the required header row in the workbook. Check that Candidate ID and the staff email are column headers.${detectedHeaders ? ` Workbook rows found: ${detectedHeaders}` : ""}`);
+    }
+    headerRow = matchingSheet.row;
+    dataRows = matchingSheet.data.slice(matchingSheet.rowIndex + 1);
+  } else {
+    headerRow = workbookSheets[0]?.data[0];
+    dataRows = workbookSheets[0]?.data.slice(1) ?? [];
+  }
+  if (!headerRow?.length) throw new Error("The selected workbook has no worksheet data.");
   const toCellString = (value: unknown) => value instanceof Date ? value.toISOString().slice(0, 10) : String(value ?? "").trim();
   const headers = headerRow.map(toCellString);
   const rows = dataRows
@@ -748,7 +877,7 @@ function formatAssessmentDateTime(value: string | null | undefined, fallback = "
   }).format(date);
 }
 
-function AssessmentCard({ assessment, currentRole, canEvaluate, isInvigilator, isEvaluator, currentTime, onDeleted, onEdit, onPreview, onAssignCandidates, onAssignEvaluator, onAssignInvigilator, onInvigilate, onEvaluate }: { assessment: AssessmentCardData; currentRole?: any; canEvaluate?: boolean; isInvigilator?: boolean; isEvaluator?: boolean; currentTime?: number | null; onDeleted?: (id: number) => void; onEdit?: (assessment: AssessmentCardData) => void; onPreview?: (assessment: AssessmentCardData) => void; onAssignCandidates?: (assessment: AssessmentCardData) => void; onAssignEvaluator?: (assessment: AssessmentCardData) => void; onAssignInvigilator?: (assessment: AssessmentCardData) => void; onInvigilate?: (assessment: AssessmentCardData) => void; onEvaluate?: (assessment: AssessmentCardData) => void }) {
+function AssessmentCard({ assessment, currentRole, canEvaluate, isInvigilator, isEvaluator, currentTime, onDeleted, onEdit, onPreview, onAssignCandidates, onAssignEvaluator, onAssignInvigilator, onUploadCandidates, onUploadEvaluators, onUploadInvigilators, onInvigilate, onEvaluate }: { assessment: AssessmentCardData; currentRole?: any; canEvaluate?: boolean; isInvigilator?: boolean; isEvaluator?: boolean; currentTime?: number | null; onDeleted?: (id: number) => void; onEdit?: (assessment: AssessmentCardData) => void; onPreview?: (assessment: AssessmentCardData) => void; onAssignCandidates?: (assessment: AssessmentCardData) => void; onAssignEvaluator?: (assessment: AssessmentCardData) => void; onAssignInvigilator?: (assessment: AssessmentCardData) => void; onUploadCandidates?: (assessment: AssessmentCardData) => void; onUploadEvaluators?: (assessment: AssessmentCardData) => void; onUploadInvigilators?: (assessment: AssessmentCardData) => void; onInvigilate?: (assessment: AssessmentCardData) => void; onEvaluate?: (assessment: AssessmentCardData) => void }) {
   const [showOptions, setShowOptions] = useState(false);
   const [openAssignment, setOpenAssignment] = useState<string | null>(null);
   const cardRef = useRef<HTMLElement>(null);
@@ -883,7 +1012,13 @@ function AssessmentCard({ assessment, currentRole, canEvaluate, isInvigilator, i
                           setShowOptions(false);
                           setOpenAssignment(null);
                         }}>Manual</button>
-                        <button type="button" role="menuitem">Upload</button>
+                        <button type="button" role="menuitem" onClick={() => {
+                          if (item.key === "candidates") onUploadCandidates?.(assessment);
+                          if (item.key === "evaluator") onUploadEvaluators?.(assessment);
+                          if (item.key === "invigilator") onUploadInvigilators?.(assessment);
+                          setShowOptions(false);
+                          setOpenAssignment(null);
+                        }}>Upload</button>
                       </div>
                     )}
                   </div>
@@ -2060,6 +2195,408 @@ function AssessmentStaffAssignment({ assessment, role, onClose }: { assessment: 
               </div>
             </>
           )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function AssessmentStaffUploadForm({ assessment, role, onClose, onUploaded }: { assessment: AssessmentCardData; role: "evaluator" | "invigilator"; onClose: () => void; onUploaded: () => void }) {
+  const [fileName, setFileName] = useState("");
+  const [rows, setRows] = useState<Record<string, unknown>[]>([]);
+  const [candidates, setCandidates] = useState<EvaluatorCandidate[]>([]);
+  const [staffUsers, setStaffUsers] = useState<Array<{ id: number; name: string; email: string; role: string; status: boolean }>>([]);
+  const [loadingOptions, setLoadingOptions] = useState(true);
+  const [parsing, setParsing] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+  const roleLabel = role === "evaluator" ? "Evaluator" : "Invigilator";
+  const staffEmailHeader = `${roleLabel} Email`;
+  const fileInputId = `assessment-${role}-assignment-file`;
+
+  useEffect(() => {
+    const controller = new AbortController();
+    Promise.all([
+      fetch("/api/candidates", { signal: controller.signal }),
+      fetch("/api/users", { signal: controller.signal }),
+    ])
+      .then(async ([candidateResponse, usersResponse]) => {
+        const [candidateData, usersData] = await Promise.all([
+          candidateResponse.json() as Promise<EvaluatorCandidate[] & { error?: string }>,
+          usersResponse.json() as Promise<Array<{ id: number; name: string; email: string; role: string; status: boolean }> & { error?: string }>,
+        ]);
+        if (!candidateResponse.ok) throw new Error(candidateData.error ?? "Unable to load candidates.");
+        if (!usersResponse.ok) throw new Error(usersData.error ?? `Unable to load ${roleLabel.toLocaleLowerCase()} accounts.`);
+        setCandidates(candidateData.filter((candidate) => candidate.status !== false));
+        setStaffUsers(usersData.filter((user) =>
+          user.status === true && user.role.trim().toLocaleLowerCase() === role
+        ));
+      })
+      .catch((loadError) => {
+        if (loadError instanceof Error && loadError.name === "AbortError") return;
+        setError(loadError instanceof Error ? loadError.message : "Unable to load upload options.");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoadingOptions(false);
+      });
+    return () => controller.abort();
+  }, [role, roleLabel]);
+
+  const downloadTemplate = () => {
+    downloadUploadTemplate(`${role}-assignment-template.xlsx`, `${roleLabel} Assignments`, [
+      "Candidate ID",
+      staffEmailHeader,
+    ], [
+      "123456",
+      `${role.toLocaleLowerCase()}@example.com`,
+    ]);
+  };
+
+  const readFile = async (file: File) => {
+    setFileName(file.name);
+    setRows([]);
+    setError("");
+    setSuccess("");
+    setParsing(true);
+    try {
+      const normalizedExpectedEmailHeaders = [
+        staffEmailHeader,
+        `${roleLabel} Email Address`,
+        "Email",
+        "Email Address",
+      ];
+      const { headers, rows: parsedRows } = await readUploadFile(file, [
+        ["Candidate ID", "Candidate Identifier"],
+        normalizedExpectedEmailHeaders,
+      ]);
+      const normalizeHeader = (header: string) => header
+        .replace(/^\uFEFF/, "")
+        .replace(/\u00A0/g, " ")
+        .trim()
+        .replace(/[\s_-]+/g, " ")
+        .toLocaleLowerCase();
+      const headerByNormalizedName = new Map(headers.map((header) => [normalizeHeader(header), header]));
+      const candidateIdHeader = ["candidate id", "candidate identifier"]
+        .map(normalizeHeader)
+        .map((header) => headerByNormalizedName.get(header))
+        .find((header): header is string => Boolean(header));
+      const emailHeader = [
+        staffEmailHeader,
+        `${roleLabel} Email Address`,
+        "Email",
+        "Email Address",
+      ]
+        .map(normalizeHeader)
+        .map((header) => headerByNormalizedName.get(header))
+        .find((header): header is string => Boolean(header));
+      const missingHeaders = [
+        ...(!candidateIdHeader ? ["Candidate ID"] : []),
+        ...(!emailHeader ? [staffEmailHeader] : []),
+      ];
+      if (!candidateIdHeader || !emailHeader) {
+        const detectedHeaders = headers.length > 0 ? ` Detected columns: ${headers.join(", ")}.` : "";
+        throw new Error(`Missing columns: ${missingHeaders.join(", ")}. Use Candidate ID and an email column (${staffEmailHeader}, ${roleLabel} Email Address, or Email).${detectedHeaders}`);
+      }
+      if (parsedRows.length === 0) throw new Error(`The selected file contains no ${role.toLocaleLowerCase()} assignment rows.`);
+      if (parsedRows.length > 1000) throw new Error("Upload a maximum of 1000 candidate assignments at a time.");
+      setRows(parsedRows.map((row) => ({
+        "Candidate ID": row[candidateIdHeader],
+        [staffEmailHeader]: row[emailHeader],
+      })));
+    } catch (parseError) {
+      setError(parseError instanceof Error ? parseError.message : "Unable to read this file.");
+    } finally {
+      setParsing(false);
+    }
+  };
+
+  const uploadAssignments = async () => {
+    if (rows.length === 0 || !assessment.id) return;
+    setUploading(true);
+    setError("");
+    setSuccess("");
+    try {
+      const candidatesById = new Map<string, EvaluatorCandidate>();
+      for (const candidate of candidates) {
+        const candidateId = getCandidateFieldValue(candidate.candidate_data, "Candidate ID") || `ID ${candidate.id}`;
+        const normalizedId = candidateId.trim().toLocaleLowerCase();
+        if (candidatesById.has(normalizedId)) {
+          throw new Error(`Candidate ID "${candidateId}" is duplicated in the candidate records.`);
+        }
+        candidatesById.set(normalizedId, candidate);
+      }
+      const usersByEmail = new Map(staffUsers.map((user) => [user.email.trim().toLocaleLowerCase(), user]));
+      const seenCandidateIds = new Set<number>();
+      const assignments: Array<{ candidate_id: number; staff_user_id: number }> = [];
+      const rowErrors: string[] = [];
+
+      rows.forEach((row, index) => {
+        const rowNumber = index + 2;
+        const candidateId = String(row["Candidate ID"] ?? "").trim();
+        const staffEmail = String(row[staffEmailHeader] ?? "").trim().toLocaleLowerCase();
+        const candidate = candidatesById.get(candidateId.toLocaleLowerCase());
+        const staff = usersByEmail.get(staffEmail);
+        const rowError: string[] = [];
+        if (!candidateId) rowError.push("Candidate ID is required");
+        else if (!candidate) rowError.push(`Candidate ID "${candidateId}" was not found or is inactive`);
+        else if (seenCandidateIds.has(candidate.id)) rowError.push(`Candidate ID "${candidateId}" appears more than once`);
+        if (!staffEmail) rowError.push(`${staffEmailHeader} is required`);
+        else if (!staff) rowError.push(`"${staffEmail}" is not an active ${role.toLocaleLowerCase()} account`);
+        if (rowError.length > 0) {
+          rowErrors.push(`Row ${rowNumber}: ${rowError.join("; ")}.`);
+          return;
+        }
+        seenCandidateIds.add(candidate!.id);
+        assignments.push({ candidate_id: candidate!.id, staff_user_id: staff!.id });
+      });
+
+      if (rowErrors.length > 0) {
+        const remainingErrors = rowErrors.length > 10 ? ` ${rowErrors.length - 10} more row errors.` : "";
+        throw new Error(`${rowErrors.slice(0, 10).join(" ")}${remainingErrors}`);
+      }
+      if (assignments.length === 0) throw new Error("No valid invigilator assignments were found.");
+
+      const response = await fetch(`/api/assessment-${role}-assignments`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          assessment_id: assessment.id,
+          merge: true,
+          assignments: assignments.map((assignment) => ({
+            candidate_id: assignment.candidate_id,
+            [`${role}_user_id`]: assignment.staff_user_id,
+          })),
+        }),
+      });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error ?? `Unable to upload ${role.toLocaleLowerCase()} assignments.`);
+      setSuccess(`${assignments.length} candidate assignment(s) uploaded for ${assessment.title}.`);
+      onUploaded();
+    } catch (uploadError) {
+      setError(uploadError instanceof Error ? uploadError.message : `Unable to upload ${role.toLocaleLowerCase()} assignments.`);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  return (
+    <div className="form-overlay" role="presentation">
+      <section className="bulk-upload-form" role="dialog" aria-modal="true" aria-labelledby={`${role}-upload-title`}>
+        <div className="bulk-upload-header">
+          <h1 id={`${role}-upload-title`}>Upload {roleLabel}s</h1>
+          <button className="form-close-icon" type="button" onClick={onClose} aria-label={`Close ${role.toLocaleLowerCase()} upload form`}>×</button>
+        </div>
+        <div className="bulk-upload-content">
+          <button className="download-sample-link" type="button" onClick={downloadTemplate}>Download Template</button>
+          <div className="invigilator-upload-assessment">
+            <span>Selected Assessment</span>
+            <strong>{assessment.title}</strong>
+            <small>{assessment.subtitle}</small>
+          </div>
+          <p className="invigilator-upload-help">Add one row per candidate. Use the candidate’s Candidate ID and the email address of an active {role.toLocaleLowerCase()}. Uploading updates assignments only for candidates listed in this file.</p>
+          <div className="bulk-file-field">
+            <label htmlFor={fileInputId}>File</label>
+            <div className="file-picker">
+              <label className="choose-file-button" htmlFor={fileInputId}>Choose File</label>
+              <span>{fileName || "No file chosen"}</span>
+              <input
+                id={fileInputId}
+                type="file"
+                accept=".xlsx,.csv"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) void readFile(file);
+                }}
+              />
+            </div>
+          </div>
+          {loadingOptions && <p role="status">Loading candidates and active invigilators...</p>}
+          {!loadingOptions && staffUsers.length === 0 && <p className="form-error" role="alert">No active {role.toLocaleLowerCase()} accounts are available.</p>}
+          {parsing && <p role="status">Reading spreadsheet...</p>}
+          {rows.length > 0 && !parsing && <p role="status">{rows.length} candidate assignment row(s) ready to upload.</p>}
+          {error && <p className="form-error" role="alert">{error}</p>}
+          {success && <p className="login-settings-success" role="status">{success}</p>}
+        </div>
+        <div className="bulk-upload-actions">
+          <button className="form-cancel-button" type="button" onClick={onClose}>Close</button>
+          <button className="form-save-button" type="button" onClick={uploadAssignments} disabled={loadingOptions || staffUsers.length === 0 || !fileName || rows.length === 0 || parsing || uploading}>
+            {uploading ? "Uploading..." : "Upload"}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function AssessmentCandidateUploadForm({ assessment, onClose }: { assessment: AssessmentCardData; onClose: () => void }) {
+  const [fileName, setFileName] = useState("");
+  const [rows, setRows] = useState<Record<string, unknown>[]>([]);
+  const [candidates, setCandidates] = useState<EvaluatorCandidate[]>([]);
+  const [loadingCandidates, setLoadingCandidates] = useState(true);
+  const [parsing, setParsing] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+  const [uploadedCandidates, setUploadedCandidates] = useState<EvaluatorCandidate[]>([]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch("/api/candidates", { signal: controller.signal })
+      .then(async (response) => {
+        const payload = await response.json() as EvaluatorCandidate[] & { error?: string };
+        if (!response.ok) throw new Error(payload.error ?? "Unable to load candidate records.");
+        setCandidates(payload.filter((candidate) => candidate.status !== false));
+      })
+      .catch((loadError) => {
+        if (loadError instanceof Error && loadError.name === "AbortError") return;
+        setError(loadError instanceof Error ? loadError.message : "Unable to load candidates.");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoadingCandidates(false);
+      });
+    return () => controller.abort();
+  }, []);
+
+  const downloadTemplate = () => {
+    downloadUploadTemplate("assessment-candidate-assignment-template.xlsx", "Assessment Candidates", [
+      "Candidate ID",
+    ], [
+      "123456",
+    ]);
+  };
+
+  const readFile = async (file: File) => {
+    setFileName(file.name);
+    setRows([]);
+    setError("");
+    setSuccess("");
+    setUploadedCandidates([]);
+    setParsing(true);
+    try {
+      const { headers, rows: parsedRows } = await readUploadFile(file);
+      if (!headers.includes("Candidate ID")) {
+        throw new Error("Missing column: Candidate ID. Download the template and keep its column name.");
+      }
+      if (parsedRows.length === 0) throw new Error("The selected file contains no candidate rows.");
+      if (parsedRows.length > 1000) throw new Error("Upload a maximum of 1000 candidate assignments at a time.");
+      setRows(parsedRows);
+    } catch (parseError) {
+      setError(parseError instanceof Error ? parseError.message : "Unable to read this file.");
+    } finally {
+      setParsing(false);
+    }
+  };
+
+  const uploadCandidates = async () => {
+    if (rows.length === 0 || !assessment.id) return;
+    setUploading(true);
+    setError("");
+    setSuccess("");
+    try {
+      const candidatesById = new Map<string, EvaluatorCandidate>();
+      for (const candidate of candidates) {
+        const candidateId = getCandidateFieldValue(candidate.candidate_data, "Candidate ID");
+        if (!candidateId) continue;
+        const normalizedId = candidateId.trim().toLocaleLowerCase();
+        if (candidatesById.has(normalizedId)) {
+          throw new Error(`Candidate ID "${candidateId}" is duplicated in the candidate records.`);
+        }
+        candidatesById.set(normalizedId, candidate);
+      }
+
+      const seenCandidateIds = new Set<number>();
+      const matchedCandidates: EvaluatorCandidate[] = [];
+      const rowErrors: string[] = [];
+      rows.forEach((row, index) => {
+        const rowNumber = index + 2;
+        const candidateId = String(row["Candidate ID"] ?? "").trim();
+        const candidate = candidatesById.get(candidateId.toLocaleLowerCase());
+        if (!candidateId) rowErrors.push(`Row ${rowNumber}: Candidate ID is required.`);
+        else if (!candidate) rowErrors.push(`Row ${rowNumber}: Candidate ID "${candidateId}" was not found or is inactive.`);
+        else if (seenCandidateIds.has(candidate.id)) rowErrors.push(`Row ${rowNumber}: Candidate ID "${candidateId}" appears more than once.`);
+        else {
+          seenCandidateIds.add(candidate.id);
+          matchedCandidates.push(candidate);
+        }
+      });
+      if (rowErrors.length > 0) {
+        const remainingErrors = rowErrors.length > 10 ? ` ${rowErrors.length - 10} more row errors.` : "";
+        throw new Error(`${rowErrors.slice(0, 10).join(" ")}${remainingErrors}`);
+      }
+      if (matchedCandidates.length === 0) throw new Error("No active candidates were found in the selected file.");
+
+      const response = await fetch("/api/assessment-individual-candidates", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          assessment_id: assessment.id,
+          candidate_ids: matchedCandidates.map((candidate) => candidate.id),
+        }),
+      });
+      const result = await response.json() as { assigned?: number; error?: string };
+      if (!response.ok) throw new Error(result.error ?? "Unable to assign candidates to this assessment.");
+      setUploadedCandidates(matchedCandidates);
+      setSuccess(`${result.assigned ?? matchedCandidates.length} candidate(s) assigned to ${assessment.title}.`);
+    } catch (uploadError) {
+      setError(uploadError instanceof Error ? uploadError.message : "Unable to assign candidates to this assessment.");
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  return (
+    <div className="form-overlay" role="presentation">
+      <section className="bulk-upload-form" role="dialog" aria-modal="true" aria-labelledby="assessment-candidate-upload-title">
+        <div className="bulk-upload-header">
+          <h1 id="assessment-candidate-upload-title">Upload Candidates</h1>
+          <button className="form-close-icon" type="button" onClick={onClose} aria-label="Close candidate upload form">×</button>
+        </div>
+        <div className="bulk-upload-content">
+          <button className="download-sample-link" type="button" onClick={downloadTemplate}>Download Template</button>
+          <div className="invigilator-upload-assessment">
+            <span>Selected Assessment</span>
+            <strong>{assessment.title}</strong>
+            <small>{assessment.subtitle}</small>
+          </div>
+          <p className="invigilator-upload-help">Add one active candidate ID per row. Only the listed candidates will be assigned to this assessment; other candidates in the same category or sub-category will not be included.</p>
+          <div className="bulk-file-field">
+            <label htmlFor="assessment-candidate-file">File</label>
+            <div className="file-picker">
+              <label className="choose-file-button" htmlFor="assessment-candidate-file">Choose File</label>
+              <span>{fileName || "No file chosen"}</span>
+              <input
+                id="assessment-candidate-file"
+                type="file"
+                accept=".xlsx,.csv"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) void readFile(file);
+                }}
+              />
+            </div>
+          </div>
+          {loadingCandidates && <p role="status">Loading active candidates...</p>}
+          {parsing && <p role="status">Reading spreadsheet...</p>}
+          {rows.length > 0 && !parsing && <p role="status">{rows.length} candidate row(s) ready to upload.</p>}
+          {error && <p className="form-error" role="alert">{error}</p>}
+          {success && <p className="login-settings-success" role="status">{success}</p>}
+          {uploadedCandidates.length > 0 && (
+            <div className="candidate-upload-assigned-list">
+              <strong>Assigned candidates</strong>
+              <ul>{uploadedCandidates.map((candidate) => (
+                <li key={candidate.id}>
+                  {getCandidateFieldValue(candidate.candidate_data, "Candidate ID")} — {getCandidateFieldValue(candidate.candidate_data, "Candidate Name") || candidate.name}
+                </li>
+              ))}</ul>
+            </div>
+          )}
+        </div>
+        <div className="bulk-upload-actions">
+          <button className="form-cancel-button" type="button" onClick={onClose}>Close</button>
+          <button className="form-save-button" type="button" onClick={uploadCandidates} disabled={loadingCandidates || !fileName || rows.length === 0 || parsing || uploading}>
+            {uploading ? "Uploading..." : "Upload"}
+          </button>
         </div>
       </section>
     </div>
@@ -6546,6 +7083,8 @@ type AssignedAssessmentStaffRow = {
   assessment_name: string;
   assessment_date: string | null;
   assigned_staff: string;
+  assigned_staff_email: string;
+  assigned_student: string;
   student_category: string;
   student_sub_category: string;
 };
@@ -6694,22 +7233,26 @@ function AssignedAssessmentStaffPanel({ role }: { role: "invigilator" | "evaluat
                 <th>Assessment Name</th>
                 <th>Date</th>
                 <th>Assigned {staffLabel}</th>
+                <th>{staffLabel} Email</th>
+                <th>Assigned Student</th>
                 <th>Assigned Student Category</th>
                 <th>Assigned Student Sub-Category</th>
               </tr>
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={5}>Loading assignments...</td></tr>
+                <tr><td colSpan={7}>Loading assignments...</td></tr>
               ) : error ? (
-                <tr><td colSpan={5}>Unable to show assignments.</td></tr>
+                <tr><td colSpan={7}>Unable to show assignments.</td></tr>
               ) : rows.length === 0 ? (
-                <tr><td colSpan={5}>No assessment {role} assignments found.</td></tr>
+                <tr><td colSpan={7}>No assessment {role} assignments found.</td></tr>
               ) : rows.map((row, index) => (
-                <tr key={`${row.assessment_id}-${row.assigned_staff}-${row.student_category}-${row.student_sub_category}-${index}`}>
+                <tr key={`${row.assessment_id}-${row.assigned_staff_email}-${row.assigned_student}-${index}`}>
                   <td>{row.assessment_name || "—"}</td>
                   <td>{formatAssessmentDateTime(row.assessment_date)}</td>
                   <td>{row.assigned_staff || "—"}</td>
+                  <td>{row.assigned_staff_email || "—"}</td>
+                  <td>{row.assigned_student || "—"}</td>
                   <td>{row.student_category || "—"}</td>
                   <td>{row.student_sub_category || "—"}</td>
                 </tr>
@@ -8690,8 +9233,11 @@ export default function Home() {
   const [editingAssessment, setEditingAssessment] = useState<AssessmentCardData | null>(null);
   const [previewAssessment, setPreviewAssessment] = useState<AssessmentCardData | null>(null);
   const [candidateAssignmentAssessment, setCandidateAssignmentAssessment] = useState<AssessmentCardData | null>(null);
+  const [candidateUploadAssessment, setCandidateUploadAssessment] = useState<AssessmentCardData | null>(null);
   const [evaluatorAssignmentAssessment, setEvaluatorAssignmentAssessment] = useState<AssessmentCardData | null>(null);
+  const [evaluatorUploadAssessment, setEvaluatorUploadAssessment] = useState<AssessmentCardData | null>(null);
   const [invigilatorAssignmentAssessment, setInvigilatorAssignmentAssessment] = useState<AssessmentCardData | null>(null);
+  const [invigilatorUploadAssessment, setInvigilatorUploadAssessment] = useState<AssessmentCardData | null>(null);
   const [invigilatingAssessment, setInvigilatingAssessment] = useState<AssessmentCardData | null>(null);
   const [evaluatingAssessment, setEvaluatingAssessment] = useState<AssessmentCardData | null>(null);
   const [showBulkUpload, setShowBulkUpload] = useState(false);
@@ -8981,6 +9527,9 @@ export default function Home() {
       onAssignCandidates={setCandidateAssignmentAssessment}
       onAssignEvaluator={setEvaluatorAssignmentAssessment}
       onAssignInvigilator={setInvigilatorAssignmentAssessment}
+      onUploadEvaluators={setEvaluatorUploadAssessment}
+      onUploadInvigilators={setInvigilatorUploadAssessment}
+      onUploadCandidates={setCandidateUploadAssessment}
       onInvigilate={setInvigilatingAssessment}
       onEvaluate={setEvaluatingAssessment}
     />
@@ -9547,8 +10096,32 @@ export default function Home() {
           })
           .catch((error) => console.error("Failed to refresh assessment candidate counts", error));
       }} />}
+      {candidateUploadAssessment && <AssessmentCandidateUploadForm
+        assessment={candidateUploadAssessment}
+        onClose={() => setCandidateUploadAssessment(null)}
+      />}
       {evaluatorAssignmentAssessment && <AssessmentStaffAssignment assessment={evaluatorAssignmentAssessment} role="evaluator" onClose={() => setEvaluatorAssignmentAssessment(null)} />}
       {invigilatorAssignmentAssessment && <AssessmentStaffAssignment assessment={invigilatorAssignmentAssessment} role="invigilator" onClose={() => setInvigilatorAssignmentAssessment(null)} />}
+      {evaluatorUploadAssessment && <AssessmentStaffUploadForm
+        assessment={evaluatorUploadAssessment}
+        role="evaluator"
+        onClose={() => setEvaluatorUploadAssessment(null)}
+        onUploaded={() => {
+          const assessment = evaluatorUploadAssessment;
+          setEvaluatorUploadAssessment(null);
+          setEvaluatorAssignmentAssessment(assessment);
+        }}
+      />}
+      {invigilatorUploadAssessment && <AssessmentStaffUploadForm
+        assessment={invigilatorUploadAssessment}
+        role="invigilator"
+        onClose={() => setInvigilatorUploadAssessment(null)}
+        onUploaded={() => {
+          const assessment = invigilatorUploadAssessment;
+          setInvigilatorUploadAssessment(null);
+          setInvigilatorAssignmentAssessment(assessment);
+        }}
+      />}
       {invigilatingAssessment &&       <AssessmentInvigilation
         assessment={invigilatingAssessment}
         accountUserId={Number(currentUser?.id) || null}

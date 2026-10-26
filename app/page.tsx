@@ -7,6 +7,7 @@ import NextImage from "next/image";
 import Papa from "papaparse";
 import readXlsxFile from "read-excel-file/browser";
 import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
+import IntegrationGuidePanel from "./integration-guide";
 import type { CandidateTimelineEventType } from "@/lib/exam-timeline";
 import { matchesAssessmentQuestionType } from "@/lib/question-types";
 
@@ -31,6 +32,7 @@ const navigationItems = [
       { label: "Questions", options: ["Categories", "Sub Categories", "Topics", "Difficulty Levels", "Languages"] },
       { label: "Assessments", options: ["Examinations", "Default Settings"] },
       { label: "Candidates", options: ["Categories", "Sub Categories", "Settings", "Candidate Permissions"] },
+      "Integrations",
     ],
   },
 ];
@@ -49,6 +51,7 @@ const navigationOptionIcons: Record<string, string> = {
   Candidates: "♙",
   Settings: "⚙",
   "Candidate Permissions": "◉",
+  Integrations: "⇄",
   Results: "▤",
 };
 
@@ -73,6 +76,7 @@ const sectionPaths: Record<string, string> = {
   "Candidate Sub Categories": "/settings/candidate-sub-categories",
   "Candidate Settings": "/settings/candidate-settings",
   "Candidate Permissions": "/settings/candidate-permissions",
+  Integrations: "/settings/integrations",
   "Default Settings": "/settings/default-settings",
 };
 
@@ -9565,6 +9569,7 @@ export default function Home() {
     "Candidate Sub Categories": "Settings:Candidates:Sub-Categories",
     "Candidate Settings": "Settings:Candidates:Settings",
     "Candidate Permissions": "Settings:Candidates:Candidate Permissions",
+    Integrations: "Settings:Integrations",
   };
 
   const isAdministrator = Boolean(
@@ -9574,6 +9579,9 @@ export default function Home() {
   const hasAccess = (sectionId: string) => {
     if (sectionId === "Dashboard") return true;
     if (["Assigned Invigilator", "Assigned Evaluator", "Exam Applicants"].includes(sectionId)) {
+      return isAdministrator;
+    }
+    if (sectionId === "Integrations" || sectionId === "Settings:Integrations") {
       return isAdministrator;
     }
     if (sectionId === "Assessments"
@@ -10079,7 +10087,7 @@ export default function Home() {
 
       <div className="page-body">
         {!hasAccess(activeSection) ? <SectionPlaceholder title="Access restricted" /> : activeSection === "Dashboard" ? <DashboardPanel name={currentUser?.name || "Administrator"} shortcuts={visibleDashboardPages} onNavigate={navigateToSection} /> :
-        activeSection === "Questions" ? <QuestionsPanel currentRole={currentRole} /> : activeSection === "Question Categories" ? <QuestionCategoriesPanel currentRole={currentRole} /> : activeSection === "Question Sub Categories" ? <QuestionSubCategoriesPanel currentRole={currentRole} /> : activeSection === "Question Topics" ? <QuestionTopicsPanel currentRole={currentRole} /> : activeSection === "Difficulty Levels" ? <DifficultyLevelsPanel currentRole={currentRole} /> : activeSection === "Languages" ? <LanguagesPanel currentRole={currentRole} /> : activeSection === "Examinations" ? <AssessmentTypesPanel currentRole={currentRole} /> : activeSection === "Candidate Categories" ? <CandidateCategoriesPanel currentRole={currentRole} /> : activeSection === "Candidate Sub Categories" ? <CandidateSubCategoriesPanel currentRole={currentRole} /> : activeSection === "Candidate Settings" ? <CandidateSettingsPanel currentRole={currentRole} /> : activeSection === "Candidate Permissions" ? <CandidatePermissionsPanel accountUserId={Number(currentUser?.id) || null} /> : activeSection === "Results" ? <ResultsPanel accountUserId={Number(currentUser?.id) || null} /> : activeSection === "Candidates" ? <CandidatesPanel currentRole={currentRole} /> : activeSection === "Assigned Invigilator" ? <AssignedAssessmentStaffPanel role="invigilator" /> : activeSection === "Assigned Evaluator" ? <AssignedAssessmentStaffPanel role="evaluator" /> : activeSection === "Exam Applicants" ? <ExamApplicantsPanel /> : activeSection === "Assessments" ? <section className="assessments-section" id="assessments">
+        activeSection === "Integrations" ? <IntegrationGuidePanel /> : activeSection === "Questions" ? <QuestionsPanel currentRole={currentRole} /> : activeSection === "Question Categories" ? <QuestionCategoriesPanel currentRole={currentRole} /> : activeSection === "Question Sub Categories" ? <QuestionSubCategoriesPanel currentRole={currentRole} /> : activeSection === "Question Topics" ? <QuestionTopicsPanel currentRole={currentRole} /> : activeSection === "Difficulty Levels" ? <DifficultyLevelsPanel currentRole={currentRole} /> : activeSection === "Languages" ? <LanguagesPanel currentRole={currentRole} /> : activeSection === "Examinations" ? <AssessmentTypesPanel currentRole={currentRole} /> : activeSection === "Candidate Categories" ? <CandidateCategoriesPanel currentRole={currentRole} /> : activeSection === "Candidate Sub Categories" ? <CandidateSubCategoriesPanel currentRole={currentRole} /> : activeSection === "Candidate Settings" ? <CandidateSettingsPanel currentRole={currentRole} /> : activeSection === "Candidate Permissions" ? <CandidatePermissionsPanel accountUserId={Number(currentUser?.id) || null} /> : activeSection === "Results" ? <ResultsPanel accountUserId={Number(currentUser?.id) || null} /> : activeSection === "Candidates" ? <CandidatesPanel currentRole={currentRole} /> : activeSection === "Assigned Invigilator" ? <AssignedAssessmentStaffPanel role="invigilator" /> : activeSection === "Assigned Evaluator" ? <AssignedAssessmentStaffPanel role="evaluator" /> : activeSection === "Exam Applicants" ? <ExamApplicantsPanel /> : activeSection === "Assessments" ? <section className="assessments-section" id="assessments">
         <div className="assessments-toolbar">
           <div>
             <p className="section-kicker">Examination workspace</p>

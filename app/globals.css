@@ -9642,3 +9642,340 @@ body {
 		grid-template-columns: 1fr;
 	}
 }
+
+.integration-guide {
+	display: grid;
+	max-width: 1180px;
+	gap: 18px;
+	margin: 0 auto;
+	padding: 30px 28px 48px;
+	color: #424b67;
+}
+
+.integration-guide-heading {
+	margin-bottom: 2px;
+}
+
+.integration-guide-heading h1 {
+	margin: 4px 0 8px;
+	color: #242b45;
+	font-size: clamp(25px, 3vw, 34px);
+	letter-spacing: -0.7px;
+}
+
+.integration-guide-heading > p:last-child,
+.integration-guide-section > p,
+.integration-guide-status p,
+.integration-guide-current-login {
+	max-width: 850px;
+	color: #6f7890;
+	font-size: 14px;
+	line-height: 1.65;
+}
+
+.integration-guide-status,
+.integration-guide-section,
+.integration-guide-security {
+	padding: 20px 22px;
+	background: #fff;
+	border: 1px solid #e7e8ef;
+	border-radius: 12px;
+	box-shadow: 0 4px 14px rgba(32, 37, 66, 0.05);
+}
+
+.integration-guide-status {
+	display: flex;
+	align-items: flex-start;
+	gap: 13px;
+	background: #fffaf0;
+	border-color: #f0dfb6;
+}
+
+.integration-guide-status.is-configured {
+	background: #f0faf4;
+	border-color: #c8e8d1;
+}
+
+.integration-guide-status.is-configured .integration-guide-status-dot {
+	background: #27864b;
+	box-shadow: 0 0 0 4px rgba(39, 134, 75, 0.12);
+}
+
+.integration-guide-status.is-error {
+	background: #fff1ef;
+	border-color: #f0cfca;
+}
+
+.integration-guide-status.is-error .integration-guide-status-dot {
+	background: #b53e35;
+	box-shadow: 0 0 0 4px rgba(181, 62, 53, 0.12);
+}
+
+.integration-guide-status-dot {
+	width: 10px;
+	height: 10px;
+	flex: 0 0 auto;
+	margin-top: 6px;
+	background: #d99121;
+	border-radius: 50%;
+	box-shadow: 0 0 0 4px rgba(217, 145, 33, 0.12);
+}
+
+.integration-guide-status h2,
+.integration-guide-section h2,
+.integration-guide-security h2 {
+	margin: 0 0 9px;
+	color: #303853;
+	font-size: 19px;
+}
+
+.integration-guide-status p {
+	margin: 0;
+}
+
+.integration-guide-section > p {
+	margin: 0 0 14px;
+}
+
+.integration-guide-sync-form {
+	display: grid;
+	max-width: 620px;
+	gap: 8px;
+}
+
+.integration-guide-sync-form > label {
+	color: #4a536d;
+	font-size: 12px;
+	font-weight: 700;
+}
+
+.integration-guide-sync-form > div {
+	display: flex;
+	gap: 9px;
+}
+
+.integration-guide-sync-form input {
+	width: min(100%, 360px);
+	min-height: 40px;
+	padding: 0 11px;
+	color: #41485a;
+	background: #fff;
+	border: 1px solid #dfe1e8;
+	border-radius: 7px;
+	font: inherit;
+	font-size: 13px;
+}
+
+.integration-guide-sync-form input:focus-visible {
+	border-color: #7165e8;
+	outline: 2px solid rgba(101, 89, 232, 0.16);
+}
+
+.integration-guide-sync-form button {
+	min-height: 40px;
+	padding: 0 14px;
+	color: #fff;
+	background: #6559e8;
+	border: 1px solid #6559e8;
+	border-radius: 7px;
+	cursor: pointer;
+	font: inherit;
+	font-size: 12px;
+	font-weight: 700;
+}
+
+.integration-guide-sync-form button:hover:not(:disabled) {
+	background: #5549d4;
+}
+
+.integration-guide-sync-form button:disabled {
+	cursor: not-allowed;
+	opacity: 0.55;
+}
+
+.integration-guide-success,
+.integration-guide-error {
+	margin: 12px 0 0 !important;
+	padding: 10px 12px;
+	border-radius: 7px;
+	font-size: 12px !important;
+}
+
+.integration-guide-success {
+	color: #287344 !important;
+	background: #eaf8f0;
+}
+
+.integration-guide-error {
+	color: #a33f35 !important;
+	background: #fff0ee;
+}
+
+.integration-guide-flow {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 12px;
+	margin: 20px 0;
+}
+
+.integration-guide-flow > div {
+	display: grid;
+	min-width: 145px;
+	gap: 5px;
+	padding: 13px 15px;
+	background: #f8f7ff;
+	border: 1px solid #e5e2ff;
+	border-radius: 9px;
+}
+
+.integration-guide-flow strong,
+.integration-guide-grid h3 {
+	color: #35345e;
+	font-size: 13px;
+}
+
+.integration-guide-flow span {
+	color: #767d94;
+	font-size: 11px;
+	line-height: 1.4;
+}
+
+.integration-guide-flow > b {
+	color: #6559e8;
+	font-size: 20px;
+}
+
+.integration-guide-note {
+	padding: 11px 13px;
+	color: #666f88 !important;
+	background: #f5f6fa;
+	border-left: 3px solid #9b91ee;
+	border-radius: 0 7px 7px 0;
+	font-size: 12px !important;
+}
+
+.integration-guide-grid {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 14px;
+	margin-top: 14px;
+}
+
+.integration-guide-grid article {
+	padding: 15px 17px;
+	background: #fafaff;
+	border: 1px solid #ecebf7;
+	border-radius: 9px;
+}
+
+.integration-guide-grid h3 {
+	margin: 0 0 9px;
+	font-size: 14px;
+}
+
+.integration-guide-grid ul,
+.integration-guide-security ul {
+	display: grid;
+	gap: 8px;
+	margin: 0;
+	padding-left: 19px;
+	color: #68728b;
+	font-size: 12px;
+	line-height: 1.55;
+}
+
+.integration-guide-code {
+	overflow-x: auto;
+	margin: 12px 0 14px;
+	padding: 16px;
+	color: #e9e8ff;
+	background: #24243a;
+	border-radius: 9px;
+	font-family: Consolas, "Courier New", monospace;
+	font-size: 12px;
+	line-height: 1.65;
+	white-space: pre;
+}
+
+.integration-guide-section code,
+.integration-guide-current-login code {
+	padding: 1px 4px;
+	color: #5146c8;
+	background: #f0efff;
+	border-radius: 4px;
+	font-family: Consolas, "Courier New", monospace;
+	font-size: 0.92em;
+}
+
+.integration-guide-steps {
+	display: grid;
+	gap: 13px;
+	margin: 14px 0 0;
+	padding-left: 23px;
+	color: #68728b;
+	font-size: 13px;
+	line-height: 1.6;
+}
+
+.integration-guide-steps strong {
+	color: #3a4260;
+}
+
+.integration-guide-security {
+	background: #fff;
+	border-color: #eadada;
+}
+
+.integration-guide-security h2 {
+	color: #713f47;
+}
+
+.integration-guide-security ul {
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.integration-guide-current-login {
+	margin: 0;
+	padding: 13px 16px;
+	background: #f1f1f7;
+	border-radius: 8px;
+	font-size: 12px;
+}
+
+@media (max-width: 760px) {
+	.integration-guide {
+		gap: 13px;
+		padding: 20px 14px 32px;
+	}
+
+	.integration-guide-status,
+	.integration-guide-section,
+	.integration-guide-security {
+		padding: 16px;
+	}
+
+	.integration-guide-flow {
+		align-items: stretch;
+		flex-direction: column;
+	}
+
+	.integration-guide-flow > b {
+		align-self: center;
+		transform: rotate(90deg);
+	}
+
+	.integration-guide-grid,
+	.integration-guide-security ul {
+		grid-template-columns: 1fr;
+	}
+
+	.integration-guide-sync-form > div {
+		align-items: stretch;
+		flex-direction: column;
+	}
+
+	.integration-guide-sync-form input {
+		width: 100%;
+	}
+}

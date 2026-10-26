@@ -24,6 +24,7 @@ const availablePaths = new Set([
   "/settings/candidate-sub-categories",
   "/settings/candidate-settings",
   "/settings/candidate-permissions",
+  "/settings/integrations",
 ]);
 
 export default async function SectionPage({

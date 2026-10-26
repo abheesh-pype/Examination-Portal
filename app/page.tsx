@@ -7636,6 +7636,28 @@ function LoginPage({ onLogin, onStudentLogin }: { onLogin: (user: any) => void; 
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [ssoTenants, setSsoTenants] = useState<string[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const ssoError = new URLSearchParams(window.location.search).get("sso_error");
+    if (ssoError) {
+      setPortal("student");
+      setError(ssoError === "not_enrolled"
+        ? "Your institution account is not enrolled for this portal yet. Contact your institution."
+        : ssoError === "expired"
+          ? "That sign-in link has expired or was already used. Open the exam portal again from your university dashboard."
+          : "Single sign-on could not be completed. Please try again.");
+      window.history.replaceState(null, "", window.location.pathname);
+    }
+    void fetch("/api/auth/oidc/tenants")
+      .then((response) => response.json())
+      .then((payload: { tenants?: Array<{ tenant_id: string }> }) => {
+        if (!cancelled) setSsoTenants((payload.tenants ?? []).map((tenant) => tenant.tenant_id));
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
 
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
@@ -7784,6 +7806,12 @@ function LoginPage({ onLogin, onStudentLogin }: { onLogin: (user: any) => void; 
             <button className="portal-back-button" type="button" onClick={() => { setPortal("choose"); setError(""); }}>‹ <span>Back</span></button>
             <h1>Student Login</h1>
             <p>Enter your candidate ID and date of birth.</p>
+
+            {ssoTenants.map((tenantId) => (
+              <a key={tenantId} className="portal-back-button" href={`/api/auth/oidc/start?tenant=${encodeURIComponent(tenantId)}`}>
+                Sign in with {ssoTenants.length > 1 ? tenantId : "your institution"}
+              </a>
+            ))}
 
             <form onSubmit={handleStudentSubmit} className="login-form">
               <label>

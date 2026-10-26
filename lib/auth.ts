@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { NextResponse } from "next/server";
 import { databasePool } from "@/lib/db";
+import { isIntegrationManaged } from "@/lib/integrations/store";
 
 const SESSION_COOKIE = "ums_exam_session";
 const SESSION_LIFETIME_SECONDS = 60 * 60 * 12;
@@ -201,7 +202,9 @@ async function resolveCandidate(subjectId: number): Promise<AuthenticatedCandida
   );
   const candidateId = candidateIdEntry ? String(candidateIdEntry[1]).trim() : "";
   const dateOfBirth = dateEntry ? normalizeDate(String(dateEntry[1])) : "";
-  if (!candidateId || !dateOfBirth) return null;
+  if (!candidateId) return null;
+  // Students provisioned by an integration sign in through their institution's IdP and have no DOB on file.
+  if (!dateOfBirth && !(await isIntegrationManaged(Number(result.rows[0].id)))) return null;
   return { id: Number(result.rows[0].id), candidateId, dateOfBirth };
 }
 

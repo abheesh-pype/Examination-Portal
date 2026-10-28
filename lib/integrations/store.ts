@@ -4,7 +4,8 @@ import { databasePool } from "@/lib/db";
 import {
   acquireCandidateIdLock, generateUniqueCandidateId, getCandidateIdFieldName, isCandidateIdFieldName, loadExistingCandidateIds,
 } from "@/lib/candidate-ids";
-import type { ProvisionedStudent } from "@/lib/integrations/payload";
+import { hashPassword } from "@/lib/password";
+import type { AssessmentUpsert, ProvisionedStudent, StaffPayload } from "@/lib/integrations/payload";
 
 export type ProvisionResult = {
   created: boolean;
@@ -73,7 +74,7 @@ export function ensureIntegrationTables() {
         client_id TEXT PRIMARY KEY,
         tenant_id TEXT NOT NULL,
         secret_hash TEXT NOT NULL,
-        scopes TEXT NOT NULL DEFAULT 'students:write students:launch',
+        scopes TEXT NOT NULL DEFAULT 'students:write students:launch staff:launch assessments:write',
         status BOOLEAN NOT NULL DEFAULT TRUE,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
@@ -88,6 +89,17 @@ export function ensureIntegrationTables() {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `);
+    await databasePool.query("ALTER TABLE integration_launch_tickets ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'student'");
+    await databasePool.query(`
+      CREATE TABLE IF NOT EXISTS integration_staff (
+        tenant_id TEXT NOT NULL,
+        external_user_id TEXT NOT NULL,
+        user_row_id INTEGER NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (tenant_id, external_user_id)
+      )
+    `);
+    await databasePool.query("CREATE UNIQUE INDEX IF NOT EXISTS integration_staff_user_idx ON integration_staff (user_row_id)");
     await databasePool.query(`
       CREATE TABLE IF NOT EXISTS integration_identities (
         issuer TEXT NOT NULL,
@@ -329,16 +341,153 @@ export async function createLaunchTicket(tenantId: string, externalStudentId: st
   return ticket;
 }
 
-/** Atomically consumes a ticket (single use, unexpired) and returns the active candidate row id, or null. */
-export async function redeemLaunchTicket(ticket: string) {
+/** Atomically consumes a ticket (single use, unexpired). Returns who to sign in, or null. */
+export async function redeemLaunchTicket(ticket: string): Promise<{ kind: "student" | "staff"; id: number } | null> {
   await ensureIntegrationTables();
   if (!/^[A-Za-z0-9_-]{40,64}$/.test(ticket)) return null;
   const used = await databasePool.query(
     `UPDATE integration_launch_tickets SET used_at = NOW()
-     WHERE token_hash = $1 AND used_at IS NULL AND expires_at > NOW() RETURNING tenant_id, external_student_id`, [hashTicket(ticket)]);
+     WHERE token_hash = $1 AND used_at IS NULL AND expires_at > NOW() RETURNING tenant_id, external_student_id, kind`, [hashTicket(ticket)]);
   if (!used.rowCount) return null;
+  const { tenant_id: tenantId, external_student_id: externalId, kind } = used.rows[0];
+  if (kind === "staff") {
+    const staff = await databasePool.query(
+      `SELECT u.id FROM integration_staff s JOIN users u ON u.id = s.user_row_id AND u.status = TRUE
+       WHERE s.tenant_id = $1 AND s.external_user_id = $2`, [tenantId, externalId]);
+    return staff.rowCount ? { kind: "staff", id: Number(staff.rows[0].id) } : null;
+  }
   const row = await databasePool.query(
     `SELECT c.id FROM integration_students s JOIN "Candidate Information" c ON c.id = s.candidate_row_id AND c.record_type = 'candidate' AND c.status = TRUE
-     WHERE s.tenant_id = $1 AND s.external_student_id = $2`, [used.rows[0].tenant_id, used.rows[0].external_student_id]);
-  return row.rowCount ? Number(row.rows[0].id) : null;
+     WHERE s.tenant_id = $1 AND s.external_student_id = $2`, [tenantId, externalId]);
+  return row.rowCount ? { kind: "student", id: Number(row.rows[0].id) } : null;
+}
+
+// ---- staff (e.g. a university's Academic Admin) ----
+
+/** Role given to institution staff. The name deliberately has no "admin": the portal treats such roles as non-admin. */
+export const INTEGRATION_STAFF_ROLE = "UMS Academic Staff";
+
+const staffPermissions = () => {
+  const edit = { view: 1, create: 1, edit: 1, delete: 0, status: 1 };
+  return Object.fromEntries([
+    "Questions", "Assessments", "Settings:Assessments:Examinations",
+    "Settings:Questions:Categories", "Settings:Questions:Sub-Categories", "Settings:Questions:Topics",
+    "Settings:Questions:Difficulty Levels", "Settings:Questions:Languages",
+  ].map((section) => [section, section === "Questions" ? { ...edit, delete: 1 } : edit]));
+};
+
+export class StaffConflictError extends Error {}
+
+/**
+ * Creates/updates the portal account for an institution staff member. Never adopts a pre-existing portal account:
+ * if the email already belongs to someone else, the request is refused.
+ */
+export async function provisionStaff(staff: StaffPayload) {
+  await ensureIntegrationTables();
+  await databasePool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, password TEXT NOT NULL, role TEXT NOT NULL, mobile TEXT NOT NULL,
+      status BOOLEAN NOT NULL DEFAULT TRUE, verified BOOLEAN NOT NULL DEFAULT FALSE, created_on TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`);
+  await databasePool.query(`
+    CREATE TABLE IF NOT EXISTS roles (
+      id SERIAL PRIMARY KEY, role_name TEXT NOT NULL, administrator_access BOOLEAN NOT NULL DEFAULT FALSE, dashboard BOOLEAN NOT NULL DEFAULT FALSE,
+      permissions JSONB NOT NULL DEFAULT '{}', status BOOLEAN NOT NULL DEFAULT TRUE, created_on TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`);
+  const unusablePassword = await hashPassword(randomBytes(32).toString("hex")); // staff sign in only through the institution system
+  const client = await databasePool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(741923602)");
+    const role = await client.query("SELECT id FROM roles WHERE role_name = $1 ORDER BY id LIMIT 1", [INTEGRATION_STAFF_ROLE]);
+    if (role.rowCount) {
+      await client.query("UPDATE roles SET administrator_access = FALSE, dashboard = TRUE, permissions = $2::jsonb, status = TRUE WHERE id = $1", [role.rows[0].id, JSON.stringify(staffPermissions())]);
+    } else {
+      await client.query("INSERT INTO roles (role_name, administrator_access, dashboard, permissions) VALUES ($1, FALSE, TRUE, $2::jsonb)", [INTEGRATION_STAFF_ROLE, JSON.stringify(staffPermissions())]);
+    }
+    const link = (await client.query(
+      "SELECT user_row_id FROM integration_staff WHERE tenant_id = $1 AND external_user_id = $2 FOR UPDATE", [staff.tenantId, staff.externalUserId])).rows[0];
+    let userId: number;
+    if (link) {
+      userId = Number(link.user_row_id);
+      const clash = await client.query("SELECT 1 FROM users WHERE LOWER(email) = $1 AND id <> $2", [staff.email, userId]);
+      await client.query(
+        `UPDATE users SET name = $2, role = $3, status = TRUE, verified = TRUE${clash.rowCount ? "" : ", email = $4"} WHERE id = $1`,
+        clash.rowCount ? [userId, staff.name, INTEGRATION_STAFF_ROLE] : [userId, staff.name, INTEGRATION_STAFF_ROLE, staff.email]);
+    } else {
+      const existing = await client.query("SELECT 1 FROM users WHERE LOWER(email) = $1", [staff.email]);
+      if (existing.rowCount) throw new StaffConflictError("A portal account with this email already exists");
+      userId = Number((await client.query(
+        "INSERT INTO users (name, email, password, role, mobile, status, verified) VALUES ($1,$2,$3,$4,'-',TRUE,TRUE) RETURNING id",
+        [staff.name, staff.email, unusablePassword, INTEGRATION_STAFF_ROLE])).rows[0].id);
+      await client.query("INSERT INTO integration_staff (tenant_id, external_user_id, user_row_id) VALUES ($1,$2,$3)", [staff.tenantId, staff.externalUserId, userId]);
+    }
+    await client.query("UPDATE integration_staff SET updated_at = NOW() WHERE user_row_id = $1", [userId]);
+    await client.query("COMMIT");
+    return userId;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function createStaffLaunchTicket(tenantId: string, externalUserId: string) {
+  await ensureIntegrationTables();
+  const ticket = randomBytes(32).toString("base64url");
+  await databasePool.query(
+    "INSERT INTO integration_launch_tickets (token_hash, tenant_id, external_student_id, kind, expires_at) VALUES ($1,$2,$3,'staff', NOW() + make_interval(secs => $4))",
+    [hashTicket(ticket), tenantId, externalUserId, LAUNCH_TICKET_TTL_SECONDS]);
+  return ticket;
+}
+
+/** True for portal users that came from an institution system: their API access is limited to question/assessment authoring. */
+export async function isIntegrationStaffUser(userId: number) {
+  await ensureIntegrationTables();
+  return Boolean((await databasePool.query("SELECT 1 FROM integration_staff WHERE user_row_id = $1", [userId])).rowCount);
+}
+
+// ---- assessments pushed from the institution system ----
+
+/** Idempotent upsert on (tenant_id, external_assessment_id). Only the shell is managed here; questions are authored in the portal. */
+export async function upsertIntegrationAssessment(a: AssessmentUpsert) {
+  await ensureIntegrationTables();
+  await databasePool.query(`
+    CREATE TABLE IF NOT EXISTS assessment (
+      id SERIAL PRIMARY KEY, examination TEXT NOT NULL, name TEXT NOT NULL, start_date TIMESTAMPTZ, end_date TIMESTAMPTZ,
+      total_time INTEGER, last_login INTEGER, question_category TEXT, sub_category TEXT, topic TEXT, question_language TEXT,
+      sections JSONB NOT NULL DEFAULT '[]'::jsonb, status BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), pass_mark NUMERIC
+    )`);
+  const client = await databasePool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(741923603)");
+    const mapped = (await client.query(
+      `SELECT m.assessment_id FROM integration_assessment_map m JOIN assessment s ON s.id = m.assessment_id
+       WHERE m.tenant_id = $1 AND m.external_assessment_id = $2`, [a.tenantId, a.externalAssessmentId])).rows[0];
+    let assessmentId: number;
+    let created = false;
+    if (mapped) {
+      assessmentId = Number(mapped.assessment_id);
+      await client.query(
+        "UPDATE assessment SET examination = $2, name = $3, start_date = $4, end_date = $5, total_time = COALESCE($6, total_time), status = $7 WHERE id = $1",
+        [assessmentId, a.examination, a.name, a.startDate, a.endDate, a.totalTime, a.active]);
+    } else {
+      created = true;
+      assessmentId = Number((await client.query(
+        "INSERT INTO assessment (examination, name, start_date, end_date, total_time, status) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id",
+        [a.examination, a.name, a.startDate, a.endDate, a.totalTime, a.active])).rows[0].id);
+      await client.query(
+        `INSERT INTO integration_assessment_map (tenant_id, external_assessment_id, assessment_id) VALUES ($1,$2,$3)
+         ON CONFLICT (tenant_id, external_assessment_id) DO UPDATE SET assessment_id = EXCLUDED.assessment_id`, [a.tenantId, a.externalAssessmentId, assessmentId]);
+    }
+    await client.query("COMMIT");
+    return { assessmentId, created };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
 }

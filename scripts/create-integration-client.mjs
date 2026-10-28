@@ -1,5 +1,5 @@
 // Registers (or rotates the secret of) a machine client for a tenant. The secret is printed once and only its hash is stored.
-//   DATABASE_URL=... node scripts/create-integration-client.mjs --tenant institution-001 [--client-id ums] [--scope students:write] [--rotate]
+//   DATABASE_URL=... node scripts/create-integration-client.mjs --tenant institution-001 [--client-id ums] [--scope students:write] [--rotate | --scopes-only]
 import { randomBytes, scryptSync } from "node:crypto";
 import pg from "pg";
 
@@ -7,11 +7,12 @@ const args = process.argv.slice(2);
 const option = (name) => { const i = args.indexOf(`--${name}`); return i >= 0 ? args[i + 1] : undefined; };
 const tenant = option("tenant");
 if (!tenant || !process.env.DATABASE_URL) {
-  console.error("Usage: DATABASE_URL=... node scripts/create-integration-client.mjs --tenant <tenant_id> [--client-id <id>] [--scope \"students:write students:launch\"] [--rotate]");
+  console.error("Usage: DATABASE_URL=... node scripts/create-integration-client.mjs --tenant <tenant_id> [--client-id <id>] [--scope \"students:write students:launch staff:launch assessments:write\"] [--rotate]");
   process.exit(1);
 }
 const clientId = option("client-id") ?? `${tenant}-client`;
-const scope = option("scope") ?? "students:write students:launch";
+const scope = option("scope") ?? "students:write students:launch staff:launch assessments:write";
+const scopesOnly = args.includes("--scopes-only");
 const secret = randomBytes(32).toString("base64url");
 const salt = randomBytes(16);
 const hash = `scrypt$${salt.toString("base64url")}$${scryptSync(secret, salt, 32).toString("base64url")}`;
@@ -20,8 +21,15 @@ const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 try {
   await pool.query(`CREATE TABLE IF NOT EXISTS integration_clients (
     client_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, secret_hash TEXT NOT NULL,
-    scopes TEXT NOT NULL DEFAULT 'students:write students:launch', status BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
+    scopes TEXT NOT NULL DEFAULT 'students:write students:launch staff:launch assessments:write', status BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
   const existing = await pool.query("SELECT tenant_id FROM integration_clients WHERE client_id = $1", [clientId]);
+  if (scopesOnly) {
+    // Widen/narrow an existing client's scopes without touching its secret.
+    if (!existing.rowCount || existing.rows[0].tenant_id !== tenant) { console.error(`Client "${clientId}" does not exist for tenant "${tenant}".`); process.exit(1); }
+    await pool.query("UPDATE integration_clients SET scopes = $2 WHERE client_id = $1", [clientId, scope]);
+    console.log(`Scopes for "${clientId}" are now: ${scope}`);
+    process.exit(0);
+  }
   if (existing.rowCount && !args.includes("--rotate")) {
     console.error(`Client "${clientId}" already exists. Pass --rotate to issue a new secret (the old one stops working).`);
     process.exit(1);

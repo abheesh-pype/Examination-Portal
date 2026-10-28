@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { SignJWT, generateKeyPair, createLocalJWKSet, exportJWK } from "jose";
 import { IntegrationError, loadTenants, verifyBearerToken } from "../../lib/integrations/tokens.ts";
-import { peekTenantId, validateStudentPayload } from "../../lib/integrations/payload.ts";
+import { peekTenantId, validateAssessmentPayload, validateStaffPayload, validateStudentPayload } from "../../lib/integrations/payload.ts";
 
 const tenantJson = {
   tenant_id: "institution-001", issuer: "https://idp.example.edu/", jwks_url: "https://idp.example.edu/jwks.json", audience: "exam-portal-api",
@@ -83,5 +83,35 @@ test("payload: malformed bodies are rejected", () => {
     body({ email: "nope" }), body({ assigned_assessments: "x" }), body({ assigned_assessments: [{ name: "n" }] }),
     body({ assigned_assessments: [{ ums_assessment_id: 1, name: "a" }, { ums_assessment_id: 1, name: "b" }] })]) {
     assert.throws(() => validateStudentPayload(bad), { name: "Error" });
+  }
+});
+
+test("staff payload: valid mapped and lower-cased; bad input rejected", () => {
+  const staff = validateStaffPayload({ tenant_id: "t", external_user_id: "ums-user:1", name: " Ann ", email: "Ann@X.edu", role: "admin" });
+  assert.deepEqual(staff, { tenantId: "t", externalUserId: "ums-user:1", name: "Ann", email: "ann@x.edu" });
+  for (const bad of [null, {}, { tenant_id: "t", external_user_id: "u", name: "A", email: "nope" }, { tenant_id: "t", external_user_id: "", name: "A", email: "a@b.co" }]) {
+    assert.throws(() => validateStaffPayload(bad), { name: "Error" });
+  }
+});
+
+const assessment = (over: Record<string, unknown> = {}) => ({
+  tenant_id: "t", external_assessment_id: "exam-1", name: "Midterm", examination: "Semester 1",
+  start_date: "2026-11-01T04:00:00.000Z", end_date: "2026-11-01T06:30:00.000Z", total_time: 120, status: "active", ...over,
+});
+
+test("assessment payload: valid; inactive; numeric id", () => {
+  const a = validateAssessmentPayload(assessment());
+  assert.equal(a.externalAssessmentId, "exam-1");
+  assert.equal(a.active, true);
+  assert.equal(a.totalTime, 120);
+  assert.equal(validateAssessmentPayload(assessment({ status: "inactive" })).active, false);
+  assert.equal(validateAssessmentPayload(assessment({ external_assessment_id: 42 })).externalAssessmentId, "42");
+});
+
+test("assessment payload: malformed values rejected", () => {
+  for (const bad of [null, assessment({ name: "" }), assessment({ examination: undefined }), assessment({ external_assessment_id: undefined }),
+    assessment({ start_date: "nope" }), assessment({ end_date: "2026-10-01T00:00:00Z" }), assessment({ total_time: 0 }), assessment({ total_time: 2000 }),
+    assessment({ total_time: 1.5 }), assessment({ status: "deleted" })]) {
+    assert.throws(() => validateAssessmentPayload(bad), { name: "Error" });
   }
 });

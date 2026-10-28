@@ -87,6 +87,21 @@ starts that provisioned student's session. Tickets are random, stored hashed, si
 or inactive (also re-checked when redeemed). Set `PORTAL_PUBLIC_URL` (defaults to `INTEGRATION_ISSUER_URL`) to the portal's public HTTPS URL.
 Clients created before this feature need `--rotate` once to gain the `students:launch` scope (or pass `--scope "students:write students:launch"`).
 
+## Staff single sign-on and examination publishing (Academic Admin)
+
+Scopes: **`staff:launch`** (staff sign-in) and **`assessments:write`** (publish examinations). Built-in clients get both by default; widen an existing one with
+`node --env-file=.env scripts/create-integration-client.mjs --tenant <id> --client-id <id> --scope "students:write students:launch staff:launch assessments:write" --scopes-only`.
+
+* `POST /api/integrations/v1/staff-launch-tickets` `{ tenant_id, external_user_id, name, email }` returns a single-use 60-second `launch_url`. The portal creates or updates
+  a portal user with the **"UMS Academic Staff"** role and signs them in. It never adopts an existing portal account: if the email already belongs to someone else, it answers `409`.
+* That session is **restricted on the server**: questions, question categories/sub-categories/topics/difficulty levels/languages, assessments (view/create/update, no delete)
+  and assessment types/preview only. Users, roles, candidates, results, candidate permissions, integrations and deletions are refused with `403`. The role has no portal
+  administrator access, and the menus show only what it may use.
+* `PUT /api/integrations/v1/assessments` `{ tenant_id, external_assessment_id, name, examination, start_date, end_date, total_time, status }` creates/updates the assessment
+  shell (idempotent on tenant + external id) and records the mapping used by student provisioning, so assignments no longer depend on name matching. Questions and sections are
+  then authored in the portal (manual entry or bulk upload).
+* Limitation: the portal's assessments and question bank are shared across tenants (not tenant-scoped), so institution staff see each other's content.
+
 ## Student single sign-on (optional, needs an external OIDC provider)
 
 Authorization Code + PKCE (S256) with `state` and `nonce`. The login page shows "Sign in with your institution" when a tenant has `oidc`

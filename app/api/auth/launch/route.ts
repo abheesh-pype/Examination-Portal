@@ -11,10 +11,10 @@ export async function GET(request: Request) {
   const base = (process.env.PORTAL_PUBLIC_URL ?? process.env.INTEGRATION_ISSUER_URL ?? url.origin).trim().replace(/\/$/, "");
   const headers = { "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" };
   try {
-    const candidateRowId = await redeemLaunchTicket(url.searchParams.get("ticket") ?? "");
-    if (candidateRowId === null) return NextResponse.redirect(new URL("/?sso_error=expired", base), { headers });
+    const redeemed = await redeemLaunchTicket(url.searchParams.get("ticket") ?? "");
+    if (redeemed === null) return NextResponse.redirect(new URL("/?sso_error=expired", base), { headers });
     const response = NextResponse.redirect(new URL("/", base), { headers });
-    setSessionCookie(response, await createSession("candidate", candidateRowId));
+    setSessionCookie(response, await createSession(redeemed.kind === "staff" ? "user" : "candidate", redeemed.id));
     return response;
   } catch (error) {
     console.error("Launch ticket redemption failed", error);

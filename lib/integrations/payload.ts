@@ -67,3 +67,54 @@ export function validateStudentPayload(raw: unknown): ProvisionedStudent {
     assessments: body.status === "active" ? assessments : [],
   };
 }
+
+export type StaffPayload = { tenantId: string; externalUserId: string; name: string; email: string };
+
+/** Staff (e.g. a university's Academic Admin) asking for a portal sign-in. */
+export function validateStaffPayload(raw: unknown): StaffPayload {
+  const body = raw as Loose | null;
+  const bad = (message: string) => new PayloadError(400, message);
+  if (!body || typeof body !== "object" || Array.isArray(body)) throw bad("Body must be a JSON object");
+  if (!text(body.tenant_id, 100)) throw bad("tenant_id is required");
+  if (!text(body.external_user_id, 100)) throw bad("external_user_id is required");
+  if (!text(body.name, 200)) throw bad("name is required");
+  if (typeof body.email !== "string" || body.email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email.trim())) throw bad("A valid email is required");
+  return { tenantId: body.tenant_id.trim(), externalUserId: body.external_user_id.trim(), name: body.name.trim(), email: body.email.trim().toLowerCase() };
+}
+
+export type AssessmentUpsert = {
+  tenantId: string; externalAssessmentId: string; name: string; examination: string;
+  startDate: string | null; endDate: string | null; totalTime: number | null; active: boolean;
+};
+
+const isoDate = (value: unknown, label: string) => {
+  if (value == null || value === "") return null;
+  const time = typeof value === "string" ? Date.parse(value) : NaN;
+  if (Number.isNaN(time)) throw new PayloadError(400, `${label} must be an ISO date-time`);
+  return new Date(time).toISOString();
+};
+
+/** Shell of an assessment pushed by the institution system. Questions/sections are authored in the portal. */
+export function validateAssessmentPayload(raw: unknown): AssessmentUpsert {
+  const body = raw as Loose | null;
+  const bad = (message: string) => new PayloadError(400, message);
+  if (!body || typeof body !== "object" || Array.isArray(body)) throw bad("Body must be a JSON object");
+  if (!text(body.tenant_id, 100)) throw bad("tenant_id is required");
+  const id = body.external_assessment_id;
+  if (!(Number.isInteger(id) || text(id, 100))) throw bad("external_assessment_id is required");
+  if (!text(body.name, 300)) throw bad("name is required");
+  if (!text(body.examination, 300)) throw bad("examination is required");
+  const startDate = isoDate(body.start_date, "start_date");
+  const endDate = isoDate(body.end_date, "end_date");
+  if (startDate && endDate && Date.parse(endDate) <= Date.parse(startDate)) throw bad("end_date must be after start_date");
+  let totalTime: number | null = null;
+  if (body.total_time != null) {
+    if (!Number.isInteger(body.total_time) || body.total_time < 1 || body.total_time > 1440) throw bad("total_time must be 1-1440 minutes");
+    totalTime = body.total_time;
+  }
+  if (body.status != null && body.status !== "active" && body.status !== "inactive") throw bad('status must be "active" or "inactive"');
+  return {
+    tenantId: body.tenant_id.trim(), externalAssessmentId: String(id).trim(), name: body.name.trim(), examination: body.examination.trim(),
+    startDate, endDate, totalTime, active: body.status !== "inactive",
+  };
+}

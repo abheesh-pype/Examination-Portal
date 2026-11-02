@@ -283,17 +283,15 @@ export async function redeemLaunchTicket(ticket: string): Promise<{ kind: "stude
 
 // ---- staff (e.g. a university's Academic Admin) ----
 
-/** Role given to institution staff. The name deliberately has no "admin": the portal treats such roles as non-admin. */
+/** Former restricted role (authoring only). Still enforced for any account that holds it; new sign-ins are upgraded. */
 export const INTEGRATION_STAFF_ROLE = "UMS Academic Staff";
 
-const staffPermissions = () => {
-  const edit = { view: 1, create: 1, edit: 1, delete: 0, status: 1 };
-  return Object.fromEntries([
-    "Questions", "Assessments", "Settings:Assessments:Examinations",
-    "Settings:Questions:Categories", "Settings:Questions:Sub-Categories", "Settings:Questions:Topics",
-    "Settings:Questions:Difficulty Levels", "Settings:Questions:Languages",
-  ].map((section) => [section, section === "Questions" ? { ...edit, delete: 1 } : edit]));
-};
+/**
+ * Role given to institution admins (Academic Admin, Organization Admin) who sign in from the institution system.
+ * They have full administrator access, like a portal administrator. Invigilators and evaluators are not provisioned
+ * here: they sign in to the portal directly with their own credentials.
+ */
+export const INTEGRATION_ADMIN_ROLE = "UMS Administrator";
 
 export class StaffConflictError extends Error {}
 export class StaffInactiveError extends Error {}
@@ -319,11 +317,11 @@ export async function provisionStaff(staff: StaffPayload) {
   try {
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock(741923602)");
-    const role = await client.query("SELECT id FROM roles WHERE role_name = $1 ORDER BY id LIMIT 1", [INTEGRATION_STAFF_ROLE]);
+    const role = await client.query("SELECT id FROM roles WHERE role_name = $1 ORDER BY id LIMIT 1", [INTEGRATION_ADMIN_ROLE]);
     if (role.rowCount) {
-      await client.query("UPDATE roles SET administrator_access = FALSE, dashboard = TRUE, permissions = $2::jsonb, status = TRUE WHERE id = $1", [role.rows[0].id, JSON.stringify(staffPermissions())]);
+      await client.query("UPDATE roles SET administrator_access = TRUE, dashboard = TRUE, status = TRUE WHERE id = $1", [role.rows[0].id]);
     } else {
-      await client.query("INSERT INTO roles (role_name, administrator_access, dashboard, permissions) VALUES ($1, FALSE, TRUE, $2::jsonb)", [INTEGRATION_STAFF_ROLE, JSON.stringify(staffPermissions())]);
+      await client.query("INSERT INTO roles (role_name, administrator_access, dashboard, permissions) VALUES ($1, TRUE, TRUE, '{}'::jsonb)", [INTEGRATION_ADMIN_ROLE]);
     }
     const link = (await client.query(
       `SELECT u.id, u.status FROM users u LEFT JOIN integration_staff s ON s.user_row_id = u.id
@@ -333,16 +331,18 @@ export async function provisionStaff(staff: StaffPayload) {
     if (clash.rowCount) throw new StaffConflictError("A portal account with this email already exists");
     let userId: number;
     if (link) {
-      // A deactivated account stays deactivated, and a role set by a portal administrator is kept.
+      // A deactivated account stays deactivated, and a role set by a portal administrator is kept,
+      // except the former restricted role, which is upgraded to the administrator role.
       if (!link.status) throw new StaffInactiveError("The linked portal account has been deactivated");
       userId = Number(link.id);
       await client.query(
-        "UPDATE users SET name = $2, email = $3, verified = TRUE, tenant_id = $4, external_user_id = $5 WHERE id = $1",
-        [userId, staff.name, staff.email, staff.tenantId, staff.externalUserId]);
+        `UPDATE users SET name = $2, email = $3, verified = TRUE, tenant_id = $4, external_user_id = $5,
+           role = CASE WHEN BTRIM(role) = $6 THEN $7 ELSE role END WHERE id = $1`,
+        [userId, staff.name, staff.email, staff.tenantId, staff.externalUserId, INTEGRATION_STAFF_ROLE, INTEGRATION_ADMIN_ROLE]);
     } else {
       userId = Number((await client.query(
         "INSERT INTO users (name, email, password, role, mobile, status, verified, tenant_id, external_user_id) VALUES ($1,$2,$3,$4,'-',TRUE,TRUE,$5,$6) RETURNING id",
-        [staff.name, staff.email, unusablePassword, INTEGRATION_STAFF_ROLE, staff.tenantId, staff.externalUserId])).rows[0].id);
+        [staff.name, staff.email, unusablePassword, INTEGRATION_ADMIN_ROLE, staff.tenantId, staff.externalUserId])).rows[0].id);
     }
     await client.query(
       `INSERT INTO integration_staff (tenant_id, external_user_id, user_row_id) VALUES ($1,$2,$3)

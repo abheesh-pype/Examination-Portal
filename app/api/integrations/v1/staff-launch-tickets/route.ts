@@ -13,7 +13,7 @@ import {
 export const runtime = "nodejs";
 
 // The institution system (after authenticating its own staff member, e.g. an Academic Admin) asks for a single-use
-// link that signs that person into the portal with the restricted "UMS Academic Staff" role.
+// link that signs that person into the portal with the "UMS Administrator" role.
 export async function POST(request: Request) {
   return handleIntegrationRequest(request, async (client) => {
     const { body } = await readJsonObject(request);

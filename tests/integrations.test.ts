@@ -508,7 +508,7 @@ describe("student launch tickets and /launch", () => {
 describe("POST /api/integrations/v1/staff-launch-tickets", () => {
   const staff = { tenant_id: TENANT, external_user_id: "ums-user:42", name: "Dr. Rao", email: "rao@example.edu" };
 
-  it("creates a restricted linked staff user, reuses it, and signs in through /launch", async () => {
+  it("creates a linked administrator user, reuses it, and signs in through /launch", async () => {
     const token = await getToken();
     const first = await staffLaunchTicketsPost(apiRequest("POST", "/api/integrations/v1/staff-launch-tickets", { token, body: staff }).request);
     expect(first.status).toBe(200);
@@ -520,16 +520,26 @@ describe("POST /api/integrations/v1/staff-launch-tickets", () => {
     }).request);
     expect(second.status).toBe(200);
     const users = await databasePool.query("SELECT name, role FROM users WHERE external_user_id = 'ums-user:42'");
-    expect(users.rows).toEqual([{ name: "Dr. A. Rao", role: "UMS Academic Staff" }]);
+    expect(users.rows).toEqual([{ name: "Dr. A. Rao", role: "UMS Administrator" }]);
 
     const redeemed = await launchGet(new Request(`${ORIGIN}/launch${new URL(body.launch_url).search}`));
     expect(redeemed.status).toBe(302);
     const cookie = cookieFrom(redeemed);
     const session = await sessionGet(new Request(`${ORIGIN}/api/auth/session`, { headers: { cookie } }));
-    expect((await session.json()).user).toMatchObject({ email: "rao@example.edu", role: "UMS Academic Staff" });
-    // Restricted on the server: authoring is allowed, everything else is refused.
+    expect((await session.json()).user).toMatchObject({ email: "rao@example.edu", role: "UMS Administrator" });
+    // Full administrator access, like a portal administrator.
     expect((await assessmentsAdminGet(new Request(`${ORIGIN}/api/assessments`, { headers: { cookie } }))).status).toBe(200);
-    expect((await usersGet(new Request(`${ORIGIN}/api/users`, { headers: { cookie } }))).status).toBe(403);
+    expect((await usersGet(new Request(`${ORIGIN}/api/users`, { headers: { cookie } }))).status).toBe(200);
+  });
+
+  it("upgrades an account that still has the former restricted role", async () => {
+    const token = await getToken();
+    const body = { ...staff, external_user_id: "ums-user:44", email: "legacy@example.edu" };
+    expect((await staffLaunchTicketsPost(apiRequest("POST", "/api/integrations/v1/staff-launch-tickets", { token, body }).request)).status).toBe(200);
+    await databasePool.query("UPDATE users SET role = 'UMS Academic Staff' WHERE external_user_id = 'ums-user:44'");
+    expect((await staffLaunchTicketsPost(apiRequest("POST", "/api/integrations/v1/staff-launch-tickets", { token, body }).request)).status).toBe(200);
+    const row = await databasePool.query("SELECT role FROM users WHERE external_user_id = 'ums-user:44'");
+    expect(row.rows[0].role).toBe("UMS Administrator");
   });
 
   it("keeps a role set by an administrator and refuses a deactivated account", async () => {

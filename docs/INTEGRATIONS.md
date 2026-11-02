@@ -100,11 +100,10 @@ Scopes: **`staff:launch`** (staff sign-in) and **`assessments:write`** (publish 
 `node scripts/create-integration-client.mjs --tenant <id> --client-id <id> --scope "students:write students:launch staff:launch assessments:write results:read" --scopes-only`.
 
 * `POST /api/integrations/v1/staff-launch-tickets` `{ tenant_id, external_user_id, name, email }` returns a single-use 90-second `launch_url`. The portal creates or updates
-  a portal user with the **"UMS Academic Staff"** role and signs them in. It never adopts an existing portal account: if the email already belongs to someone else, it answers `409`.
-  A deactivated account answers `403`.
-* That session is **restricted on the server**: questions, question categories/sub-categories/topics/difficulty levels/languages, assessments (view/create/update, no delete)
-  and assessment types/preview only. Users, roles, candidates, results, candidate permissions, integrations and deletions are refused with `403`. The role has no portal
-  administrator access, and the menus show only what it may use. A portal administrator can lift this on purpose by giving the user a different role; later launches keep that role.
+  a portal user with the **"UMS Administrator"** role (full administrator access) and signs them in. Used for UMS Academic Admins and Organization Admins/Super Admins.
+  It never adopts an existing portal account: if the email already belongs to someone else, it answers `409`. A deactivated account answers `403`.
+  Accounts created earlier with the former restricted role "UMS Academic Staff" are upgraded on their next sign-in; a role set by a portal administrator is otherwise kept.
+* Invigilators and evaluators are not provisioned by UMS: they sign in to the portal directly with their own portal credentials.
 * `PUT /api/integrations/v1/assessments` `{ tenant_id, external_assessment_id, name, examination, start_date, end_date, total_time, status }` creates/updates the assessment
   shell (idempotent on tenant + external id) and records the mapping used by student provisioning, so assignments no longer depend on name matching. Questions and sections are
   then authored in the portal (manual entry or bulk upload).

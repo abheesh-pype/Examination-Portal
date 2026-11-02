@@ -28,12 +28,12 @@ const proposedStudentPayload = `{
 }`;
 
 const proposedEnvironment = `UMS_TENANT_ID=institution-001
-EXAM_PORTAL_TOKEN_URL=https://exam-portal.example.edu/oauth/token
+EXAM_PORTAL_TOKEN_URL=https://exam-portal.example.edu/api/integrations/oauth/token
 EXAM_PORTAL_CLIENT_ID=issued-client-id
 EXAM_PORTAL_CLIENT_SECRET=store-only-in-server-secret-manager
 EXAM_PORTAL_STUDENT_UPSERT_URL=https://exam-portal.example.edu/api/integrations/v1/students
-# Optional, when required by the identity provider:
-EXAM_PORTAL_SCOPE=students:write
+EXAM_PORTAL_LAUNCH_TICKET_URL=https://exam-portal.example.edu/api/integrations/v1/launch-tickets
+EXAM_PORTAL_SCOPE=students:write students:launch staff:launch assessments:write results:read
 EXAM_PORTAL_AUDIENCE=exam-portal-api`;
 
 export default function IntegrationGuidePanel() {
@@ -153,7 +153,7 @@ export default function IntegrationGuidePanel() {
               required
             />
             <button type="submit" disabled={!integrationStatus?.configured || syncing || candidateId.length !== 6}>
-              {syncing ? "Sending…" : "Send to Exam Portal"}
+              {syncing ? "Sending…" : "Send to UMS"}
             </button>
           </div>
         </form>
@@ -228,8 +228,8 @@ export default function IntegrationGuidePanel() {
         <h2>Student provisioning contract</h2>
         <p>
           The UMS posts the versioned upsert contract below with an OAuth bearer token
-          and a deterministic idempotency key. The receiving Exam Portal must implement
-          this endpoint and treat repeat requests as updates rather than duplicate students.
+          and a deterministic idempotency key. This portal implements the endpoint and
+          treats repeat requests as updates rather than duplicate students.
         </p>
         <pre className="integration-guide-code"><code>{`POST https://exam-portal.example.edu/api/integrations/v1/students
 Authorization: Bearer [short-lived OAuth access token]
@@ -269,9 +269,10 @@ ${proposedStudentPayload}`}</code></pre>
       </section>
 
       <p className="integration-guide-current-login">
-        The admin-triggered provisioning flow is available once its server configuration
-        is supplied. Automatic/background sync, result return-to-UMS, and OIDC login
-        inside UMS are not implemented.
+        UMS can call this portal&apos;s <code>/api/integrations/v1/*</code> API (student sync,
+        launch tickets, assessment publishing and results) with a client created by
+        <code> scripts/create-integration-client.mjs</code>. The admin-triggered push above uses
+        this portal&apos;s <code>UMS_*</code> server variables.
       </p>
     </section>
   );

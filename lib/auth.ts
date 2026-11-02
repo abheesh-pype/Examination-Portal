@@ -1,6 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
 import { NextResponse } from "next/server";
 import { databasePool } from "@/lib/db";
+import { authorizeIntegrationRequest, type IntegrationClient } from "@/lib/integrations";
+import { consumeRateLimit, getClientAddress, rateLimitRules } from "@/lib/rate-limit";
 
 const SESSION_COOKIE = "ums_exam_session";
 const SESSION_LIFETIME_SECONDS = 60 * 60 * 12;
@@ -26,7 +28,7 @@ export type AuthenticatedCandidate = {
 };
 
 export type ApiAuthorization =
-  | { ok: true; public?: boolean; user?: AuthenticatedUser; candidate?: AuthenticatedCandidate }
+  | { ok: true; public?: boolean; user?: AuthenticatedUser; candidate?: AuthenticatedCandidate; client?: IntegrationClient }
   | { ok: false; response: NextResponse };
 
 let sessionTableReady: Promise<void> | null = null;
@@ -181,8 +183,10 @@ async function resolveSession(request: Request): Promise<Session | null> {
 
 async function resolveCandidate(subjectId: number): Promise<AuthenticatedCandidate | null> {
   const result = await databasePool.query(`
-    SELECT id, candidate_data
-    FROM "Candidate Information"
+    SELECT id, candidate_data,
+           -- Read through to_jsonb so this works before the integration columns are migrated.
+           to_jsonb(candidate) ->> 'external_student_id' AS external_student_id
+    FROM "Candidate Information" AS candidate
     WHERE id = $1 AND record_type = 'candidate' AND status = TRUE
   `, [subjectId]);
   if (!result.rowCount) return null;
@@ -201,7 +205,9 @@ async function resolveCandidate(subjectId: number): Promise<AuthenticatedCandida
   );
   const candidateId = candidateIdEntry ? String(candidateIdEntry[1]).trim() : "";
   const dateOfBirth = dateEntry ? normalizeDate(String(dateEntry[1])) : "";
-  if (!candidateId || !dateOfBirth) return null;
+  // Students provisioned by UMS sign in through launch tickets and have no date of birth.
+  const provisionedByUms = Boolean(result.rows[0].external_student_id);
+  if (!candidateId || (!dateOfBirth && !provisionedByUms)) return null;
   return { id: Number(result.rows[0].id), candidateId, dateOfBirth };
 }
 
@@ -223,6 +229,25 @@ function assertSameOrigin(request: Request) {
   return request.headers.get("sec-fetch-site") !== "cross-site";
 }
 
+function rateLimitRequest(request: Request, path: string, method: string, body: Record<string, unknown>) {
+  const address = getClientAddress(request);
+  if (method === "POST" && (path === "/api/users/login" || path === "/api/candidates/login")) {
+    const message = "Too many login attempts. Please wait a few minutes and try again.";
+    const account = path === "/api/users/login"
+      ? String(body.email ?? "").trim().toLocaleLowerCase()
+      : String(body.candidateId ?? "").trim();
+    return consumeRateLimit(`login-ip:${address}`, rateLimitRules.loginPerIp, message)
+      ?? consumeRateLimit(`login-account:${path}:${address}:${account}`, rateLimitRules.loginPerAccount, message);
+  }
+  if (path === "/api/integrations/oauth/token") {
+    return consumeRateLimit(`oauth-token:${address}`, rateLimitRules.tokenPerIp);
+  }
+  if (path.startsWith("/api/integrations/")) {
+    return consumeRateLimit(`integrations:${address}`, rateLimitRules.integrationPerIp);
+  }
+  return null;
+}
+
 function isStudentRoute(path: string) {
   return path === "/api/candidates/student-dashboard"
     || path === "/api/candidates/student-exam"
@@ -236,6 +261,18 @@ export async function authorizeApiRequest(request: Request): Promise<ApiAuthoriz
   const path = url.pathname;
   const method = request.method.toUpperCase();
   const body = await requestBody(request);
+
+  const rateLimited = rateLimitRequest(request, path, method, body);
+  if (rateLimited) return { ok: false, response: rateLimited };
+
+  // Machine-to-machine routes: called server-to-server by UMS, so they authenticate with
+  // client credentials or a bearer token instead of the browser same-origin check.
+  if (path === "/api/integrations/oauth/token" && method === "POST") {
+    return { ok: true, public: true };
+  }
+  if (path.startsWith("/api/integrations/v1/")) {
+    return authorizeIntegrationRequest(request, path, method, body);
+  }
 
   if (method !== "GET" && method !== "HEAD" && !assertSameOrigin(request)) {
     return forbidden("Cross-origin requests are not allowed.");

@@ -7,10 +7,10 @@ export const runtime = "nodejs";
 
 const configurationKeys = [
   "UMS_TENANT_ID",
-  "EXAM_PORTAL_TOKEN_URL",
-  "EXAM_PORTAL_CLIENT_ID",
-  "EXAM_PORTAL_CLIENT_SECRET",
-  "EXAM_PORTAL_STUDENT_UPSERT_URL",
+  "UMS_TOKEN_URL",
+  "UMS_CLIENT_ID",
+  "UMS_CLIENT_SECRET",
+  "UMS_STUDENT_UPSERT_URL",
 ] as const;
 
 type IntegrationConfiguration = {
@@ -71,11 +71,11 @@ function isAllowedServiceUrl(value: string | undefined) {
 
 function getConfiguration() {
   const missing: string[] = configurationKeys.filter((key) => !process.env[key]?.trim());
-  const tokenUrl = isAllowedServiceUrl(process.env.EXAM_PORTAL_TOKEN_URL);
-  const studentUpsertUrl = isAllowedServiceUrl(process.env.EXAM_PORTAL_STUDENT_UPSERT_URL);
-  if (process.env.EXAM_PORTAL_TOKEN_URL?.trim() && !tokenUrl) missing.push("EXAM_PORTAL_TOKEN_URL (must be HTTPS)");
-  if (process.env.EXAM_PORTAL_STUDENT_UPSERT_URL?.trim() && !studentUpsertUrl) {
-    missing.push("EXAM_PORTAL_STUDENT_UPSERT_URL (must be HTTPS)");
+  const tokenUrl = isAllowedServiceUrl(process.env.UMS_TOKEN_URL);
+  const studentUpsertUrl = isAllowedServiceUrl(process.env.UMS_STUDENT_UPSERT_URL);
+  if (process.env.UMS_TOKEN_URL?.trim() && !tokenUrl) missing.push("UMS_TOKEN_URL (must be HTTPS)");
+  if (process.env.UMS_STUDENT_UPSERT_URL?.trim() && !studentUpsertUrl) {
+    missing.push("UMS_STUDENT_UPSERT_URL (must be HTTPS)");
   }
   if (missing.length || !tokenUrl || !studentUpsertUrl) {
     return { missing: [...new Set(missing)], configuration: null };
@@ -84,11 +84,11 @@ function getConfiguration() {
   const configuration: IntegrationConfiguration = {
     tenantId: process.env.UMS_TENANT_ID!.trim(),
     tokenUrl,
-    clientId: process.env.EXAM_PORTAL_CLIENT_ID!.trim(),
-    clientSecret: process.env.EXAM_PORTAL_CLIENT_SECRET!,
+    clientId: process.env.UMS_CLIENT_ID!.trim(),
+    clientSecret: process.env.UMS_CLIENT_SECRET!,
     studentUpsertUrl,
-    scope: process.env.EXAM_PORTAL_SCOPE?.trim() ?? "",
-    audience: process.env.EXAM_PORTAL_AUDIENCE?.trim() ?? "",
+    scope: process.env.UMS_SCOPE?.trim() ?? "",
+    audience: process.env.UMS_AUDIENCE?.trim() ?? "",
   };
   return { missing: [], configuration };
 }
@@ -195,23 +195,23 @@ async function requestAccessToken(configuration: IntegrationConfiguration) {
       signal: AbortSignal.timeout(10_000),
     });
   } catch {
-    throw new IntegrationUpstreamError("Could not reach the Exam Portal token endpoint.");
+    throw new IntegrationUpstreamError("Could not reach the UMS token endpoint.");
   }
   if (!response.ok) {
-    throw new IntegrationUpstreamError(`The Exam Portal token endpoint returned HTTP ${response.status}.`);
+    throw new IntegrationUpstreamError(`The UMS token endpoint returned HTTP ${response.status}.`);
   }
   let tokenPayload: unknown;
   try {
     tokenPayload = await response.json();
   } catch {
-    throw new IntegrationUpstreamError("The Exam Portal token endpoint returned invalid JSON.");
+    throw new IntegrationUpstreamError("The UMS token endpoint returned invalid JSON.");
   }
   if (!isRecord(tokenPayload)
     || typeof tokenPayload.access_token !== "string"
     || !tokenPayload.access_token.trim()
     || tokenPayload.access_token.length > 8192
     || String(tokenPayload.token_type ?? "").toLocaleLowerCase() !== "bearer") {
-    throw new IntegrationUpstreamError("The Exam Portal token endpoint returned an invalid bearer token response.");
+    throw new IntegrationUpstreamError("The UMS token endpoint returned an invalid bearer token response.");
   }
   return tokenPayload.access_token;
 }
@@ -231,7 +231,7 @@ export async function GET(request: Request) {
       endpointHost: configuration?.studentUpsertUrl.host ?? null,
     });
   } catch (error) {
-    console.error("Failed to load Exam Portal integration status", error);
+    console.error("Failed to load UMS integration status", error);
     return NextResponse.json({ error: "Unable to load integration status." }, { status: 500 });
   }
 }
@@ -247,7 +247,7 @@ export async function POST(request: Request) {
     const { configuration, missing } = getConfiguration();
     if (!configuration) {
       return NextResponse.json({
-        error: "The Exam Portal integration is not configured on the server.",
+        error: "The UMS integration is not configured on the server.",
         missing,
       }, { status: 503 });
     }
@@ -313,10 +313,10 @@ export async function POST(request: Request) {
         signal: AbortSignal.timeout(15_000),
       });
     } catch {
-      throw new IntegrationUpstreamError("Could not reach the Exam Portal student endpoint.");
+      throw new IntegrationUpstreamError("Could not reach the UMS student endpoint.");
     }
     if (!response.ok) {
-      throw new IntegrationUpstreamError(`The Exam Portal student endpoint returned HTTP ${response.status}.`);
+      throw new IntegrationUpstreamError(`The UMS student endpoint returned HTTP ${response.status}.`);
     }
 
     return NextResponse.json({
@@ -325,7 +325,7 @@ export async function POST(request: Request) {
       assigned_assessments_count: assignedAssessments.length,
     });
   } catch (error) {
-    console.error("Failed to provision student to Exam Portal", error);
+    console.error("Failed to provision student to UMS", error);
     return NextResponse.json({
       error: error instanceof Error ? error.message : "Unable to provision the student.",
     }, { status: error instanceof IntegrationUpstreamError ? 502 : 500 });

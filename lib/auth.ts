@@ -1,7 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
 import { NextResponse } from "next/server";
 import { databasePool } from "@/lib/db";
-import { authorizeIntegrationRequest, type IntegrationClient } from "@/lib/integrations";
+import { authorizeIntegrationRequest, type IntegrationClient } from "@/lib/integrations/m2m";
+import { INTEGRATION_STAFF_ROLE, isIntegrationManaged, isIntegrationStaffUser } from "@/lib/integrations/store";
 import { consumeRateLimit, getClientAddress, rateLimitRules } from "@/lib/rate-limit";
 
 const SESSION_COOKIE = "ums_exam_session";
@@ -19,6 +20,8 @@ export type AuthenticatedUser = {
   id: number;
   role: string;
   isAdmin: boolean;
+  /** Provisioned by an institution system: limited to question/assessment authoring (see authorizeIntegrationStaff). */
+  isIntegrationStaff?: boolean;
 };
 
 export type AuthenticatedCandidate = {
@@ -165,6 +168,10 @@ async function resolveSession(request: Request): Promise<Session | null> {
   if (!result.rowCount) return null;
   const row = result.rows[0];
   if (row.subject_type !== "user" && row.subject_type !== "candidate") return null;
+  // A portal administrator can lift the restriction on purpose by giving the linked user another role.
+  const isIntegrationStaff = row.user_id !== null && row.user_id !== undefined
+    && String(row.user_role ?? "").trim() === INTEGRATION_STAFF_ROLE
+    && await isIntegrationStaffUser(Number(row.user_id));
   return {
     tokenHash: String(row.token_hash),
     subjectType: row.subject_type,
@@ -175,8 +182,9 @@ async function resolveSession(request: Request): Promise<Session | null> {
       : {
         id: Number(row.user_id),
         role: String(row.user_role ?? "").trim(),
-        isAdmin: String(row.user_role ?? "").trim().toLocaleLowerCase().includes("admin")
-          || Boolean(row.administrator_access),
+        isAdmin: !isIntegrationStaff && (String(row.user_role ?? "").trim().toLocaleLowerCase().includes("admin")
+          || Boolean(row.administrator_access)),
+        ...(isIntegrationStaff ? { isIntegrationStaff: true } : {}),
       },
   };
 }
@@ -205,9 +213,11 @@ async function resolveCandidate(subjectId: number): Promise<AuthenticatedCandida
   );
   const candidateId = candidateIdEntry ? String(candidateIdEntry[1]).trim() : "";
   const dateOfBirth = dateEntry ? normalizeDate(String(dateEntry[1])) : "";
-  // Students provisioned by UMS sign in through launch tickets and have no date of birth.
-  const provisionedByUms = Boolean(result.rows[0].external_student_id);
-  if (!candidateId || (!dateOfBirth && !provisionedByUms)) return null;
+  if (!candidateId) return null;
+  // Students provisioned by an integration sign in through launch tickets or their institution's IdP and have no DOB on file.
+  const provisionedByIntegration = Boolean(result.rows[0].external_student_id)
+    || await isIntegrationManaged(Number(result.rows[0].id));
+  if (!dateOfBirth && !provisionedByIntegration) return null;
   return { id: Number(result.rows[0].id), candidateId, dateOfBirth };
 }
 
@@ -256,6 +266,22 @@ function isStudentRoute(path: string) {
     || path === "/api/assessment-results";
 }
 
+// Institution staff may author questions and assessments and nothing else (no users, roles, candidates, results,
+// integrations or deletions of assessments). Enforced here, not just by hiding menus.
+const STAFF_AUTHORING_PATHS = [
+  "/api/questions", "/api/question-categories", "/api/question-sub-categories", "/api/question-topics", "/api/difficulty-levels",
+  "/api/languages", "/api/assessment-types", "/api/assessments", "/api/assessment-preview",
+];
+
+function authorizeIntegrationStaff(path: string, method: string, user: AuthenticatedUser): ApiAuthorization {
+  const matches = (base: string) => path === base || path.startsWith(`${base}/`);
+  if (path === "/api/roles" && method === "GET") return { ok: true, user };
+  const target = STAFF_AUTHORING_PATHS.find(matches);
+  if (!target) return forbidden("This account can only manage questions and assessments.");
+  if (method === "DELETE" && target !== "/api/questions") return forbidden("This account cannot delete this resource.");
+  return { ok: true, user };
+}
+
 export async function authorizeApiRequest(request: Request): Promise<ApiAuthorization> {
   const url = new URL(request.url);
   const path = url.pathname;
@@ -270,7 +296,8 @@ export async function authorizeApiRequest(request: Request): Promise<ApiAuthoriz
   if (path === "/api/integrations/oauth/token" && method === "POST") {
     return { ok: true, public: true };
   }
-  if (path.startsWith("/api/integrations/v1/")) {
+  // assessment-mappings is the one route here for portal administrators, using their session.
+  if (path.startsWith("/api/integrations/v1/") && path !== "/api/integrations/v1/assessment-mappings") {
     return authorizeIntegrationRequest(request, path, method, body);
   }
 
@@ -329,6 +356,8 @@ export async function authorizeApiRequest(request: Request): Promise<ApiAuthoriz
   if (session.subjectType !== "user") return forbidden("A staff account is required.");
   const user = session.user;
   if (!user) return unauthorized("The account is inactive or no longer exists.");
+
+  if (user.isIntegrationStaff) return authorizeIntegrationStaff(path, method, user);
 
   for (const key of ["accountUserId", "viewerUserId", "invigilatorUserId"]) {
     const queryValue = url.searchParams.get(key);

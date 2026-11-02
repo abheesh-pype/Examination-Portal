@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes, scryptSync } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/db", async () => {
@@ -15,9 +15,13 @@ import { GET as resultsGet } from "@/app/api/integrations/v1/results/route";
 import { GET as launchGet } from "@/app/launch/route";
 import { GET as sessionGet } from "@/app/api/auth/session/route";
 import { GET as assessmentsAdminGet } from "@/app/api/assessments/route";
+import { GET as usersGet } from "@/app/api/users/route";
+import { GET as authLaunchGet } from "@/app/api/auth/launch/route";
+import { PUT as assessmentMappingsPut } from "@/app/api/integrations/v1/assessment-mappings/route";
 import { POST as candidateLoginPost } from "@/app/api/candidates/login/route";
+import { createSession } from "@/lib/auth";
 import { databasePool } from "@/lib/db";
-import { ensureIntegrationSchema } from "@/lib/integrations";
+import { ensureIntegrationSchema } from "@/lib/integrations/m2m";
 import { hashPassword } from "@/lib/password";
 import { resetRateLimits } from "@/lib/rate-limit";
 
@@ -28,6 +32,9 @@ const CLIENT_ID = "ums.client-1";
 // Includes characters that must be form-urlencoded inside the Basic credentials.
 const CLIENT_SECRET = "s3cr+t/=:x and space";
 const ALL_SCOPES = ["students:write", "students:launch", "staff:launch", "assessments:write", "results:read"];
+
+const LEGACY_CLIENT_ID = "legacy-issuer-client";
+const LEGACY_SECRET = "legacy-issuer-secret";
 
 const logLines: string[] = [];
 
@@ -122,6 +129,26 @@ beforeAll(async () => {
   process.env.PORTAL_PUBLIC_URL = PORTAL_URL;
   vi.spyOn(console, "info").mockImplementation((...args: unknown[]) => { logLines.push(args.map(String).join(" ")); });
   vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => { logLines.push(args.map((arg) => JSON.stringify(arg)).join(" ")); });
+  const legacySalt = randomBytes(16);
+  await databasePool.query(`
+    CREATE TABLE integration_clients (
+      client_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, secret_hash TEXT NOT NULL,
+      scopes TEXT NOT NULL DEFAULT 'students:write students:launch staff:launch assessments:write',
+      status BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await databasePool.query("INSERT INTO integration_clients (client_id, tenant_id, secret_hash, scopes) VALUES ($1, $2, $3, $4)", [
+    LEGACY_CLIENT_ID, TENANT,
+    `scrypt$${legacySalt.toString("base64url")}$${scryptSync(LEGACY_SECRET, legacySalt, 32).toString("base64url")}`,
+    "students:write results:read",
+  ]);
+  await databasePool.query(`
+    CREATE TABLE integration_launch_tickets (
+      token_hash CHAR(64) PRIMARY KEY, tenant_id TEXT NOT NULL, external_student_id TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL, used_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      kind TEXT NOT NULL DEFAULT 'student'
+    )
+  `);
   await ensureIntegrationSchema();
   await databasePool.query(`
     INSERT INTO integration_clients (client_id, client_secret_hash, tenant_id, scopes)
@@ -193,11 +220,21 @@ describe("POST /api/integrations/oauth/token", () => {
     expect(audience.status).toBe(400);
   });
 
-  it("rate-limits token requests", async () => {
+  it("blocks repeated failures for one client, and limits all token requests per IP", async () => {
+    const attempt = (clientId: string, address: string) => {
+      const request = tokenRequest({ grant_type: "client_credentials" }, basicAuth(clientId, "wrong"));
+      request.headers.set("x-forwarded-for", address);
+      return tokenPost(request);
+    };
+
+    const failures: number[] = [];
+    for (let index = 0; index < 11; index += 1) failures.push((await attempt(CLIENT_ID, "203.0.113.10")).status);
+    expect(failures.slice(0, 10).every((status) => status === 401)).toBe(true);
+    expect(failures[10]).toBe(429);
+
+    resetRateLimits();
     const statuses: number[] = [];
-    for (let attempt = 0; attempt < 31; attempt += 1) {
-      statuses.push((await tokenPost(tokenRequest({ grant_type: "client_credentials" }, basicAuth(CLIENT_ID, "wrong")))).status);
-    }
+    for (let index = 0; index < 31; index += 1) statuses.push((await attempt(`client-${index}`, "203.0.113.11")).status);
     expect(statuses.slice(0, 30).every((status) => status === 401)).toBe(true);
     expect(statuses[30]).toBe(429);
   });
@@ -254,7 +291,7 @@ describe("PUT /api/integrations/v1/assessments", () => {
     const created = await putAssessment(token);
     expect(created.status).toBe(201);
     const createdBody = await created.json();
-    expect(createdBody).toEqual({ ok: true, assessment_id: expect.any(Number), external_assessment_id: "EXAM-1" });
+    expect(createdBody).toEqual({ ok: true, result: "created", assessment_id: expect.any(Number), external_assessment_id: "EXAM-1", status: "active" });
 
     await databasePool.query(`UPDATE assessment SET sections = $2::jsonb, pass_mark = 5 WHERE id = $1`, [
       createdBody.assessment_id,
@@ -263,22 +300,24 @@ describe("PUT /api/integrations/v1/assessments", () => {
 
     const updated = await putAssessment(token, { name: "Algorithms II", total_time: 120 });
     expect(updated.status).toBe(200);
-    expect(await updated.json()).toEqual({ ok: true, assessment_id: createdBody.assessment_id, external_assessment_id: "EXAM-1" });
+    expect(await updated.json()).toEqual({ ok: true, result: "updated", assessment_id: createdBody.assessment_id, external_assessment_id: "EXAM-1", status: "active" });
     const row = await databasePool.query("SELECT name, total_time, sections, pass_mark FROM assessment WHERE id = $1", [createdBody.assessment_id]);
     expect(row.rows[0]).toMatchObject({ name: "Algorithms II", total_time: 120 });
     expect(row.rows[0].sections).toHaveLength(1);
     expect(Number(row.rows[0].pass_mark)).toBe(5);
   });
 
-  it("rejects invalid assessments with 422 using the portal's validation rules", async () => {
+  it("rejects invalid assessments", async () => {
     const token = await getToken("assessments:write");
-    const response = await putAssessment(token, {
-      external_assessment_id: "EXAM-BAD", start_date: "2026-11-10T12:00:00Z", end_date: "2026-11-10T09:00:00Z", total_time: 0,
+    const dates = await putAssessment(token, {
+      external_assessment_id: "EXAM-BAD", start_date: "2026-11-10T12:00:00Z", end_date: "2026-11-10T09:00:00Z",
     });
-    expect(response.status).toBe(422);
-    const body = await response.json();
-    expect(body.error_description).toContain("End Date must be later than Start Date.");
-    expect(body.error_description).toContain("total_time");
+    expect(dates.status).toBe(400);
+    expect((await dates.json()).error_description).toContain("end_date");
+
+    const duration = await putAssessment(token, { external_assessment_id: "EXAM-BAD", total_time: 0 });
+    expect(duration.status).toBe(400);
+    expect((await duration.json()).error_description).toContain("total_time");
   });
 });
 
@@ -291,6 +330,8 @@ describe("POST /api/integrations/v1/students", () => {
     const body = await response.json();
     expect(body).toEqual({
       ok: true,
+      result: "created",
+      status: "active",
       external_student_id: "ENR-2026-0001",
       candidate_id: expect.stringMatching(/^\d{6}$/),
       assigned_assessments: 1,
@@ -356,7 +397,7 @@ describe("POST /api/integrations/v1/students", () => {
   it("reports every assessment as unmapped when none are known", async () => {
     const token = await getToken();
     const response = await postStudent(token, studentPayload({
-      external_student_id: "ENR-UNK", candidate_id: "ENR-UNK", assigned_assessments: [{ ums_assessment_id: "NOPE" }],
+      external_student_id: "ENR-UNK", candidate_id: "ENR-UNK", assigned_assessments: [{ ums_assessment_id: "NOPE", name: "No such exam", examination: "None" }],
     }));
     expect(response.status).toBe(201);
     expect(await response.json()).toMatchObject({ assigned_assessments: 0, unmapped_assessments: ["NOPE"] });
@@ -370,13 +411,13 @@ describe("POST /api/integrations/v1/students", () => {
     // A non-object body has no tenant_id, which the authorization layer rejects first.
     expect(notJson.status).toBe(400);
 
-    const invalid = await postStudent(token, studentPayload({ external_student_id: "", status: "archived", email: "nope" }));
-    expect(invalid.status).toBe(422);
-    const body = await invalid.json();
-    expect(body.ok).toBe(false);
-    expect(body.error_description).toContain("external_student_id");
-    expect(body.error_description).toContain("status");
-    expect(body.error_description).toContain("email");
+    for (const [field, invalidValue] of [["external_student_id", ""], ["status", "archived"], ["email", "nope"]] as const) {
+      const invalid = await postStudent(token, studentPayload({ [field]: invalidValue }));
+      expect(invalid.status).toBe(400);
+      const body = await invalid.json();
+      expect(body.ok).toBe(false);
+      expect(body.error_description).toContain(field);
+    }
   });
 });
 
@@ -389,7 +430,12 @@ describe("student launch tickets and /launch", () => {
     }).request);
     expect(response.status).toBe(200);
     const body = await response.json();
-    expect(body).toEqual({ ok: true, launch_url: expect.stringMatching(/^https:\/\/exam\.example\.edu\/launch\?ticket=[A-Za-z0-9_-]{43}$/), expires_at: expect.any(String) });
+    expect(body).toEqual({
+      ok: true,
+      launch_url: expect.stringMatching(/^https:\/\/exam\.example\.edu\/launch\?ticket=[A-Za-z0-9_-]{43}$/),
+      expires_at: expect.any(String),
+      expires_in: 90,
+    });
     const lifetime = new Date(body.expires_at).getTime() - Date.now();
     expect(lifetime).toBeGreaterThan(80_000);
     expect(lifetime).toBeLessThanOrEqual(90_000);
@@ -408,6 +454,22 @@ describe("student launch tickets and /launch", () => {
     const reused = await launchGet(new Request(`${ORIGIN}/launch${launchUrl.search}`));
     expect(reused.status).toBe(401);
     expect((await reused.json()).error).toBe("invalid_ticket");
+  });
+
+  it("also redeems tickets through /api/auth/launch, sending failures to the login page", async () => {
+    const token = await getToken();
+    const response = await launchTicketsPost(apiRequest("POST", "/api/integrations/v1/launch-tickets", {
+      token, body: { tenant_id: TENANT, external_student_id: "ENR-SSO" },
+    }).request);
+    const { search } = new URL((await response.json()).launch_url);
+    const redeemed = await authLaunchGet(new Request(`${ORIGIN}/api/auth/launch${search}`));
+    expect(redeemed.status).toBe(307);
+    expect(redeemed.headers.get("location")).toBe(`${PORTAL_URL}/`);
+    expect(cookieFrom(redeemed)).not.toBe("");
+
+    const reused = await authLaunchGet(new Request(`${ORIGIN}/api/auth/launch${search}`));
+    expect(reused.headers.get("location")).toBe(`${PORTAL_URL}/?sso_error=expired`);
+    expect(reused.headers.get("set-cookie")).toBeNull();
   });
 
   it("rejects an expired ticket", async () => {
@@ -451,23 +513,38 @@ describe("POST /api/integrations/v1/staff-launch-tickets", () => {
     const first = await staffLaunchTicketsPost(apiRequest("POST", "/api/integrations/v1/staff-launch-tickets", { token, body: staff }).request);
     expect(first.status).toBe(200);
     const body = await first.json();
-    expect(body).toEqual({ ok: true, launch_url: expect.stringMatching(/^https:\/\/exam\.example\.edu\/launch\?ticket=/) });
+    expect(body).toEqual({ ok: true, launch_url: expect.stringMatching(/^https:\/\/exam\.example\.edu\/launch\?ticket=/), expires_in: 90 });
 
     const second = await staffLaunchTicketsPost(apiRequest("POST", "/api/integrations/v1/staff-launch-tickets", {
       token, body: { ...staff, name: "Dr. A. Rao" },
     }).request);
     expect(second.status).toBe(200);
     const users = await databasePool.query("SELECT name, role FROM users WHERE external_user_id = 'ums-user:42'");
-    expect(users.rows).toEqual([{ name: "Dr. A. Rao", role: "UMS Staff" }]);
+    expect(users.rows).toEqual([{ name: "Dr. A. Rao", role: "UMS Academic Staff" }]);
 
     const redeemed = await launchGet(new Request(`${ORIGIN}/launch${new URL(body.launch_url).search}`));
     expect(redeemed.status).toBe(302);
     const cookie = cookieFrom(redeemed);
     const session = await sessionGet(new Request(`${ORIGIN}/api/auth/session`, { headers: { cookie } }));
-    expect((await session.json()).user).toMatchObject({ email: "rao@example.edu", role: "UMS Staff" });
-    // Restricted: not an administrator.
-    const adminOnly = await assessmentsAdminGet(new Request(`${ORIGIN}/api/assessments`, { headers: { cookie } }));
-    expect(adminOnly.status).toBe(403);
+    expect((await session.json()).user).toMatchObject({ email: "rao@example.edu", role: "UMS Academic Staff" });
+    // Restricted on the server: authoring is allowed, everything else is refused.
+    expect((await assessmentsAdminGet(new Request(`${ORIGIN}/api/assessments`, { headers: { cookie } }))).status).toBe(200);
+    expect((await usersGet(new Request(`${ORIGIN}/api/users`, { headers: { cookie } }))).status).toBe(403);
+  });
+
+  it("keeps a role set by an administrator and refuses a deactivated account", async () => {
+    const token = await getToken();
+    const body = { ...staff, external_user_id: "ums-user:43", email: "kept@example.edu" };
+    expect((await staffLaunchTicketsPost(apiRequest("POST", "/api/integrations/v1/staff-launch-tickets", { token, body }).request)).status).toBe(200);
+    await databasePool.query("UPDATE users SET role = 'Evaluator' WHERE external_user_id = 'ums-user:43'");
+    expect((await staffLaunchTicketsPost(apiRequest("POST", "/api/integrations/v1/staff-launch-tickets", { token, body }).request)).status).toBe(200);
+    const row = await databasePool.query("SELECT role FROM users WHERE external_user_id = 'ums-user:43'");
+    expect(row.rows[0].role).toBe("Evaluator");
+
+    await databasePool.query("UPDATE users SET status = FALSE WHERE external_user_id = 'ums-user:43'");
+    const inactive = await staffLaunchTicketsPost(apiRequest("POST", "/api/integrations/v1/staff-launch-tickets", { token, body }).request);
+    expect(inactive.status).toBe(403);
+    expect((await inactive.json()).error).toBe("user_inactive");
   });
 
   it("returns 409 when a different, non-UMS user already owns the email", async () => {
@@ -482,12 +559,12 @@ describe("POST /api/integrations/v1/staff-launch-tickets", () => {
     expect((await response.json()).error).toBe("email_conflict");
   });
 
-  it("returns 422 for a malformed external_user_id and 403 without the staff:launch scope", async () => {
+  it("returns 400 for a missing external_user_id and 403 without the staff:launch scope", async () => {
     const token = await getToken();
     const invalid = await staffLaunchTicketsPost(apiRequest("POST", "/api/integrations/v1/staff-launch-tickets", {
-      token, body: { ...staff, external_user_id: "42" },
+      token, body: { ...staff, external_user_id: "" },
     }).request);
-    expect(invalid.status).toBe(422);
+    expect(invalid.status).toBe(400);
 
     const limited = await getToken("students:launch");
     const forbidden = await staffLaunchTicketsPost(apiRequest("POST", "/api/integrations/v1/staff-launch-tickets", { token: limited, body: staff }).request);
@@ -551,6 +628,123 @@ describe("GET /api/integrations/v1/results", () => {
       token: await getToken("students:write"),
     }).request);
     expect(noScope.status).toBe(403);
+  });
+});
+
+describe("assessment matching", () => {
+  it("matches a unique unclaimed assessment by name, and lets an administrator remap it", async () => {
+    const token = await getToken();
+    const inserted = await databasePool.query(`
+      INSERT INTO assessment (examination, name) VALUES ('Semester 5', 'Portal Authored'), ('Semester 5', 'Other Paper') RETURNING id
+    `);
+    const [firstId, secondId] = inserted.rows.map((row) => Number(row.id));
+    const created = await postStudent(token, studentPayload({
+      external_student_id: "ENR-MAP", candidate_id: "ENR-MAP",
+      assigned_assessments: [{ ums_assessment_id: "EXT-5", name: "Portal Authored", examination: "Semester 5" }],
+    }));
+    expect(await created.json()).toMatchObject({ assigned_assessments: 1, unmapped_assessments: [] });
+
+    await databasePool.query(`
+      INSERT INTO users (name, email, password, role, mobile) VALUES ('Map Admin', 'map-admin@example.edu', 'x', 'Admin', '')
+    `);
+    const adminRow = await databasePool.query("SELECT id FROM users WHERE email = 'map-admin@example.edu'");
+    const cookie = `ums_exam_session=${await createSession("user", Number(adminRow.rows[0].id))}`;
+    const remap = (headers: Record<string, string>) => assessmentMappingsPut(new Request(`${ORIGIN}/api/integrations/v1/assessment-mappings`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify({ tenant_id: TENANT, external_assessment_id: "EXT-5", assessment_id: secondId }),
+    }));
+    // This route is for administrators using their session, not bearer tokens.
+    expect((await remap({ authorization: `Bearer ${token}` })).status).toBe(401);
+
+    process.env.INTEGRATION_ISSUER_URL = PORTAL_URL;
+    process.env.INTEGRATION_TENANTS = JSON.stringify([{ tenant_id: TENANT, builtin: true }]);
+    try {
+      const mapped = await remap({ cookie });
+      expect(mapped.status).toBe(200);
+      expect(await mapped.json()).toEqual({ ok: true, updated_students: 1 });
+    } finally {
+      delete process.env.INTEGRATION_ISSUER_URL;
+      delete process.env.INTEGRATION_TENANTS;
+    }
+    const assignments = await databasePool.query(`
+      SELECT assignment.assessment_id FROM assessment_candidate_direct_assignment AS assignment
+      JOIN "Candidate Information" AS candidate ON candidate.id = assignment.candidate_id
+      WHERE candidate.external_student_id = 'ENR-MAP'
+    `);
+    expect(assignments.rows.map((row) => Number(row.assessment_id))).toEqual([secondId]);
+    expect(firstId).not.toBe(secondId);
+  });
+});
+
+describe("clients from the earlier built-in issuer", () => {
+  it("keep working after the table upgrade", async () => {
+    const response = await tokenPost(tokenRequest({ grant_type: "client_credentials" }, basicAuth(LEGACY_CLIENT_ID, LEGACY_SECRET)));
+    expect(response.status).toBe(200);
+    const token = (await response.json()).access_token as string;
+    const allowed = await resultsGet(apiRequest("GET", "/api/integrations/v1/results?external_assessment_id=EXAM-1", { token }).request);
+    expect(allowed.status).toBe(200);
+    const notGranted = await launchTicketsPost(apiRequest("POST", "/api/integrations/v1/launch-tickets", {
+      token, body: { tenant_id: TENANT, external_student_id: "ENR-SSO" },
+    }).request);
+    expect(notGranted.status).toBe(403);
+  });
+
+  it("can authenticate with credentials in the form body", async () => {
+    const response = await tokenPost(new Request(`${ORIGIN}/api/integrations/oauth/token`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ grant_type: "client_credentials", client_id: LEGACY_CLIENT_ID, client_secret: LEGACY_SECRET }).toString(),
+    }));
+    expect(response.status).toBe(200);
+  });
+});
+
+describe("built-in JWT issuer", () => {
+  beforeAll(() => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    process.env.INTEGRATION_SIGNING_KEY = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    process.env.INTEGRATION_ISSUER_URL = PORTAL_URL;
+    process.env.INTEGRATION_TENANTS = JSON.stringify([{ tenant_id: TENANT, builtin: true }, { tenant_id: "other-tenant", builtin: true }]);
+  });
+
+  afterAll(() => {
+    delete process.env.INTEGRATION_SIGNING_KEY;
+    delete process.env.INTEGRATION_ISSUER_URL;
+    delete process.env.INTEGRATION_TENANTS;
+  });
+
+  it("issues signed JWTs that the v1 routes accept for their own tenant only", async () => {
+    const response = await tokenPost(tokenRequest({ grant_type: "client_credentials" }));
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.expires_in).toBe(600);
+    const token = body.access_token as string;
+    expect(token.split(".")).toHaveLength(3);
+
+    const student = await postStudent(token, studentPayload({ external_student_id: "ENR-JWT", candidate_id: "ENR-JWT" }));
+    expect(student.status).toBe(201);
+    const results = await resultsGet(apiRequest("GET", "/api/integrations/v1/results?external_assessment_id=EXAM-1", { token }).request);
+    expect(results.status).toBe(200);
+
+    const otherTenant = await postStudent(token, studentPayload({ tenant_id: "other-tenant", external_student_id: "ENR-JWT-2", candidate_id: "ENR-JWT-2" }));
+    expect(otherTenant.status).toBe(403);
+    const unknownTenant = await postStudent(token, studentPayload({ tenant_id: "never-configured", external_student_id: "ENR-JWT-3", candidate_id: "ENR-JWT-3" }));
+    expect(unknownTenant.status).toBe(401);
+  });
+
+  it("refuses a narrower token on a route it lacks the scope for, and tampered tokens", async () => {
+    const token = await getToken("results:read");
+    expect((await postStudent(token, studentPayload())).status).toBe(403);
+    const [header, payload] = token.split(".");
+    expect((await postStudent(`${header}.${payload}.AAAA`, studentPayload())).status).toBe(401);
+  });
+
+  it("revokes clients whose tenant is no longer listed", async () => {
+    process.env.INTEGRATION_TENANTS = JSON.stringify([{ tenant_id: "other-tenant", builtin: true }]);
+    const response = await tokenPost(tokenRequest({ grant_type: "client_credentials" }));
+    expect(response.status).toBe(401);
+    process.env.INTEGRATION_TENANTS = JSON.stringify([{ tenant_id: TENANT, builtin: true }, { tenant_id: "other-tenant", builtin: true }]);
   });
 });
 

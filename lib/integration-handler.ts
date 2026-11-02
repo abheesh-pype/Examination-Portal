@@ -1,5 +1,8 @@
 import { authorizeApiRequest } from "@/lib/auth";
-import { integrationError, logIntegrationCall, type IntegrationClient } from "@/lib/integrations";
+import { integrationError, logIntegrationCall, type IntegrationClient } from "@/lib/integrations/m2m";
+import { PayloadError } from "@/lib/integrations/payload";
+import { integrationErrorResponse } from "@/lib/integrations/request";
+import { IntegrationError } from "@/lib/integrations/tokens";
 
 /** Authorizes a /api/integrations/v1/* request, runs the handler, and logs the outcome. */
 export async function handleIntegrationRequest(
@@ -20,10 +23,14 @@ export async function handleIntegrationRequest(
       response = await handler(authorization.client);
     }
   } catch (error) {
-    // Log only the error class and code: driver messages can echo student data.
-    const code = error && typeof error === "object" && "code" in error ? String(error.code) : undefined;
-    console.error("Integration request failed", { name: error instanceof Error ? error.name : "Error", code });
-    response = integrationError(500, "server_error", "The request could not be completed.");
+    if (error instanceof IntegrationError || error instanceof PayloadError) {
+      response = integrationErrorResponse(error, "Integration request failed");
+    } else {
+      // Log only the error class and code: driver messages can echo student data.
+      const code = error && typeof error === "object" && "code" in error ? String(error.code) : undefined;
+      console.error("Integration request failed", { name: error instanceof Error ? error.name : "Error", code });
+      response = integrationError(500, "server_error", "The request could not be completed.");
+    }
   }
   logIntegrationCall({
     clientId,

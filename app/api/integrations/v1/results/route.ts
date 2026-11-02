@@ -3,7 +3,7 @@ import { calculateResult } from "@/lib/assessment-marks";
 import { isCandidateIdFieldName } from "@/lib/candidate-ids";
 import { databasePool } from "@/lib/db";
 import { handleIntegrationRequest } from "@/lib/integration-handler";
-import { ensureIntegrationSchema, integrationError } from "@/lib/integrations";
+import { ensureIntegrationSchema, integrationError } from "@/lib/integrations/m2m";
 
 export const runtime = "nodejs";
 
@@ -32,9 +32,14 @@ export async function GET(request: Request) {
 
     await ensureIntegrationSchema();
     const assessment = await databasePool.query(`
-      SELECT id
+      SELECT assessment.id
       FROM assessment
-      WHERE tenant_id = $1 AND external_assessment_id = $2
+      LEFT JOIN integration_assessment_map AS map
+        ON map.assessment_id = assessment.id AND map.tenant_id = $1 AND map.external_assessment_id = $2
+      WHERE map.assessment_id IS NOT NULL
+         OR (assessment.tenant_id = $1 AND assessment.external_assessment_id = $2)
+      ORDER BY map.assessment_id IS NULL
+      LIMIT 1
     `, [client.tenantId, externalAssessmentId]);
     if (!assessment.rowCount) {
       return integrationError(404, "assessment_not_found", "No assessment is published with that external_assessment_id.");

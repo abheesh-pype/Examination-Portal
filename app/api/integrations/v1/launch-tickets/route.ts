@@ -1,15 +1,12 @@
 import { NextResponse } from "next/server";
-import { databasePool } from "@/lib/db";
 import { handleIntegrationRequest, readJsonObject } from "@/lib/integration-handler";
-import {
-  createLaunchTicket,
-  ensureIntegrationSchema,
-  getPortalOrigin,
-  integrationError,
-} from "@/lib/integrations";
+import { getPortalOrigin, integrationError } from "@/lib/integrations/m2m";
+import { createLaunchTicket, LAUNCH_TICKET_TTL_SECONDS } from "@/lib/integrations/store";
 
 export const runtime = "nodejs";
 
+// Machine-to-machine: the institution system (after authenticating the student itself) asks for a single-use
+// link that signs that provisioned student in. The student never types credentials here.
 export async function POST(request: Request) {
   return handleIntegrationRequest(request, async (client) => {
     const { body } = await readJsonObject(request);
@@ -23,27 +20,15 @@ export async function POST(request: Request) {
       return integrationError(503, "portal_url_not_configured", "PORTAL_PUBLIC_URL must be set to the portal's HTTPS origin.");
     }
 
-    await ensureIntegrationSchema();
-    const candidate = await databasePool.query(`
-      SELECT id
-      FROM "Candidate Information"
-      WHERE record_type = 'candidate' AND status = TRUE
-        AND tenant_id = $1 AND external_student_id = $2
-    `, [client.tenantId, externalStudentId]);
-    if (!candidate.rowCount) {
+    const created = await createLaunchTicket(client.tenantId, externalStudentId, client.clientId);
+    if (!created) {
       return integrationError(404, "student_not_found", "The student has not been provisioned or is inactive.");
     }
-
-    const db = await databasePool.connect();
-    try {
-      const { ticket, expiresAt } = await createLaunchTicket(db, client, "candidate", Number(candidate.rows[0].id));
-      return NextResponse.json({
-        ok: true,
-        launch_url: `${origin}/launch?ticket=${ticket}`,
-        expires_at: expiresAt.toISOString(),
-      }, { headers: { "Cache-Control": "no-store" } });
-    } finally {
-      db.release();
-    }
+    return NextResponse.json({
+      ok: true,
+      launch_url: `${origin}/launch?ticket=${created.ticket}`,
+      expires_at: created.expiresAt.toISOString(),
+      expires_in: LAUNCH_TICKET_TTL_SECONDS,
+    }, { headers: { "Cache-Control": "no-store" } });
   });
 }

@@ -88,7 +88,7 @@ test("payload: malformed bodies are rejected", () => {
 
 test("staff payload: valid mapped and lower-cased; bad input rejected", () => {
   const staff = validateStaffPayload({ tenant_id: "t", external_user_id: "ums-user:1", name: " Ann ", email: "Ann@X.edu", role: "admin" });
-  assert.deepEqual(staff, { tenantId: "t", externalUserId: "ums-user:1", name: "Ann", email: "ann@x.edu" });
+  assert.deepEqual(staff, { tenantId: "t", externalUserId: "ums-user:1", name: "Ann", email: "ann@x.edu", role: "admin" });
   for (const bad of [null, {}, { tenant_id: "t", external_user_id: "u", name: "A", email: "nope" }, { tenant_id: "t", external_user_id: "", name: "A", email: "a@b.co" }]) {
     assert.throws(() => validateStaffPayload(bad), { name: "Error" });
   }

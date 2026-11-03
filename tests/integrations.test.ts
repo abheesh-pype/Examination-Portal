@@ -9,6 +9,7 @@ vi.mock("@/lib/db", async () => {
 import { POST as tokenPost } from "@/app/api/integrations/oauth/token/route";
 import { POST as studentsPost } from "@/app/api/integrations/v1/students/route";
 import { POST as launchTicketsPost } from "@/app/api/integrations/v1/launch-tickets/route";
+import { GET as rolesGet } from "@/app/api/integrations/v1/roles/route";
 import { POST as staffLaunchTicketsPost } from "@/app/api/integrations/v1/staff-launch-tickets/route";
 import { PUT as assessmentsPut } from "@/app/api/integrations/v1/assessments/route";
 import { GET as resultsGet } from "@/app/api/integrations/v1/results/route";
@@ -530,6 +531,29 @@ describe("POST /api/integrations/v1/staff-launch-tickets", () => {
     // Full administrator access, like a portal administrator.
     expect((await assessmentsAdminGet(new Request(`${ORIGIN}/api/assessments`, { headers: { cookie } }))).status).toBe(200);
     expect((await usersGet(new Request(`${ORIGIN}/api/users`, { headers: { cookie } }))).status).toBe(200);
+  });
+
+  it("lists assignable roles and signs staff in with the role chosen in UMS", async () => {
+    await databasePool.query("INSERT INTO roles (role_name, administrator_access, dashboard) VALUES ('Evaluator', FALSE, TRUE), ('Invigilator', FALSE, TRUE)");
+    const token = await getToken();
+    const listed = await rolesGet(apiRequest("GET", `/api/integrations/v1/roles?tenant_id=${TENANT}`, { token }).request);
+    expect(listed.status).toBe(200);
+    const names = (await listed.json()).roles.map((role: { name: string }) => role.name);
+    expect(names).toEqual(expect.arrayContaining(["UMS Administrator", "Evaluator", "Invigilator"]));
+    expect(names).not.toContain("UMS Academic Staff");
+
+    const body = { ...staff, external_user_id: "ums-user:45", email: "eval@example.edu", role: "evaluator" };
+    expect((await staffLaunchTicketsPost(apiRequest("POST", "/api/integrations/v1/staff-launch-tickets", { token, body }).request)).status).toBe(200);
+    const row = await databasePool.query("SELECT role FROM users WHERE external_user_id = 'ums-user:45'");
+    expect(row.rows[0].role).toBe("Evaluator");
+
+    // A later change in UMS replaces the role; an unknown role is refused and changes nothing.
+    await staffLaunchTicketsPost(apiRequest("POST", "/api/integrations/v1/staff-launch-tickets", { token, body: { ...body, role: "Invigilator" } }).request);
+    expect((await databasePool.query("SELECT role FROM users WHERE external_user_id = 'ums-user:45'")).rows[0].role).toBe("Invigilator");
+    const unknown = await staffLaunchTicketsPost(apiRequest("POST", "/api/integrations/v1/staff-launch-tickets", { token, body: { ...body, role: "Nope" } }).request);
+    expect(unknown.status).toBe(400);
+    expect((await unknown.json()).error).toBe("unknown_role");
+    expect((await databasePool.query("SELECT role FROM users WHERE external_user_id = 'ums-user:45'")).rows[0].role).toBe("Invigilator");
   });
 
   it("upgrades an account that still has the former restricted role", async () => {

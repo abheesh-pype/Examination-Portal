@@ -8,6 +8,7 @@ import {
   provisionStaff,
   StaffConflictError,
   StaffInactiveError,
+  UnknownRoleError,
 } from "@/lib/integrations/store";
 
 export const runtime = "nodejs";
@@ -34,6 +35,7 @@ export async function POST(request: Request) {
       }, { headers: { "Cache-Control": "no-store" } });
     } catch (error) {
       if (error instanceof StaffConflictError) return integrationError(409, "email_conflict", error.message);
+      if (error instanceof UnknownRoleError) return integrationError(400, "unknown_role", error.message);
       if (error instanceof StaffInactiveError) return integrationError(403, "user_inactive", error.message);
       throw error;
     }

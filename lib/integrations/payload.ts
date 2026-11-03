@@ -68,7 +68,8 @@ export function validateStudentPayload(raw: unknown): ProvisionedStudent {
   };
 }
 
-export type StaffPayload = { tenantId: string; externalUserId: string; name: string; email: string };
+/** `role` is the portal role name chosen in the institution system; null means the default administrator role. */
+export type StaffPayload = { tenantId: string; externalUserId: string; name: string; email: string; role: string | null };
 
 /** Staff (e.g. a university's Academic Admin) asking for a portal sign-in. */
 export function validateStaffPayload(raw: unknown): StaffPayload {
@@ -79,7 +80,11 @@ export function validateStaffPayload(raw: unknown): StaffPayload {
   if (!text(body.external_user_id, 100)) throw bad("external_user_id is required");
   if (!text(body.name, 200)) throw bad("name is required");
   if (typeof body.email !== "string" || body.email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email.trim())) throw bad("A valid email is required");
-  return { tenantId: body.tenant_id.trim(), externalUserId: body.external_user_id.trim(), name: body.name.trim(), email: body.email.trim().toLowerCase() };
+  if (body.role != null && !text(body.role, 100)) throw bad("role must be a role name");
+  return {
+    tenantId: body.tenant_id.trim(), externalUserId: body.external_user_id.trim(), name: body.name.trim(),
+    email: body.email.trim().toLowerCase(), role: typeof body.role === "string" ? body.role.trim() : null,
+  };
 }
 
 export type AssessmentUpsert = {

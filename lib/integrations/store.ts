@@ -295,6 +295,40 @@ export const INTEGRATION_ADMIN_ROLE = "UMS Administrator";
 
 export class StaffConflictError extends Error {}
 export class StaffInactiveError extends Error {}
+export class UnknownRoleError extends Error {}
+
+async function ensureRolesTables() {
+  await databasePool.query(`
+    CREATE TABLE IF NOT EXISTS roles (
+      id SERIAL PRIMARY KEY, role_name TEXT NOT NULL, administrator_access BOOLEAN NOT NULL DEFAULT FALSE, dashboard BOOLEAN NOT NULL DEFAULT FALSE,
+      permissions JSONB NOT NULL DEFAULT '{}', status BOOLEAN NOT NULL DEFAULT TRUE, created_on TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`);
+}
+
+type RoleQueryClient = { query: (text: string, values?: unknown[]) => Promise<{ rowCount: number | null; rows: any[] }> };
+
+/** The administrator role used for UMS admins: created on first use so a fresh portal always offers it. */
+async function ensureAdminRole(client: RoleQueryClient) {
+  const role = await client.query("SELECT id FROM roles WHERE role_name = $1 ORDER BY id LIMIT 1", [INTEGRATION_ADMIN_ROLE]);
+  if (role.rowCount) {
+    await client.query("UPDATE roles SET administrator_access = TRUE, dashboard = TRUE, status = TRUE WHERE id = $1", [role.rows[0].id]);
+  } else {
+    await client.query("INSERT INTO roles (role_name, administrator_access, dashboard, permissions) VALUES ($1, TRUE, TRUE, '{}'::jsonb)", [INTEGRATION_ADMIN_ROLE]);
+  }
+}
+
+/** Portal roles the institution system may assign to its users (active roles, never the former restricted one). */
+export async function listAssignableRoles() {
+  await ensureRolesTables();
+  await ensureAdminRole(databasePool);
+  const result = await databasePool.query(
+    `SELECT BTRIM(role_name) AS name, administrator_access FROM roles
+     WHERE status = TRUE AND BTRIM(role_name) <> '' AND BTRIM(role_name) <> $1 ORDER BY administrator_access DESC, role_name`, [INTEGRATION_STAFF_ROLE]);
+  const seen = new Set<string>();
+  return result.rows
+    .filter((row) => !seen.has(String(row.name).toLowerCase()) && seen.add(String(row.name).toLowerCase()))
+    .map((row) => ({ name: String(row.name), administrator_access: Boolean(row.administrator_access) }));
+}
 
 /**
  * Creates/updates the portal account for an institution staff member. Never adopts a pre-existing portal account:
@@ -317,11 +351,15 @@ export async function provisionStaff(staff: StaffPayload) {
   try {
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock(741923602)");
-    const role = await client.query("SELECT id FROM roles WHERE role_name = $1 ORDER BY id LIMIT 1", [INTEGRATION_ADMIN_ROLE]);
-    if (role.rowCount) {
-      await client.query("UPDATE roles SET administrator_access = TRUE, dashboard = TRUE, status = TRUE WHERE id = $1", [role.rows[0].id]);
-    } else {
-      await client.query("INSERT INTO roles (role_name, administrator_access, dashboard, permissions) VALUES ($1, TRUE, TRUE, '{}'::jsonb)", [INTEGRATION_ADMIN_ROLE]);
+    await ensureAdminRole(client);
+    // The role is chosen in the institution system and must be an active portal role; without one, the administrator role.
+    let roleName = INTEGRATION_ADMIN_ROLE;
+    if (staff.role) {
+      const wanted = await client.query(
+        "SELECT BTRIM(role_name) AS name FROM roles WHERE LOWER(BTRIM(role_name)) = LOWER($1) AND status = TRUE AND BTRIM(role_name) <> $2 ORDER BY id LIMIT 1",
+        [staff.role, INTEGRATION_STAFF_ROLE]);
+      if (!wanted.rowCount) throw new UnknownRoleError(`The Exam Portal has no active role named "${staff.role}"`);
+      roleName = String(wanted.rows[0].name);
     }
     const link = (await client.query(
       `SELECT u.id, u.status FROM users u LEFT JOIN integration_staff s ON s.user_row_id = u.id
@@ -331,18 +369,18 @@ export async function provisionStaff(staff: StaffPayload) {
     if (clash.rowCount) throw new StaffConflictError("A portal account with this email already exists");
     let userId: number;
     if (link) {
-      // A deactivated account stays deactivated, and a role set by a portal administrator is kept,
-      // except the former restricted role, which is upgraded to the administrator role.
+      // A deactivated account stays deactivated. The institution system decides the role when it names one;
+      // otherwise a role set in the portal is kept, except the former restricted role, which becomes the administrator role.
       if (!link.status) throw new StaffInactiveError("The linked portal account has been deactivated");
       userId = Number(link.id);
       await client.query(
         `UPDATE users SET name = $2, email = $3, verified = TRUE, tenant_id = $4, external_user_id = $5,
-           role = CASE WHEN BTRIM(role) = $6 THEN $7 ELSE role END WHERE id = $1`,
-        [userId, staff.name, staff.email, staff.tenantId, staff.externalUserId, INTEGRATION_STAFF_ROLE, INTEGRATION_ADMIN_ROLE]);
+           role = CASE WHEN $8::boolean OR BTRIM(role) = $6 THEN $7 ELSE role END WHERE id = $1`,
+        [userId, staff.name, staff.email, staff.tenantId, staff.externalUserId, INTEGRATION_STAFF_ROLE, roleName, Boolean(staff.role)]);
     } else {
       userId = Number((await client.query(
         "INSERT INTO users (name, email, password, role, mobile, status, verified, tenant_id, external_user_id) VALUES ($1,$2,$3,$4,'-',TRUE,TRUE,$5,$6) RETURNING id",
-        [staff.name, staff.email, unusablePassword, INTEGRATION_ADMIN_ROLE, staff.tenantId, staff.externalUserId])).rows[0].id);
+        [staff.name, staff.email, unusablePassword, roleName, staff.tenantId, staff.externalUserId])).rows[0].id);
     }
     await client.query(
       `INSERT INTO integration_staff (tenant_id, external_user_id, user_row_id) VALUES ($1,$2,$3)

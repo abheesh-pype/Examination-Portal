@@ -10,6 +10,7 @@ import { POST as tokenPost } from "@/app/api/integrations/oauth/token/route";
 import { POST as studentsPost } from "@/app/api/integrations/v1/students/route";
 import { POST as launchTicketsPost } from "@/app/api/integrations/v1/launch-tickets/route";
 import { GET as rolesGet } from "@/app/api/integrations/v1/roles/route";
+import { POST as staffRevocationsPost } from "@/app/api/integrations/v1/staff-revocations/route";
 import { POST as staffLaunchTicketsPost } from "@/app/api/integrations/v1/staff-launch-tickets/route";
 import { PUT as assessmentsPut } from "@/app/api/integrations/v1/assessments/route";
 import { GET as resultsGet } from "@/app/api/integrations/v1/results/route";
@@ -554,6 +555,29 @@ describe("POST /api/integrations/v1/staff-launch-tickets", () => {
     expect(unknown.status).toBe(400);
     expect((await unknown.json()).error).toBe("unknown_role");
     expect((await databasePool.query("SELECT role FROM users WHERE external_user_id = 'ums-user:45'")).rows[0].role).toBe("Invigilator");
+  });
+
+  it("offers the built-in roles, and revoking ends sessions and blocks access until UMS signs the person in again", async () => {
+    const token = await getToken();
+    const listed = await rolesGet(apiRequest("GET", `/api/integrations/v1/roles?tenant_id=${TENANT}`, { token }).request);
+    expect((await listed.json()).roles.map((role: { name: string }) => role.name)).toEqual(expect.arrayContaining(["Evaluator", "Invigilator"]));
+
+    const body = { ...staff, external_user_id: "ums-user:46", email: "revoke@example.edu" };
+    const launched = await staffLaunchTicketsPost(apiRequest("POST", "/api/integrations/v1/staff-launch-tickets", { token, body }).request);
+    const redeemed = await launchGet(new Request(`${ORIGIN}/launch${new URL((await launched.json()).launch_url).search}`));
+    const cookie = cookieFrom(redeemed);
+    const sessionUrl = `${ORIGIN}/api/auth/session`;
+    expect((await sessionGet(new Request(sessionUrl, { headers: { cookie } }))).status).toBe(200);
+
+    const revoke = (id: string) => staffRevocationsPost(apiRequest("POST", "/api/integrations/v1/staff-revocations", { token, body: { tenant_id: TENANT, external_user_id: id } }).request);
+    expect((await (await revoke("ums-user:46")).json())).toEqual({ ok: true, revoked: true });
+    expect((await sessionGet(new Request(sessionUrl, { headers: { cookie } }))).status).toBe(401);
+    expect((await (await revoke("ums-user:nobody")).json())).toEqual({ ok: true, revoked: false });
+
+    // A sign-in authorised by UMS brings the account back; one a portal administrator deactivated stays blocked.
+    expect((await staffLaunchTicketsPost(apiRequest("POST", "/api/integrations/v1/staff-launch-tickets", { token, body: { ...body, role: "Evaluator" } }).request)).status).toBe(200);
+    const row = await databasePool.query("SELECT role, status FROM users WHERE external_user_id = 'ums-user:46'");
+    expect(row.rows[0]).toEqual({ role: "Evaluator", status: true });
   });
 
   it("upgrades an account that still has the former restricted role", async () => {

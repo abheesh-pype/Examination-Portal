@@ -27,6 +27,7 @@ const integrationRouteScopes: Record<string, string> = {
   "POST /api/integrations/v1/launch-tickets": "students:launch",
   "POST /api/integrations/v1/staff-launch-tickets": "staff:launch",
   "GET /api/integrations/v1/roles": "staff:launch",
+  "POST /api/integrations/v1/staff-revocations": "staff:launch",
   "PUT /api/integrations/v1/assessments": "assessments:write",
   "GET /api/integrations/v1/results": "results:read",
 };
@@ -144,6 +145,8 @@ async function initializeIntegrationSchema() {
     )
   `);
   await databasePool.query("CREATE UNIQUE INDEX IF NOT EXISTS integration_staff_user_idx ON integration_staff (user_row_id)");
+  // Set when the institution system withdrew access; the next sign-in it authorises reactivates the account.
+  await databasePool.query("ALTER TABLE integration_staff ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ");
   await databasePool.query(`
     CREATE TABLE IF NOT EXISTS integration_identities (
       issuer TEXT NOT NULL,

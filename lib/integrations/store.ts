@@ -317,6 +317,8 @@ async function ensureAdminRole(client: RoleQueryClient) {
   }
 }
 
+const BUILT_IN_ROLES = ["Evaluator", "Invigilator"];
+
 /** Portal roles the institution system may assign to its users (active roles, never the former restricted one). */
 export async function listAssignableRoles() {
   await ensureRolesTables();
@@ -325,7 +327,9 @@ export async function listAssignableRoles() {
     `SELECT BTRIM(role_name) AS name, administrator_access FROM roles
      WHERE status = TRUE AND BTRIM(role_name) <> '' AND BTRIM(role_name) <> $1 ORDER BY administrator_access DESC, role_name`, [INTEGRATION_STAFF_ROLE]);
   const seen = new Set<string>();
-  return result.rows
+  // Evaluator and Invigilator are built into the portal (matched by name), so they are always assignable.
+  const rows = [...result.rows, ...BUILT_IN_ROLES.map((name) => ({ name, administrator_access: false }))];
+  return rows
     .filter((row) => !seen.has(String(row.name).toLowerCase()) && seen.add(String(row.name).toLowerCase()))
     .map((row) => ({ name: String(row.name), administrator_access: Boolean(row.administrator_access) }));
 }
@@ -358,23 +362,25 @@ export async function provisionStaff(staff: StaffPayload) {
       const wanted = await client.query(
         "SELECT BTRIM(role_name) AS name FROM roles WHERE LOWER(BTRIM(role_name)) = LOWER($1) AND status = TRUE AND BTRIM(role_name) <> $2 ORDER BY id LIMIT 1",
         [staff.role, INTEGRATION_STAFF_ROLE]);
-      if (!wanted.rowCount) throw new UnknownRoleError(`The Exam Portal has no active role named "${staff.role}"`);
-      roleName = String(wanted.rows[0].name);
+      const builtIn = BUILT_IN_ROLES.find((name) => name.toLowerCase() === staff.role!.toLowerCase());
+      if (!wanted.rowCount && !builtIn) throw new UnknownRoleError(`The Exam Portal has no active role named "${staff.role}"`);
+      roleName = wanted.rowCount ? String(wanted.rows[0].name) : builtIn!;
     }
     const link = (await client.query(
-      `SELECT u.id, u.status FROM users u LEFT JOIN integration_staff s ON s.user_row_id = u.id
+      `SELECT u.id, u.status, s.revoked_at FROM users u LEFT JOIN integration_staff s ON s.user_row_id = u.id
        WHERE (s.tenant_id = $1 AND s.external_user_id = $2) OR (u.tenant_id = $1 AND u.external_user_id = $2)
-       LIMIT 1`, [staff.tenantId, staff.externalUserId])).rows[0] as { id: number; status: boolean } | undefined;
+       LIMIT 1`, [staff.tenantId, staff.externalUserId])).rows[0] as { id: number; status: boolean; revoked_at: Date | null } | undefined;
     const clash = await client.query("SELECT 1 FROM users WHERE LOWER(email) = LOWER($1) AND id <> $2", [staff.email, link ? link.id : 0]);
     if (clash.rowCount) throw new StaffConflictError("A portal account with this email already exists");
     let userId: number;
     if (link) {
       // A deactivated account stays deactivated. The institution system decides the role when it names one;
       // otherwise a role set in the portal is kept, except the former restricted role, which becomes the administrator role.
-      if (!link.status) throw new StaffInactiveError("The linked portal account has been deactivated");
+      // An account the institution system revoked comes back with this sign-in; one a portal administrator deactivated does not.
+      if (!link.status && !link.revoked_at) throw new StaffInactiveError("The linked portal account has been deactivated");
       userId = Number(link.id);
       await client.query(
-        `UPDATE users SET name = $2, email = $3, verified = TRUE, tenant_id = $4, external_user_id = $5,
+        `UPDATE users SET status = TRUE, name = $2, email = $3, verified = TRUE, tenant_id = $4, external_user_id = $5,
            role = CASE WHEN $8::boolean OR BTRIM(role) = $6 THEN $7 ELSE role END WHERE id = $1`,
         [userId, staff.name, staff.email, staff.tenantId, staff.externalUserId, INTEGRATION_STAFF_ROLE, roleName, Boolean(staff.role)]);
     } else {
@@ -385,9 +391,33 @@ export async function provisionStaff(staff: StaffPayload) {
     await client.query(
       `INSERT INTO integration_staff (tenant_id, external_user_id, user_row_id) VALUES ($1,$2,$3)
        ON CONFLICT (tenant_id, external_user_id) DO UPDATE SET user_row_id = EXCLUDED.user_row_id`, [staff.tenantId, staff.externalUserId, userId]);
-    await client.query("UPDATE integration_staff SET updated_at = NOW() WHERE user_row_id = $1", [userId]);
+    await client.query("UPDATE integration_staff SET updated_at = NOW(), revoked_at = NULL WHERE user_row_id = $1", [userId]);
     await client.query("COMMIT");
     return userId;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Withdraws a staff member's portal access: deactivates the linked account and ends its sessions, so a tab that is
+ * already open stops working too. A later sign-in authorised by the institution system reactivates it.
+ */
+export async function revokeStaff(tenantId: string, externalUserId: string) {
+  await ensureIntegrationTables();
+  const client = await databasePool.connect();
+  try {
+    await client.query("BEGIN");
+    const link = (await client.query("SELECT user_row_id FROM integration_staff WHERE tenant_id = $1 AND external_user_id = $2", [tenantId, externalUserId])).rows[0];
+    if (!link) { await client.query("ROLLBACK"); return false; }
+    await client.query("UPDATE users SET status = FALSE WHERE id = $1", [link.user_row_id]);
+    await client.query("DELETE FROM ums_auth_sessions WHERE subject_type = 'user' AND subject_id = $1", [link.user_row_id]);
+    await client.query("UPDATE integration_staff SET revoked_at = NOW(), updated_at = NOW() WHERE tenant_id = $1 AND external_user_id = $2", [tenantId, externalUserId]);
+    await client.query("COMMIT");
+    return true;
   } catch (error) {
     await client.query("ROLLBACK").catch(() => undefined);
     throw error;

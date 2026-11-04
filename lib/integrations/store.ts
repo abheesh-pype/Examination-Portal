@@ -350,7 +350,7 @@ export async function provisionStaff(staff: StaffPayload) {
       id SERIAL PRIMARY KEY, role_name TEXT NOT NULL, administrator_access BOOLEAN NOT NULL DEFAULT FALSE, dashboard BOOLEAN NOT NULL DEFAULT FALSE,
       permissions JSONB NOT NULL DEFAULT '{}', status BOOLEAN NOT NULL DEFAULT TRUE, created_on TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`);
-  const unusablePassword = await hashPassword(randomBytes(32).toString("hex")); // staff sign in only through the institution system
+  const unusablePassword = await hashPassword(randomBytes(32).toString("hex")); // until they choose one in the institution system, staff sign in through it
   const client = await databasePool.connect();
   try {
     await client.query("BEGIN");
@@ -424,6 +424,21 @@ export async function revokeStaff(tenantId: string, externalUserId: string) {
   } finally {
     client.release();
   }
+}
+
+/**
+ * Lets a person chosen in the institution system also sign in on the portal's own login page: sets the password of
+ * their linked account (email = the institution email). Only an active account that the institution system provisioned.
+ */
+export async function setStaffPassword(tenantId: string, externalUserId: string, password: string) {
+  await ensureIntegrationTables();
+  const row = (await databasePool.query(
+    `SELECT u.id, u.status FROM integration_staff s JOIN users u ON u.id = s.user_row_id
+     WHERE s.tenant_id = $1 AND s.external_user_id = $2`, [tenantId, externalUserId])).rows[0] as { id: number; status: boolean } | undefined;
+  if (!row) return "not_found" as const;
+  if (!row.status) return "inactive" as const;
+  await databasePool.query("UPDATE users SET password = $2 WHERE id = $1", [row.id, await hashPassword(password)]);
+  return "ok" as const;
 }
 
 export async function createStaffLaunchTicket(tenantId: string, externalUserId: string, userId: number, clientId: string | null = null) {

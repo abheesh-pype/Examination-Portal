@@ -10,6 +10,8 @@ import { POST as tokenPost } from "@/app/api/integrations/oauth/token/route";
 import { POST as studentsPost } from "@/app/api/integrations/v1/students/route";
 import { POST as launchTicketsPost } from "@/app/api/integrations/v1/launch-tickets/route";
 import { GET as rolesGet } from "@/app/api/integrations/v1/roles/route";
+import { POST as userLoginPost } from "@/app/api/users/login/route";
+import { POST as staffPasswordsPost } from "@/app/api/integrations/v1/staff-passwords/route";
 import { POST as staffRevocationsPost } from "@/app/api/integrations/v1/staff-revocations/route";
 import { POST as staffLaunchTicketsPost } from "@/app/api/integrations/v1/staff-launch-tickets/route";
 import { PUT as assessmentsPut } from "@/app/api/integrations/v1/assessments/route";
@@ -578,6 +580,26 @@ describe("POST /api/integrations/v1/staff-launch-tickets", () => {
     expect((await staffLaunchTicketsPost(apiRequest("POST", "/api/integrations/v1/staff-launch-tickets", { token, body: { ...body, role: "Evaluator" } }).request)).status).toBe(200);
     const row = await databasePool.query("SELECT role, status FROM users WHERE external_user_id = 'ums-user:46'");
     expect(row.rows[0]).toEqual({ role: "Evaluator", status: true });
+  });
+
+  it("lets UMS-provisioned staff set a password and sign in on the portal's own login page", async () => {
+    const token = await getToken();
+    const post = (body: unknown) => staffPasswordsPost(apiRequest("POST", "/api/integrations/v1/staff-passwords", { token, body }).request);
+    const person = { ...staff, external_user_id: "ums-user:47", email: "login@example.edu", role: "Evaluator" };
+    expect((await post({ tenant_id: TENANT, external_user_id: "ums-user:47", password: "long-enough-1" })).status).toBe(404);
+    await staffLaunchTicketsPost(apiRequest("POST", "/api/integrations/v1/staff-launch-tickets", { token, body: person }).request);
+    expect((await post({ tenant_id: TENANT, external_user_id: "ums-user:47", password: "short" })).status).toBe(400);
+    expect((await post({ tenant_id: TENANT, external_user_id: "ums-user:47", password: "long-enough-1" })).status).toBe(200);
+
+    const login = (password: string) => userLoginPost(new Request(`${ORIGIN}/api/users/login`, {
+      method: "POST", headers: { "content-type": "application/json", origin: ORIGIN }, body: JSON.stringify({ email: "login@example.edu", password }),
+    }));
+    expect((await login("wrong-password")).status).toBe(401);
+    expect((await login("long-enough-1")).status).toBe(200);
+
+    // Revoked access blocks the portal login too.
+    await staffRevocationsPost(apiRequest("POST", "/api/integrations/v1/staff-revocations", { token, body: { tenant_id: TENANT, external_user_id: "ums-user:47" } }).request);
+    expect((await login("long-enough-1")).status).toBe(401);
   });
 
   it("upgrades an account that still has the former restricted role", async () => {

@@ -28,6 +28,7 @@ const integrationRouteScopes: Record<string, string> = {
   "POST /api/integrations/v1/staff-launch-tickets": "staff:launch",
   "GET /api/integrations/v1/roles": "staff:launch",
   "POST /api/integrations/v1/staff-revocations": "staff:launch",
+  "POST /api/integrations/v1/staff-passwords": "staff:launch",
   "PUT /api/integrations/v1/assessments": "assessments:write",
   "GET /api/integrations/v1/results": "results:read",
 };

@@ -103,6 +103,10 @@ Scopes: **`staff:launch`** (staff sign-in) and **`assessments:write`** (publish 
   a portal user with the **"UMS Administrator"** role (full administrator access) and signs them in. Used for UMS Academic Admins and Organization Admins/Super Admins.
   It never adopts an existing portal account: if the email already belongs to someone else, it answers `409`. A deactivated account answers `403`.
   Accounts created earlier with the former restricted role "UMS Academic Staff" are upgraded on their next sign-in; a role set by a portal administrator is otherwise kept.
+* `POST /api/integrations/v1/staff-passwords` `{ tenant_id, external_user_id, password }` (scope `staff:launch`) sets the password of a provisioned staff account, so the person can also use the
+  portal's own login page (username = their institution email). `404 not_provisioned` if they have no account yet; `403` if it is deactivated.
+* `POST /api/integrations/v1/staff-revocations` `{ tenant_id, external_user_id }` deactivates the account and ends its sessions (this also blocks the portal login). A later sign-in authorised by the institution system reactivates it.
+* `GET /api/integrations/v1/roles?tenant_id=` lists the assignable roles; the sign-in request may carry `role`.
 * Invigilators and evaluators are not provisioned by UMS: they sign in to the portal directly with their own portal credentials.
 * `PUT /api/integrations/v1/assessments` `{ tenant_id, external_assessment_id, name, examination, start_date, end_date, total_time, status }` creates/updates the assessment
   shell (idempotent on tenant + external id) and records the mapping used by student provisioning, so assignments no longer depend on name matching. Questions and sections are

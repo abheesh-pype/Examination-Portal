@@ -110,7 +110,25 @@ export async function provisionStudentInTransaction(client: PoolClient, student:
   const emailField = await getEmailFieldName(client, fields);
   if (student.email) fields[emailField] = student.email;
   else delete fields[emailField];
-  const data = JSON.stringify({ ...(existing?.candidate_data ?? {}), category: student.category, sub_category: student.subCategory, fields });
+  if (student.fields) {
+    // Only the portal's own active form fields are stored. Candidate ID, name and email stay managed above.
+    const definitions = (await client.query(
+      `SELECT name FROM "Candidate Information" WHERE record_type = 'field' AND status = TRUE`,
+    )).rows as { name: string }[];
+    for (const { name } of definitions) {
+      if (isCandidateIdFieldName(name) || name === nameField || name === emailField || !(name in student.fields)) continue;
+      const value = student.fields[name].trim();
+      if (value) fields[name] = value;
+      else delete fields[name];
+    }
+  }
+  const chosen = student.preserveCategory ? existing?.candidate_data : undefined;
+  const data = JSON.stringify({
+    ...(existing?.candidate_data ?? {}),
+    category: chosen?.category || student.category,
+    sub_category: chosen?.category ? chosen.sub_category ?? "" : student.subCategory,
+    fields,
+  });
 
   if (existing) {
     await client.query(
@@ -161,6 +179,52 @@ export async function provisionStudentInTransaction(client: PoolClient, student:
        last_idempotency_key = EXCLUDED.last_idempotency_key, last_result = EXCLUDED.last_result, updated_at = NOW()`,
     [student.tenantId, student.externalStudentId, rowId, student.email, idempotencyKey ?? null, JSON.stringify(result)]);
   return result;
+}
+
+/** The Add Candidate form as the portal defines it, plus what is already stored for this student, if anything. */
+export async function loadCandidateForm(tenantId: string, externalStudentId: string) {
+  await ensureIntegrationTables();
+  const client = await databasePool.connect();
+  try {
+    const definitions = (await client.query(
+      `SELECT name, column_type, is_required, min_value, max_value, options FROM "Candidate Information"
+       WHERE record_type = 'field' AND status = TRUE ORDER BY date DESC, id DESC`,
+    )).rows as { name: string; column_type: string; is_required: boolean; min_value: unknown; max_value: unknown; options: unknown }[];
+    const categories = await hasTable(client, "candidate_category")
+      ? (await client.query("SELECT candidate_category FROM candidate_category WHERE status = TRUE ORDER BY candidate_category")).rows.map((row) => String(row.candidate_category))
+      : [];
+    const subCategories = await hasTable(client, "candidate_sub_category")
+      ? (await client.query("SELECT candidate_sub_category, category FROM candidate_sub_category WHERE status = TRUE ORDER BY candidate_sub_category")).rows
+        .map((row) => ({ name: String(row.candidate_sub_category), category: String(row.category) }))
+      : [];
+    const row = externalStudentId ? (await client.query(
+      `SELECT candidate_data FROM "Candidate Information" WHERE record_type = 'candidate' AND tenant_id = $1 AND external_student_id = $2`,
+      [tenantId, externalStudentId])).rows[0] : undefined;
+    const stored = row?.candidate_data as { category?: string; sub_category?: string; fields?: Record<string, unknown> } | undefined;
+    const storedFields = stored?.fields ?? {};
+    return {
+      fields: definitions.filter((field) => !isCandidateIdFieldName(field.name)).map((field) => ({
+        name: field.name,
+        type: field.column_type,
+        required: field.is_required,
+        min: field.min_value ?? null,
+        max: field.max_value ?? null,
+        options: Array.isArray(field.options)
+          ? field.options.filter((option): option is string => typeof option === "string")
+          : typeof field.options === "string" ? field.options.split(",").map((option) => option.trim()).filter(Boolean) : [],
+      })),
+      categories,
+      sub_categories: subCategories,
+      candidate: stored ? {
+        candidate_id: String(Object.entries(storedFields).find(([name]) => isCandidateIdFieldName(name))?.[1] ?? ""),
+        category: stored.category ?? "",
+        sub_category: stored.sub_category ?? "",
+        fields: Object.fromEntries(Object.entries(storedFields).filter(([name, value]) => !isCandidateIdFieldName(name) && typeof value === "string")),
+      } : null,
+    };
+  } finally {
+    client.release();
+  }
 }
 
 /** Admin override: map an external assessment id to a portal assessment and apply it to already-provisioned students. */
@@ -454,6 +518,41 @@ export async function isIntegrationStaffUser(userId: number) {
 
 // ---- assessments pushed from the institution system ----
 
+/** The active choices of the portal's assessment form, newest first as the portal lists them, and the stored assessment if there is one. */
+export async function loadAssessmentForm(tenantId: string, externalAssessmentId: string) {
+  await ensureIntegrationTables();
+  const exists = async (table: string) => Boolean((await databasePool.query("SELECT to_regclass($1) AS t", [table])).rows[0].t);
+  const active = async (table: string, select: string) => await exists(table)
+    ? (await databasePool.query(`SELECT ${select} FROM ${table} WHERE status = TRUE ORDER BY created_at DESC, id DESC`)).rows
+    : [];
+  const loadStored = async () => externalAssessmentId && await exists("assessment") ? (await databasePool.query(
+    `SELECT s.examination, s.name, s.start_date, s.end_date, s.total_time, s.last_login, s.pass_mark,
+            s.question_category, s.sub_category, s.topic, s.question_language, s.sections
+     FROM assessment s
+     LEFT JOIN integration_assessment_map m ON m.assessment_id = s.id AND m.tenant_id = $1 AND m.external_assessment_id = $2
+     WHERE m.assessment_id IS NOT NULL OR (s.tenant_id = $1 AND s.external_assessment_id = $2)
+     ORDER BY m.assessment_id IS NULL LIMIT 1`, [tenantId, externalAssessmentId])).rows[0] : undefined;
+  const [examinations, categories, subCategories, topics, languages, difficultyLevels, stored] = await Promise.all([
+    active(`"Assessment_Type"`, "assessment_name"),
+    active("question_category", "q_category"),
+    active("question_sub_category", "q_s_category"),
+    active("question_topics", "topic"),
+    active(`"Language"`, "q_language"),
+    active(`"Difficulty_level"`, `"Difficulty_level" AS level`),
+    loadStored(),
+  ]);
+  return {
+    examinations: examinations.map((row) => String(row.assessment_name)),
+    question_categories: categories.map((row) => String(row.q_category)),
+    sub_categories: subCategories.map((row) => String(row.q_s_category)),
+    topics: topics.map((row) => String(row.topic)),
+    languages: languages.map((row) => String(row.q_language)),
+    difficulty_levels: difficultyLevels.map((row) => String(row.level)),
+    question_types: ["Objective", "Subjective"],
+    assessment: stored ?? null,
+  };
+}
+
 /** Idempotent upsert on (tenant_id, external_assessment_id). Only the shell is managed here; questions are authored in the portal. */
 export async function upsertIntegrationAssessment(a: AssessmentUpsert) {
   await ensureIntegrationTables();
@@ -476,15 +575,32 @@ export async function upsertIntegrationAssessment(a: AssessmentUpsert) {
     let created = false;
     if (mapped) {
       assessmentId = Number(mapped.assessment_id);
+      const keepForm = a.keepFormDetails === true
+        && Boolean((await client.query("SELECT 1 FROM assessment WHERE id = $1 AND jsonb_array_length(sections) > 0", [assessmentId])).rowCount);
       await client.query(
-        "UPDATE assessment SET examination = $2, name = $3, start_date = $4, end_date = $5, total_time = COALESCE($6, total_time), status = $7 WHERE id = $1",
-        [assessmentId, a.examination, a.name, a.startDate, a.endDate, a.totalTime, a.active]);
+        keepForm
+          ? "UPDATE assessment SET start_date = $2, end_date = $3, status = $4 WHERE id = $1"
+          : "UPDATE assessment SET examination = $2, name = $3, start_date = $4, end_date = $5, total_time = COALESCE($6, total_time), status = $7 WHERE id = $1",
+        keepForm
+          ? [assessmentId, a.startDate, a.endDate, a.active]
+          : [assessmentId, a.examination, a.name, a.startDate, a.endDate, a.totalTime, a.active]);
       await client.query("UPDATE assessment SET tenant_id = $2, external_assessment_id = $3 WHERE id = $1 AND external_assessment_id IS NULL", [assessmentId, a.tenantId, a.externalAssessmentId]);
     } else {
       created = true;
       assessmentId = Number((await client.query(
         "INSERT INTO assessment (examination, name, start_date, end_date, total_time, status, tenant_id, external_assessment_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id",
         [a.examination, a.name, a.startDate, a.endDate, a.totalTime, a.active, a.tenantId, a.externalAssessmentId])).rows[0].id);
+    }
+    if (a.details) {
+      await client.query("ALTER TABLE assessment ADD COLUMN IF NOT EXISTS pass_mark NUMERIC");
+      await client.query(
+        `UPDATE assessment SET total_time = $2, last_login = $3, question_category = $4, sub_category = $5, topic = $6,
+           question_language = $7, sections = $8::jsonb, pass_mark = $9 WHERE id = $1`,
+        [
+          assessmentId, a.totalTime, a.details.lastLogin ? Number(a.details.lastLogin) : null,
+          a.details.questionCategory, a.details.subCategory, a.details.topic || null, a.details.questionLanguage || null,
+          JSON.stringify(a.details.sections), a.details.passMark ? Number(a.details.passMark) : null,
+        ]);
     }
     await client.query(
       `INSERT INTO integration_assessment_map (tenant_id, external_assessment_id, assessment_id) VALUES ($1,$2,$3)

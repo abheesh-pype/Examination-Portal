@@ -14,6 +14,8 @@ import { POST as userLoginPost } from "@/app/api/users/login/route";
 import { POST as staffPasswordsPost } from "@/app/api/integrations/v1/staff-passwords/route";
 import { POST as staffRevocationsPost } from "@/app/api/integrations/v1/staff-revocations/route";
 import { POST as staffLaunchTicketsPost } from "@/app/api/integrations/v1/staff-launch-tickets/route";
+import { GET as candidateFormGet } from "@/app/api/integrations/v1/candidate-form/route";
+import { GET as assessmentFormGet } from "@/app/api/integrations/v1/assessment-form/route";
 import { PUT as assessmentsPut } from "@/app/api/integrations/v1/assessments/route";
 import { GET as resultsGet } from "@/app/api/integrations/v1/results/route";
 import { GET as launchGet } from "@/app/launch/route";
@@ -322,6 +324,84 @@ describe("PUT /api/integrations/v1/assessments", () => {
     const duration = await putAssessment(token, { external_assessment_id: "EXAM-BAD", total_time: 0 });
     expect(duration.status).toBe(400);
     expect((await duration.json()).error_description).toContain("total_time");
+  });
+});
+
+describe("assessment form from the institution system", () => {
+  const details = {
+    last_login: "15", question_category: "Maths", sub_category: "Algebra", topic: "", question_language: "English", pass_mark: "4",
+    sections: [{ name: "Part A", question_type: "Objective", question_count: "2", correct_mark: "5", wrong_mark: "-1", difficulty_level: "" }],
+  };
+
+  it("stores the whole form, returns it, and a later shell publish keeps what was chosen", async () => {
+    const token = await getToken("assessments:write");
+    const id = "EXAM-FORM-1";
+    const saved = await putAssessment(token, { external_assessment_id: id, examination: "examination 1", name: "Onam Special Exam", details });
+    expect(saved.status).toBe(201);
+
+    const form = await (await assessmentFormGet(apiRequest("GET", `/api/integrations/v1/assessment-form?external_assessment_id=${id}`, { token }).request)).json();
+    expect(form.question_types).toEqual(["Objective", "Subjective"]);
+    expect(form.assessment).toMatchObject({ examination: "examination 1", name: "Onam Special Exam", last_login: 15, question_category: "Maths", sub_category: "Algebra", question_language: "English", topic: null });
+    expect(Number(form.assessment.pass_mark)).toBe(4);
+    expect(form.assessment.sections).toEqual(details.sections);
+
+    const published = await putAssessment(token, {
+      external_assessment_id: id, examination: "Semester 3", name: "Other name", total_time: 30, start_date: "2026-12-01T09:00:00.000Z", end_date: "2026-12-01T10:00:00.000Z", keep_form_details: true,
+    });
+    expect(published.status).toBe(200);
+    const row = (await databasePool.query("SELECT examination, name, total_time, start_date, sections FROM assessment WHERE external_assessment_id = $1", [id])).rows[0];
+    expect(row).toMatchObject({ examination: "examination 1", name: "Onam Special Exam", total_time: 90 });
+    expect(new Date(row.start_date).toISOString()).toBe("2026-12-01T09:00:00.000Z");
+    expect(row.sections).toHaveLength(1);
+  });
+
+  it("applies the portal's own rules to the form", async () => {
+    const token = await getToken("assessments:write");
+    const id = "EXAM-FORM-BAD";
+    const noCategory = await putAssessment(token, { external_assessment_id: id, details: { ...details, question_category: "" } });
+    expect(noCategory.status).toBe(400);
+    const passMark = await putAssessment(token, { external_assessment_id: id, details: { ...details, pass_mark: "11" } });
+    expect(passMark.status).toBe(422);
+    expect((await passMark.json()).error_description).toContain("Pass Mark");
+    const wrongMark = await putAssessment(token, { external_assessment_id: id, details: { ...details, sections: [{ ...details.sections[0], wrong_mark: "1" }] } });
+    expect(wrongMark.status).toBe(422);
+    const stored = await databasePool.query("SELECT 1 FROM assessment WHERE external_assessment_id = $1", [id]);
+    expect(stored.rowCount).toBe(0);
+  });
+
+  it("requires the assessments:write scope to read the form", async () => {
+    const limited = await getToken("students:write");
+    expect((await assessmentFormGet(apiRequest("GET", "/api/integrations/v1/assessment-form", { token: limited }).request)).status).toBe(403);
+  });
+});
+
+describe("candidate form and form field values", () => {
+  it("returns the form, stores only known fields, and can keep a chosen category", async () => {
+    const token = await getToken();
+    await databasePool.query(`INSERT INTO "Candidate Information" (record_type, name, column_type, is_required, status) VALUES ('field', 'Date of Birth', 'Date', TRUE, TRUE)`);
+    const form = await candidateFormGet(apiRequest("GET", "/api/integrations/v1/candidate-form?external_student_id=ENR-FORM-1", { token }).request);
+    expect(form.status).toBe(200);
+    const empty = await form.json();
+    expect(empty.candidate).toBeNull();
+    expect(empty.fields.map((field: { name: string }) => field.name)).toContain("Date of Birth");
+
+    const base = { ...studentPayload(), external_student_id: "ENR-FORM-1", email: "form1@example.edu", assigned_assessments: [] };
+    const created = await postStudent(token, { ...base, category: "Chosen", sub_category: "Sub", fields: { "Date of Birth": "2001-02-03", "Not A Field": "x" } });
+    expect(created.status).toBe(201);
+    await postStudent(token, { ...base, category: "Program Name", sub_category: "", preserve_category: true });
+
+    const stored = await (await candidateFormGet(apiRequest("GET", "/api/integrations/v1/candidate-form?external_student_id=ENR-FORM-1", { token }).request)).json();
+    expect(stored.candidate.candidate_id).toMatch(/^\d{6}$/);
+    expect(stored.candidate.category).toBe("Chosen");
+    expect(stored.candidate.sub_category).toBe("Sub");
+    expect(stored.candidate.fields["Date of Birth"]).toBe("2001-02-03");
+    expect(stored.candidate.fields["Not A Field"]).toBeUndefined();
+    expect(stored.categories).toContain("Chosen");
+  });
+
+  it("needs the students:write scope", async () => {
+    const limited = await getToken("results:read");
+    expect((await candidateFormGet(apiRequest("GET", "/api/integrations/v1/candidate-form", { token: limited }).request)).status).toBe(403);
   });
 });
 

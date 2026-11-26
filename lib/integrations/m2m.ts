@@ -24,12 +24,14 @@ const MAX_BODY_BYTES = 1_000_000;
 
 const integrationRouteScopes: Record<string, string> = {
   "POST /api/integrations/v1/students": "students:write",
+  "GET /api/integrations/v1/candidate-form": "students:write",
   "POST /api/integrations/v1/launch-tickets": "students:launch",
   "POST /api/integrations/v1/staff-launch-tickets": "staff:launch",
   "GET /api/integrations/v1/roles": "staff:launch",
   "POST /api/integrations/v1/staff-revocations": "staff:launch",
   "POST /api/integrations/v1/staff-passwords": "staff:launch",
   "PUT /api/integrations/v1/assessments": "assessments:write",
+  "GET /api/integrations/v1/assessment-form": "assessments:write",
   "GET /api/integrations/v1/results": "results:read",
 };
 

@@ -8,6 +8,10 @@ export type ProvisionedStudent = {
   subCategory: string;
   status: "active" | "inactive";
   assessments: { externalAssessmentId: string; name: string; examination: string }[];
+  /** Values for the portal's own candidate form fields, entered by an admin on the institution side. */
+  fields?: Record<string, string>;
+  /** Keep the category an admin already chose (used by automatic re-syncs). */
+  preserveCategory?: boolean;
 };
 
 export class PayloadError extends Error {
@@ -55,6 +59,13 @@ export function validateStudentPayload(raw: unknown): ProvisionedStudent {
     return { externalAssessmentId, name: item.name.trim(), examination: String(item.examination ?? "").trim() };
   });
 
+  if (body.fields != null) {
+    const entries = typeof body.fields === "object" && !Array.isArray(body.fields) ? Object.entries(body.fields) : null;
+    if (!entries || entries.length > 50 || entries.some(([name, value]) => name.length > 200 || typeof value !== "string" || value.length > 500)) {
+      throw bad("fields must be an object of short text values");
+    }
+  }
+
   return {
     tenantId: body.tenant_id.trim(),
     externalStudentId: body.external_student_id.trim(),
@@ -65,6 +76,8 @@ export function validateStudentPayload(raw: unknown): ProvisionedStudent {
     status: body.status,
     // Inactive students keep no assignments regardless of what was sent.
     assessments: body.status === "active" ? assessments : [],
+    ...(body.fields ? { fields: body.fields as Record<string, string> } : {}),
+    ...(body.preserve_category === true ? { preserveCategory: true } : {}),
   };
 }
 
@@ -90,6 +103,15 @@ export function validateStaffPayload(raw: unknown): StaffPayload {
 export type AssessmentUpsert = {
   tenantId: string; externalAssessmentId: string; name: string; examination: string;
   startDate: string | null; endDate: string | null; totalTime: number | null; active: boolean;
+  /** Present when the whole assessment form was filled in on the institution side. */
+  details?: AssessmentDetails;
+  /** Publishing the shell keeps the examination, name and total time chosen in that form. */
+  keepFormDetails?: boolean;
+};
+
+export type AssessmentDetails = {
+  lastLogin: string; questionCategory: string; subCategory: string; topic: string; questionLanguage: string;
+  passMark: string; sections: Record<string, unknown>[];
 };
 
 const isoDate = (value: unknown, label: string) => {
@@ -121,5 +143,25 @@ export function validateAssessmentPayload(raw: unknown): AssessmentUpsert {
   return {
     tenantId: body.tenant_id.trim(), externalAssessmentId: String(id).trim(), name: body.name.trim(), examination: body.examination.trim(),
     startDate, endDate, totalTime, active: body.status !== "inactive",
+    ...(body.details != null ? { details: validateAssessmentDetails(body.details) } : {}),
+    ...(body.keep_form_details === true ? { keepFormDetails: true } : {}),
+  };
+}
+
+function validateAssessmentDetails(raw: Loose): AssessmentDetails {
+  const bad = (message: string) => new PayloadError(400, message);
+  if (typeof raw !== "object" || Array.isArray(raw)) throw bad("details must be a JSON object");
+  const value = (name: string) => {
+    const item = raw[name];
+    if (item == null) return "";
+    if (typeof item !== "string" && typeof item !== "number") throw bad(`details.${name} must be text`);
+    return String(item).trim();
+  };
+  if (!value("question_category")) throw bad("Question Category is required");
+  if (!value("sub_category")) throw bad("Sub-Category is required");
+  if (!Array.isArray(raw.sections) || raw.sections.length === 0 || raw.sections.length > 100) throw bad("details.sections must list 1 to 100 sections");
+  return {
+    lastLogin: value("last_login"), questionCategory: value("question_category"), subCategory: value("sub_category"),
+    topic: value("topic"), questionLanguage: value("question_language"), passMark: value("pass_mark"), sections: raw.sections,
   };
 }

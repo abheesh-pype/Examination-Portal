@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { validateAssessmentConfiguration } from "@/lib/assessment-validation";
+import { hasInvalidWrongMark, validateAssessmentConfiguration } from "@/lib/assessment-validation";
 import { handleIntegrationRequest, readJsonObject } from "@/lib/integration-handler";
 import { integrationError } from "@/lib/integrations/m2m";
 import { validateAssessmentPayload } from "@/lib/integrations/payload";
@@ -19,7 +19,15 @@ export async function PUT(request: Request) {
       start_date: assessment.startDate ?? undefined,
       end_date: assessment.endDate ?? undefined,
       total_time: assessment.totalTime === null ? undefined : String(assessment.totalTime),
+      ...(assessment.details ? {
+        last_login: assessment.details.lastLogin,
+        pass_mark: assessment.details.passMark,
+        sections: assessment.details.sections,
+      } : {}),
     });
+    if (assessment.details && hasInvalidWrongMark(assessment.details.sections)) {
+      configurationErrors.push("Wrong Mark must be zero or a negative number.");
+    }
     if (configurationErrors.length) return integrationError(422, "invalid_assessment", configurationErrors.join(" "));
 
     const { assessmentId, created } = await upsertIntegrationAssessment(assessment);
